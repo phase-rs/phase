@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, each player sacrifices a nontoken creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When CARDNAME enters, each player sacrifices a nontoken creature."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

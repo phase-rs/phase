@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "TargetMax": "MaxTgt",
-        "TargetMin": "0",
-        "ChangeType": "Land.Basic",
-        "ShuffleNonMandatory": "True",
-        "Optional": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

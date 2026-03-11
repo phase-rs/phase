@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "AddKeyword": "Hexproof",
-        "Description": "You have hexproof."
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

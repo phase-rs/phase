@@ -2,55 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X BG"
+            "cost": "X BG",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Search your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "ChangeType": "Creature.cmcLEX"
-      }
+      "description": "Search your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 for each creature card in your graveyard.",
-        "AddToughness": "Y",
-        "Affected": "Card.Self",
-        "AddPower": "Y"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each creature card in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "Y",
-          "SpellDescription": "Choose a color. Add one mana of that color for each charge counter on this artifact."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "Y",
-        "SpellDescription": "Choose a color. Add one mana of that color for each charge counter on this artifact."
-      }
+      "description": "Choose a color. Add one mana of that color for each charge counter on this artifact.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

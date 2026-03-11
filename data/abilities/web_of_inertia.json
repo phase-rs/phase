@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.Opponent",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCantAttack",
-        "TriggerDescription": "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

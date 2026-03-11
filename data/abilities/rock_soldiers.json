@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, destroy up to one target noncreature artifact.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this creature enters, destroy up to one target noncreature artifact.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

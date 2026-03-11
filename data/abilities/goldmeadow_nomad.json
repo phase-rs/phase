@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "W",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/CARDNAME/this card>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 1/1 green and white Kithkin creature token. Activate only as a sorcery.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "gw_1_1_kithkin",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "W"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME/this card>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Create a 1/1 green and white Kithkin creature token. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

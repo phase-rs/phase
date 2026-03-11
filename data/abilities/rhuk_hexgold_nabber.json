@@ -1,32 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigAttackAttach",
-        "TriggerDescription": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
-        "ValidCard": "Creature.equipped+YouCtrl+Other",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.equipped+YouCtrl+Other",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
-        "Origin": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigAttach"
+      "optional": true,
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

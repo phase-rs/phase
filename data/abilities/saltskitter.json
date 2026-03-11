@@ -1,20 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature enters, exile CARDNAME. Return CARDNAME to the battlefield under its owner's control at the beginning of the next end step.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.Other",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever another creature enters, exile CARDNAME. Return CARDNAME to the battlefield under its owner's control at the beginning of the next end step."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

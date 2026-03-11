@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an outlaw spell, copy that spell. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws. Copies of permanent spells become tokens.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Outlaw",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "Whenever you cast an outlaw spell, copy that spell. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws. Copies of permanent spells become tokens.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Outlaw"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

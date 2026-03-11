@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target creature an opponent controls gets -3/-3 until end of turn. If that creature is legendary, its controller loses 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -3/-3 until end of turn. If that creature is legendary, its controller loses 3 life.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When the Ring tempts you, return CARDNAME from your graveyard to your hand.",
       "mode": "RingTemptsYou",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "TriggerDescription": "When the Ring tempts you, return CARDNAME from your graveyard to your hand.",
-        "ValidPlayer": "You",
-        "Execute": "TrigReturn"
-      }
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

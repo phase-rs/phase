@@ -1,37 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever one or more Treefolk you control attack, add twice that much {G}.",
-        "ValidAttackers": "Treefolk.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMana"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Treefolk",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Treefolk you control have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Treefolk you control have vigilance.",
-        "Affected": "Treefolk.YouCtrl",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "You don't lose unspent green mana as steps and phases end.",
       "mode": {
         "Other": "UnspentMana"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "ManaType": "Green",
-        "Description": "You don't lose unspent green mana as steps and phases end."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more Treefolk you control attack, add twice that much {G}.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,40 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigScry",
-        "TriggerDescription": "Whenever another creature you control leaves the battlefield, if it didn't die, scry 1 and put a +1/+1 counter on NICKNAME.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Ante,Command,Exile,Hand,Library",
-        "ValidCard": "Creature.Other+YouCtrl"
-      }
-    },
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks, you may pay {U/B}. When you do, target attacking creature can't be blocked this turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigImmediateTrig"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self"
+      "description": "Whenever another creature you control leaves the battlefield, if it didn't die, scry 1 and put a +1/+1 counter on NICKNAME.",
+      "destination": "Ante,Command,Exile,Hand,Library",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    },
+    {
+      "description": "Whenever NICKNAME attacks, you may pay {U/B}. When you do, target attacking creature can't be blocked this turn.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

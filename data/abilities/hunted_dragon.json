@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target opponent creates three 2/2 white Knight creature tokens with first strike.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, target opponent creates three 2/2 white Knight creature tokens with first strike.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

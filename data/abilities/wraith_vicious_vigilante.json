@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Fear Gas — NICKNAME can't be blocked.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "Description": "Fear Gas — NICKNAME can't be blocked."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

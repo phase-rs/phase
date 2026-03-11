@@ -1,18 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 3+ Flying, haste",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE3_CHARGE",
-        "Description": "STATION 3+ Flying, haste",
-        "AddKeyword": "Flying & Haste",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

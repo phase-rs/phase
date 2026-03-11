@@ -2,75 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 2."
-      }
+      "description": "Scry 2.",
+      "effect": {
+        "count": 2,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn. (Look at the card after you scry or surveil.)",
       "mode": "Scry",
-      "params": {
-        "PresentDefined": "Remembered",
-        "Execute": "TrigPeek",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn. (Look at the card after you scry or surveil.)",
-        "ValidPlayer": "You",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Card"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn. (Look at the card after you scry or surveil.)",
       "mode": "Surveil",
-      "params": {
-        "Execute": "TrigPeek",
-        "TriggerZones": "Battlefield",
-        "PresentDefined": "Remembered",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn. (Look at the card after you scry or surveil.)",
-        "IsPresent": "Card",
-        "ValidPlayer": "You",
-        "PresentCompare": "EQ0"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "Execute": "DBCleanup"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Execute": "DBCleanup",
-        "ValidPlayer": "Player",
-        "Static": "True"
-      }
+      "mode": "TurnBegin"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDraw",
-          "ReplacementEffects": "RepETB",
-          "SpellDescription": "Permanents enter tapped this turn.",
-          "AILogic": "BeginningOfOppTurn"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "ReplacementEffects": "RepETB",
-        "SpellDescription": "Permanents enter tapped this turn.",
-        "AILogic": "BeginningOfOppTurn"
-      }
+      "description": "Permanents enter tapped this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

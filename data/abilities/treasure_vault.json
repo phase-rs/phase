@@ -2,60 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "c_a_treasure_sac",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X X"
+            "cost": "X X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create X Treasure tokens.",
-        "TokenAmount": "X"
-      }
+      "description": "Create X Treasure tokens.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "c_a_treasure_sac",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

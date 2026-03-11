@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment,Creature"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or enchantment. Create a Wicked Role token attached to up to one target creature you control. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1. When this Aura is put into a graveyard, each opponent loses 1 life.)",
+      "effect": {
+        "target": {
+          "card_type": "Enchantment,Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or enchantment",
-        "SubAbility": "TrigToken",
-        "SpellDescription": "Destroy target creature or enchantment. Create a Wicked Role token attached to up to one target creature you control. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1. When this Aura is put into a graveyard, each opponent loses 1 life.)"
-      }
+      "target_prompt": "Select target creature or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

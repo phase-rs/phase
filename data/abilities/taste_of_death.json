@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player sacrifices three creatures. You create three Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "Amount": "3",
-        "SacValid": "Creature",
-        "SpellDescription": "Each player sacrifices three creatures. You create three Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
-        "SubAbility": "DBToken"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

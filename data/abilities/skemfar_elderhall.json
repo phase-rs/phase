@@ -2,77 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -2,
-        "toughness": -2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouDontCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B B G"
+            "cost": "2 B B G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Up to one target creature you don't control gets -2/-2 until end of turn. Create two 1/1 green Elf Warrior creature tokens. Activate only as a sorcery.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": -2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "SubAbility": "DBToken",
-        "StackDescription": "{c:Targeted} gets -2/-2 until end of turn.",
-        "SpellDescription": "Up to one target creature you don't control gets -2/-2 until end of turn. Create two 1/1 green Elf Warrior creature tokens. Activate only as a sorcery.",
-        "IsCurse": "True",
-        "TargetMin": "0",
-        "TgtPrompt": "Select up to one target creature you don't control",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select up to one target creature you don't control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped.",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

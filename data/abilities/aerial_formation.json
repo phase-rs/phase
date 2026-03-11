@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Flying",
-        "SpellDescription": "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
-        "TargetMin": "0",
-        "TargetMax": "MaxTargets"
-      }
+      "description": "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,57 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SorcerySpeed": "True",
-              "Mode": "Transform",
-              "Defined": "Self",
-              "AILogic": "Always",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "3 RP"
+            "cost": "3 RP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "Mode": "Transform",
-            "Defined": "Self",
-            "AILogic": "Always",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature transforms into CARDNAME, exile the top card of your library. Until the end of your next turn, you may play that card.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "When this creature transforms into CARDNAME, exile the top card of your library. Until the end of your next turn, you may play that card.",
-            "Execute": "TrigExile",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

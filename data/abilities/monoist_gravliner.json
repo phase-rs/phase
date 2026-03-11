@@ -1,29 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Stationed",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidCrew": "Creature",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever a creature stations this Spacecraft, that creature perpetually gains deathtouch and lifelink.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 6+ Flying, deathtouch, lifelink",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE6_CHARGE",
-        "Description": "STATION 6+ Flying, deathtouch, lifelink",
-        "AddKeyword": "Flying & Deathtouch & Lifelink",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature stations this Spacecraft, that creature perpetually gains deathtouch and lifelink.",
+      "mode": "Stationed",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,65 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U U"
+            "cost": "U U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target creature to its owner's hand."
-      }
+      "description": "Return target creature to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G G"
+            "cost": "G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures you control get +2/+2 until end of turn.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Creatures you control get +2/+2 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 2,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

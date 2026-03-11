@@ -1,33 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME enters, you may search your library for a Mount or Vehicle card, reveal it, put it into your hand, then shuffle.",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
+      "description": "If one or more +1/+1 counters would be put on a creature or Vehicle you control, that many plus one +1/+1 counters are put on it instead.",
+      "event": {
+        "Other": "AddCounter"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "AddCounter"
-      },
-      "params": {
-        "ValidCounterType": "P1P1",
-        "ActiveZones": "Battlefield",
-        "Description": "If one or more +1/+1 counters would be put on a creature or Vehicle you control, that many plus one +1/+1 counters are put on it instead.",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield,Vehicle.YouCtrl+inZoneBattlefield",
-        "ReplaceWith": "AddOneMoreCounters"
+      "description": "When NICKNAME enters, you may search your library for a Mount or Vehicle card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

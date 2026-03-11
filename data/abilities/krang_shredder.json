@@ -1,39 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card.",
-        "Execute": "TrigDigUntil",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "TrigDigUntil",
-        "TriggerDescription": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Disappear — At the beginning of your end step, if a permanent left the battlefield under your control this turn, you may cast a card exiled with CARDNAME without paying its mana cost.",
       "mode": "Phase",
-      "params": {
-        "Revolt": "True",
-        "ValidPlayer": "You",
-        "Execute": "TrigPlay",
-        "TriggerDescription": "Disappear — At the beginning of your end step, if a permanent left the battlefield under your control this turn, you may cast a card exiled with CARDNAME without paying its mana cost.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

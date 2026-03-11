@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell unless its controller pays {3}. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Destination": "Exile",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target creature or planeswalker spell",
-        "UnlessCost": "3",
-        "SpellDescription": "Counter target spell unless its controller pays {3}. If that spell is countered this way, exile it instead of putting it into its owner's graveyard."
-      }
+      "target_prompt": "Select target creature or planeswalker spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

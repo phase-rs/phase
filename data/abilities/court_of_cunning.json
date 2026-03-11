@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you become the monarch.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigMonarch",
-        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, any number of target players each mill two cards. If you're the monarch, each of those players mills ten cards instead. (To mill a card, a player puts the top card of their library into their graveyard.)",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigMill",
-        "TriggerDescription": "At the beginning of your upkeep, any number of target players each mill two cards. If you're the monarch, each of those players mills ten cards instead. (To mill a card, a player puts the top card of their library into their graveyard.)",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

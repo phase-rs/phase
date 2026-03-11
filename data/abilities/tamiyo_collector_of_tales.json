@@ -2,82 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "NameCard",
-        "params": {
-          "Planeswalker": "True",
-          "ValidCards": "Card.nonLand",
-          "StackDescription": "SpellDescription",
-          "Defined": "You",
-          "SubAbility": "DBDig",
-          "SpellDescription": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ValidCards": "Card.nonLand",
-        "StackDescription": "SpellDescription",
-        "Defined": "You",
-        "SubAbility": "DBDig",
-        "SpellDescription": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard."
-      }
+      "description": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard.",
+      "effect": {
+        "description": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard.",
+        "name": "NameCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
+      "description": "Return target card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target card from your graveyard to your hand.",
-        "Planeswalker": "True",
-        "TgtPrompt": "Choose target card in your graveyard"
-      }
+      "target_prompt": "Choose target card in your graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
       "mode": {
         "Other": "CantDiscard"
-      },
-      "params": {
-        "Description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
-        "ForCost": "False",
-        "ValidPlayer": "You",
-        "ValidCause": "SpellAbility.OppCtrl"
       }
     },
     {
+      "description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
       "mode": {
         "Other": "CantSacrifice"
-      },
-      "params": {
-        "ValidCause": "SpellAbility.OppCtrl",
-        "Secondary": "True",
-        "Description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
-        "ValidCard": "Card.YouCtrl",
-        "ForCost": "False"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

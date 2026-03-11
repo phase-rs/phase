@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has infect.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Infect",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has infect."
-      }
+      "modifications": [
+        {
+          "keyword": "Infect",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

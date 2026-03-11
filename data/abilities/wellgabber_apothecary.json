@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target tapped Merfolk or Kithkin creature",
-          "ValidTgts": "Creature.Merfolk+tapped,Creature.Kithkin+tapped",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "Prevent all damage that would be dealt to target tapped Merfolk or Kithkin creature this turn.",
-          "ReplacementEffects": "RPrevent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
+      "description": "Prevent all damage that would be dealt to target tapped Merfolk or Kithkin creature this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target tapped Merfolk or Kithkin creature",
-        "ValidTgts": "Creature.Merfolk+tapped,Creature.Kithkin+tapped",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "Prevent all damage that would be dealt to target tapped Merfolk or Kithkin creature this turn.",
-        "ReplacementEffects": "RPrevent"
-      }
+      "target_prompt": "Select target tapped Merfolk or Kithkin creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

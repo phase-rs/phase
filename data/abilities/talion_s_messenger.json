@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with one or more Faeries, draw a card, then discard a card. When you discard a card this way, put a +1/+1 counter on target Faerie you control.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever you attack with one or more Faeries, draw a card, then discard a card. When you discard a card this way, put a +1/+1 counter on target Faerie you control.",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Faerie.YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
-        "ValidCard": "Card.cmcGE5",
-        "Secondary": "True",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,26 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonCreature"
-        }
-      },
       "cost": null,
+      "description": "Counter target noncreature spell unless its controller pays {1} plus an additional {1} for each creature for your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "Y",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target noncreature spell",
-        "SpellDescription": "Counter target noncreature spell unless its controller pays {1} plus an additional {1} for each creature for your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)"
-      }
+      "target_prompt": "Select target noncreature spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

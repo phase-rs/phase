@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Prevent the next X damage that would be dealt to you this turn.",
-          "Amount": "X"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Prevent the next X damage that would be dealt to you this turn.",
-        "Amount": "X"
-      }
+      "description": "Prevent the next X damage that would be dealt to you this turn.",
+      "effect": {
+        "description": "Prevent the next X damage that would be dealt to you this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Filtered",
-          "filter": "Player.Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDrain",
-        "RememberSacrificed": "True",
-        "SpellDescription": "Target opponent sacrifices a green or white creature. If that player does, they lose 2 life.",
-        "SacValid": "Creature.White,Creature.Green",
-        "SacMessage": "Green or White Creature"
-      }
+      "description": "Target opponent sacrifices a green or white creature. If that player does, they lose 2 life.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

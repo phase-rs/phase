@@ -2,49 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Defined": "Targeted",
-          "SpellDescription": "Target player adds one mana of any color.",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Mill<1>"
+            "cost": "Mill<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Targeted",
-        "SpellDescription": "Target player adds one mana of any color.",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player adds one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT8",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are fewer than eight cards in your graveyard, CARDNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SVarCompare": "LT8",
-        "RemoveType": "Creature",
-        "CheckSVar": "X",
-        "Description": "As long as there are fewer than eight cards in your graveyard, CARDNAME isn't a creature."
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

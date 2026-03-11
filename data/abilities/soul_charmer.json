@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a creature, you gain 2 life unless that creature's controller pays {2}.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, you gain 2 life unless that creature's controller pays {2}.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "ValidTarget": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

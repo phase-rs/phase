@@ -1,39 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, target opponent creates a 1/1 black Rat creature token with deathtouch.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a Rat dies, put a +1/+1 counter on each Cat you control.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Rat",
-        "Execute": "TrigPutCounters"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Cat"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Cats you control have protection from Rats. (They can't be blocked, targeted, or dealt damage by Rats.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Cat+YouCtrl",
-        "AddKeyword": "Protection:Rat",
-        "Description": "Cats you control have protection from Rats. (They can't be blocked, targeted, or dealt damage by Rats.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Rat",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, target opponent creates a 1/1 black Rat creature token with deathtouch.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever a Rat dies, put a +1/+1 counter on each Cat you control.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Rat",
+        "type": "Typed"
+      }
+    }
+  ]
 }

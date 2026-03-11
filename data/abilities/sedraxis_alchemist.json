@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control a blue permanent, return target nonland permanent to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigBounce",
-        "Origin": "Any",
-        "IsPresent": "Permanent.Blue+YouCtrl",
-        "TriggerDescription": "When CARDNAME enters, if you control a blue permanent, return target nonland permanent to its owner's hand.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

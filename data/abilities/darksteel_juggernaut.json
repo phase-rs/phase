@@ -1,25 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to the number of artifacts you control.",
-        "SetPower": "X",
-        "SetToughness": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of artifacts you control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

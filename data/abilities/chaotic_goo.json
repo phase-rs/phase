@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may flip a coin. If you win the flip, put a +1/+1 counter on CARDNAME. If you lose the flip, remove a +1/+1 counter from CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigFlipACoin",
-        "TriggerDescription": "At the beginning of your upkeep, you may flip a coin. If you win the flip, put a +1/+1 counter on CARDNAME. If you lose the flip, remove a +1/+1 counter from CARDNAME.",
-        "OptionalDecider": "You",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

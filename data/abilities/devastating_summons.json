@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": {
+        "costs": [
+          {
+            "cost": "R",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create two X/X red Elemental creature tokens.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_x_x_elemental",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "R"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create two X/X red Elemental creature tokens.",
-        "TokenOwner": "You",
-        "TokenAmount": "2"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

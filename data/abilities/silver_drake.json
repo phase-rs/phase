@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, return a white or blue creature you control to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME enters, return a white or blue creature you control to its owner's hand.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

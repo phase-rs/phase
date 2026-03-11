@@ -2,24 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Gain control of each noncommander creature with mana value 3 or less.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AllValid": "Creature.!IsCommander+cmcLE3",
-        "SpellDescription": "Gain control of each noncommander creature with mana value 3 or less.",
-        "NewController": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

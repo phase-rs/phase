@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PutCardToLibFromGrave<3/-1/Card>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +3/+3 until end of turn. Activate only once each turn and only if there are seven or more cards in your graveyard.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PutCardToLibFromGrave<3/-1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +3/+3 until end of turn. Activate only once each turn and only if there are seven or more cards in your graveyard.",
-        "Defined": "Self",
-        "PrecostDesc": "Threshold —",
-        "Activation": "Threshold",
-        "ActivationLimit": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, each player draws a card. If you have the city's blessing, instead only you draw a card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, each player draws a card. If you have the city's blessing, instead only you draw a card.",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

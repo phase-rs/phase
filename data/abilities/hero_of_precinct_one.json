@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, create a 1/1 white Human creature token.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.MultiColor",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a multicolored spell, create a 1/1 white Human creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

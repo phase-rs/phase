@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever CARDNAME is dealt damage, exile target creature an opponent controls until CARDNAME leaves the battlefield.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, exile target creature an opponent controls until CARDNAME leaves the battlefield.",
-        "Execute": "TrigExile"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

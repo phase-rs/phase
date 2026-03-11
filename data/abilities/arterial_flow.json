@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each opponent discards two cards. If you control a Vampire, each opponent loses 2 life and you gain 2 life.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent discards two cards. If you control a Vampire, each opponent loses 2 life and you gain 2 life.",
-        "Mode": "TgtChoose",
-        "SubAbility": "DBLoseLife",
-        "Defined": "Player.Opponent"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

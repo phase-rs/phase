@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may discard a card. If you do, choose a creature. Whenever that creature deals combat damage to a player this turn, you draw two cards.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, you may discard a card. If you do, choose a creature. Whenever that creature deals combat damage to a player this turn, you draw two cards.",
-        "Execute": "ChooseCreature",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

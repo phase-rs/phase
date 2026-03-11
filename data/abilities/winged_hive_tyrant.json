@@ -1,17 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "HasCounters"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "The Will of the Hive Mind — Other creatures you control with counters on them have flying and haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "The Will of the Hive Mind — Other creatures you control with counters on them have flying and haste.",
-        "AddKeyword": "Flying & Haste",
-        "Affected": "Creature.YouCtrl+HasCounters+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

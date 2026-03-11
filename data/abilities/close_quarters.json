@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control becomes blocked, CARDNAME deals 1 damage to any target.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control becomes blocked, CARDNAME deals 1 damage to any target.",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

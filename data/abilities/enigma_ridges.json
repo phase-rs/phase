@@ -1,25 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, reveals them, puts them into their hand, then shuffles.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "Execute": "TrigRepeatEach",
-        "TriggerDescription": "When you planeswalk to CARDNAME, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, reveals them, puts them into their hand, then shuffles.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever chaos ensues, draw a card, then you may put a land card from your hand onto the battlefield.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, draw a card, then you may put a land card from your hand onto the battlefield.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

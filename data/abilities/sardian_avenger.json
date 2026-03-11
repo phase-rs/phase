@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the number of artifacts your opponents control.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the number of artifacts your opponents control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, CARDNAME deals 1 damage to that player.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Artifact.OppCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, CARDNAME deals 1 damage to that player."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

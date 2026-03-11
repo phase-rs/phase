@@ -2,41 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains deathtouch until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gains deathtouch until end of turn.",
-        "KW": "Deathtouch"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an enchantment you control is put into a graveyard from the battlefield, create a 1/1 black Rat creature token with \"This creature can't block.\"",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerDescription": "Whenever an enchantment you control is put into a graveyard from the battlefield, create a 1/1 black Rat creature token with \"This creature can't block.\"",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

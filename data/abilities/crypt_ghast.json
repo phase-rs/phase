@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you tap a Swamp for mana, add an additional {B}.",
       "mode": "TapsForMana",
-      "params": {
-        "TriggerDescription": "Whenever you tap a Swamp for mana, add an additional {B}.",
-        "TriggerZones": "Battlefield",
-        "Activator": "You",
-        "Execute": "TrigMana",
-        "ValidCard": "Swamp",
-        "Static": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Swamp",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

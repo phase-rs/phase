@@ -1,31 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Sacrificed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you sacrifice another creature, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.Other",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "The first nonlegendary artifact spell you cast each turn has casualty 2. (As you cast it, you may sacrifice a creature with power 2 or greater. When you do, copy it. A copy of an artifact spell becomes a token.)",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "EQ0",
-        "Affected": "Card.Artifact+nonLegendary+YouCtrl",
-        "AddKeyword": "Casualty:2",
-        "Description": "The first nonlegendary artifact spell you cast each turn has casualty 2. (As you cast it, you may sacrifice a creature with power 2 or greater. When you do, copy it. A copy of an artifact spell becomes a token.)",
-        "AffectedZone": "Stack",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Casualty:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you sacrifice another creature, put a +1/+1 counter on CARDNAME.",
+      "mode": "Sacrificed",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

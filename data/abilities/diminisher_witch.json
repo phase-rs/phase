@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was bargained, create a Cursed Role token attached to target creature an opponent controls. (If you control another Role on it, put that one into the graveyard. Enchanted creature is 1/1.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self+bargained",
-        "TriggerDescription": "When CARDNAME enters, if it was bargained, create a Cursed Role token attached to target creature an opponent controls. (If you control another Role on it, put that one into the graveyard. Enchanted creature is 1/1.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

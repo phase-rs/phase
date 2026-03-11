@@ -1,73 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, mill two cards, then draw two cards.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, mill two cards, then draw two cards."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Descend 8 — At the beginning of your upkeep, if there are eight or more permanent cards in your graveyard, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "CheckSVar": "X",
-            "SVarCompare": "GE8",
-            "Phase": "Upkeep",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "Descend 8 — At the beginning of your upkeep, if there are eight or more permanent cards in your graveyard, transform CARDNAME."
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "SpellDescription": "Add {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {U}."
-          }
+          "description": "Add {U}.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a permanent spell using mana produced by CARDNAME, up to one other target permanent you control becomes a copy of that spell until end of turn.",
           "mode": "SpellCast",
-          "params": {
-            "ValidSA": "Spell.ManaFromCard.StrictlySelf",
-            "ValidCard": "Permanent",
-            "Execute": "TrigCopy",
-            "ValidActivatingPlayer": "You",
-            "TriggerDescription": "Whenever you cast a permanent spell using mana produced by CARDNAME, up to one other target permanent you control becomes a copy of that spell until end of turn."
+          "valid_card": {
+            "card_type": "Permanent",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

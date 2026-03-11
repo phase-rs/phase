@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 W U",
+        "type": "Mana"
+      },
+      "description": "Create a 1/1 white Cat Bird creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_cat_bird_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 W U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 white Cat Bird creature token with flying.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 for each other creature you control with flying.",
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each other creature you control with flying.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

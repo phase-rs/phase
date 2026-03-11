@@ -1,29 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigAttach",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, attach it to target Pirate you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+1.",
-        "AddToughness": "1",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, attach it to target Pirate you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

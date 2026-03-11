@@ -1,74 +1,82 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "type": "Tap"
+          },
+          "description": "CARDNAME deals 2 damage to you.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 2
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Tap"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 2 damage to you.",
-            "SorcerySpeed": "True",
-            "Defined": "You",
-            "SubAbility": "DBExile"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you play a card exiled with CARDNAME, transform it.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "When you play a card exiled with CARDNAME, transform it.",
-            "ValidCard": "Card.ExiledWithSourceLKI",
-            "TriggerZones": "Battlefield",
-            "ValidActivatingPlayer": "You",
-            "Execute": "TrigTransform"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ExiledWithSourceLKI"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "description": "When you play a card exiled with CARDNAME, transform it.",
           "mode": "LandPlayed",
-          "params": {
-            "Secondary": "True",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Land.ExiledWithSourceLKI",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "When you play a card exiled with CARDNAME, transform it."
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Land",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ExiledWithSourceLKI"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBlock",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Description": "CARDNAME can't block."
-          }
+          "description": "CARDNAME can't block.",
+          "mode": "CantBlock"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

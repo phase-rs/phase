@@ -1,29 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks, you may sacrifice another creature. If you do, put a +1/+1 counter on this creature.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever this creature attacks, you may sacrifice another creature. If you do, put a +1/+1 counter on this creature.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another nontoken creature dies, draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever another nontoken creature dies, draw a card.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.!token+Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

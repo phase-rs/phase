@@ -2,70 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
-        "Amount": "2"
-      }
+      "description": "Surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Exile target creature.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target creature.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "You may put an artifact card from your hand or graveyard onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand,Graveyard",
         "destination": "Battlefield",
+        "origin": "Hand,Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SpellDescription": "You may put an artifact card from your hand or graveyard onto the battlefield.",
-        "StackDescription": "SpellDescription",
-        "Planeswalker": "True",
-        "ChangeType": "Artifact.YouOwn",
-        "ChangeNum": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

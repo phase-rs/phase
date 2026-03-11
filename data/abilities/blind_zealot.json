@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may sacrifice it. If you do, destroy target creature that player controls.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may sacrifice it. If you do, destroy target creature that player controls.",
-        "ValidTarget": "Player",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

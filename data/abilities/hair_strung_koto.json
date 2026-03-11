@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Creature>",
+        "type": "Mana"
+      },
+      "description": "Target player mills a card.",
       "effect": {
-        "type": "Mill",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "AtOppEOT",
-        "SpellDescription": "Target player mills a card."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

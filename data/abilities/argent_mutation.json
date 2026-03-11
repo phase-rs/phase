@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target permanent becomes an artifact in addition to its other types until end of turn. Draw a card.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Target permanent becomes an artifact in addition to its other types until end of turn. Draw a card."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

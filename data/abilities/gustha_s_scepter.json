@@ -2,85 +2,80 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card",
-        "ChangeNum": "1",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Exile a card from your hand face down. You may look at it for as long as it remains exiled.",
-        "ExileFaceDown": "True",
-        "RememberChanged": "True",
-        "Mandatory": "True"
-      }
+      "description": "Exile a card from your hand face down. You may look at it for as long as it remains exiled.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ForgetChanged": "True",
-        "SpellDescription": "Return a card you own exiled with CARDNAME to your hand.",
-        "Mandatory": "True",
-        "Hidden": "True",
-        "ChangeType": "Card.IsRemembered+YouOwn+ExiledWithSource"
-      }
+      "description": "Return a card you own exiled with CARDNAME to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Exile",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Static": "True",
-        "ValidCard": "Card.IsRemembered+ExiledWithSource",
-        "Execute": "DBForget",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
-        "Execute": "DBChangeZoneAll",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
       "mode": "ChangesController",
-      "params": {
-        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
-        "ValidCard": "Card.Self",
-        "Execute": "DBChangeZoneAll",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

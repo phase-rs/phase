@@ -2,34 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)",
       "effect": {
         "type": "Explore"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Aristocrat",
-        "SpellDescription": "CARDNAME explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

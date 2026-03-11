@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create two 1/1 green and blue Snake creature tokens.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create two 1/1 green and blue Snake creature tokens.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters, sacrifice it unless {U} was spent to cast it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, sacrifice it unless {U} was spent to cast it.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSac",
-        "ManaNotSpent": "U",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

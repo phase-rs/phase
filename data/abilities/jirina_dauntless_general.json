@@ -2,43 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Humans you control gain hexproof and indestructible until end of turn.",
-        "ValidCards": "Human.YouCtrl",
-        "KW": "Hexproof & Indestructible"
-      }
+      "description": "Humans you control gain hexproof and indestructible until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile target player's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME enters, exile target player's graveyard.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each opponent's upkeep, they lose 1 life and you put a -1/-1 counter on up to one target creature they control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of each opponent's upkeep, they lose 1 life and you put a -1/-1 counter on up to one target creature they control.",
-        "ValidPlayer": "Opponent"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

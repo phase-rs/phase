@@ -1,39 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this enchantment enters and at the beginning of your upkeep, you lose 1 life and create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this enchantment enters and at the beginning of your upkeep, you lose 1 life and create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLoseLife"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When this enchantment enters and at the beginning of your upkeep, you lose 1 life and create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "When this enchantment enters and at the beginning of your upkeep, you lose 1 life and create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
-        "Phase": "Upkeep",
-        "Execute": "TrigLoseLife",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you attack, put X +1/+1 counters on target attacking creature, where X is the number of permanents you've sacrificed this turn. If X is three or greater, that creature gains lifelink until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you attack, put X +1/+1 counters on target attacking creature, where X is the number of permanents you've sacrificed this turn. If X is three or greater, that creature gains lifelink until end of turn.",
-        "AttackingPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

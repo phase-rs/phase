@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Forest",
+        "type": "Typed"
+      },
+      "description": "All Forests are 1/1 creatures that are still lands.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature",
-        "Description": "All Forests are 1/1 creatures that are still lands.",
-        "SetPower": "1",
-        "Affected": "Forest",
-        "SetToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

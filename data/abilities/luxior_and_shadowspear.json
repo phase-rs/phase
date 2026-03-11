@@ -2,52 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "ValidCards": "Permanent.OppCtrl",
-          "StackDescription": "SpellDescription",
-          "RemoveKeywords": "Hexproof & Indestructible",
-          "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Permanent.OppCtrl",
-        "StackDescription": "SpellDescription",
-        "RemoveKeywords": "Hexproof & Indestructible",
-        "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
-      }
+      "description": "Permanents your opponents control lose hexproof and indestructible until end of turn.",
+      "effect": {
+        "description": "Permanents your opponents control lose hexproof and indestructible until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each counter on it, and has trample and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Equipped creature gets +1/+1 for each counter on it, and has trample and lifelink.",
-        "AddKeyword": "Trample & Lifelink",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
       "mode": "Continuous",
-      "params": {
-        "RemoveType": "Planeswalker",
-        "Affected": "Permanent.EquippedBy",
-        "Description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        },
+        {
+          "core_type": "Planeswalker",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,50 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 G"
+            "cost": "2 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control fights another target creature.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "TgtPrompt": "Select target creature you control",
-        "ReduceCost": "X",
-        "SpellDescription": "Target creature you control fights another target creature.",
-        "SubAbility": "DBFight"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidTarget": "Creature.YouCtrl",
-        "Description": "If a creature you control being dealt damage causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidMode": "DamageDoneOnce,DamageDone"
-      }
+      "description": "If a creature you control being dealt damage causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

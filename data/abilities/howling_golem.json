@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, each player draws a card.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, each player draws a card.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, each player draws a card.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, each player draws a card.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

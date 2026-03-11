@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Warrior enters under your team's control, target opponent loses 1 life and you gain 1 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigDrain",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self,Warrior.Other+YourTeamCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another Warrior enters under your team's control, target opponent loses 1 life and you gain 1 life."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Warrior.Other"
+          },
+          {
+            "type": "Other",
+            "value": "YourTeamCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

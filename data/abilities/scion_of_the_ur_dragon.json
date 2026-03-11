@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Search your library for a Dragon permanent card and put it into your graveyard. If you do, CARDNAME becomes a copy of that card until end of turn. Then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Graveyard",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Dragon",
-        "SubAbility": "ScionCopy",
-        "SpellDescription": "Search your library for a Dragon permanent card and put it into your graveyard. If you do, CARDNAME becomes a copy of that card until end of turn. Then shuffle.",
-        "Shuffle": "True",
-        "RememberChanged": "True",
-        "ChangeNum": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

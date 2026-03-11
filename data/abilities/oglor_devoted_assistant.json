@@ -1,30 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, look at the top two cards of your library, then put one of them into your graveyard.",
       "mode": "Phase",
-      "params": {
-        "Execute": "DBDig",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, look at the top two cards of your library, then put one of them into your graveyard.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.YouOwn",
-        "TriggerDescription": "Whenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"",
-        "Destination": "Graveyard",
-        "Execute": "TrigAnimate",
-        "Origin": "Library,Hand",
-        "TriggerZones": "Battlefield"
+      "origin": "Library,Hand",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

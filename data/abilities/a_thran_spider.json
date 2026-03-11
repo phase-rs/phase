@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": ""
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "7"
+        "cost": "7",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top four cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.",
-        "NoReveal": "True",
-        "ChangeNum": "1",
-        "RestRandomOrder": "True"
-      }
+      "description": "Look at the top four cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 4,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you and target opponent each create a tapped Powerstone token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you and target opponent each create a tapped Powerstone token.",
-        "Origin": "Any",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

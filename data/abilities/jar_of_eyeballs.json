@@ -2,51 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Hand"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<All/EYEBALL>"
+            "cost": "SubCounter<All/EYEBALL>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "DestinationZone2": "Library",
-        "SpellDescription": "Look at the top X cards of your library where X is the number of eyeball counters removed this way. Put one of them into your hand and the rest on the bottom of your library in any order.",
-        "LibraryPosition": "-1",
-        "ChangeNum": "1"
-      }
+      "description": "Look at the top X cards of your library where X is the number of eyeball counters removed this way. Put one of them into your hand and the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 1,
+        "destination": "Hand",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies, put two eyeball counters on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control dies, put two eyeball counters on CARDNAME.",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

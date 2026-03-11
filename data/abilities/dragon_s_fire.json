@@ -2,42 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to target creature or planeswalker. If you revealed a Dragon card or chose a Dragon as you cast this spell, CARDNAME deals damage equal to the power of that card or creature instead.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "Y"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "PowerAtLeast.4",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker. If you revealed a Dragon card or chose a Dragon as you cast this spell, CARDNAME deals damage equal to the power of that card or creature instead."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand or choose a Dragon you control.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Cost": "RevealOrChoose<1/Dragon>",
-        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand or choose a Dragon you control.",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

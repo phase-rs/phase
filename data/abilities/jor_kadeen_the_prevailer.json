@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Metalcraft — Creatures you control get +3/+0 as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Metalcraft",
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "3",
-        "Description": "Metalcraft — Creatures you control get +3/+0 as long as you control three or more artifacts."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Human"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each Human creature you control has \"{R}, {T}: This creature deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Damage",
-        "Description": "Each Human creature you control has \"{R}, {T}: This creature deals 1 damage to any target.\"",
-        "Affected": "Creature.Human+YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

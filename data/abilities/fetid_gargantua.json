@@ -2,38 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 B",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Adapt": "2"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on CARDNAME, you may draw two cards. If you do, lose 2 life.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, you may draw two cards. If you do, lose 2 life.",
-        "ValidCard": "Card.Self",
-        "CounterType": "P1P1",
-        "Execute": "TrigLoseLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

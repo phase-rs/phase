@@ -1,26 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "Enchanted creature can't attack or block.",
-        "ValidCard": "Creature.EnchantedBy"
       }
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"{2}, Sacrifice this creature: You gain 2 life.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has \"{2}, Sacrifice this creature: You gain 2 life.\"",
-        "Affected": "Creature.EnchantedBy",
-        "AddAbility": "ABGainLife"
-      }
+      "modifications": [
+        {
+          "ability": "ABGainLife",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

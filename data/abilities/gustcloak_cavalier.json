@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may tap target creature.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may tap target creature.",
-        "OptionalDecider": "You"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME becomes blocked, you may untap it and remove it from combat.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigUntap",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, you may untap it and remove it from combat."
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME. When you do, target creature you control can't be blocked this turn.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have shroud. (They can't be the targets of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "All creatures have shroud. (They can't be the targets of spells or abilities.)",
-        "AddKeyword": "Shroud",
-        "Affected": "Creature"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME. When you do, target creature you control can't be blocked this turn.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

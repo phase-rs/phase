@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, any number of target creatures each get +1/+1 and gain \"{T}: This creature fights another target creature.\"",
-        "TargetMin": "0",
-        "SubAbility": "DBAnimate",
-        "TargetMax": "MaxTargets"
-      }
+      "description": "Until end of turn, any number of target creatures each get +1/+1 and gain \"{T}: This creature fights another target creature.\"",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

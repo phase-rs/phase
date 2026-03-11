@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "TrigTapUnTap",
-        "AddTrigger": "AttackTrigger",
-        "Description": "Enchanted creature has \"Whenever this creature attacks, you may tap or untap target permanent.\"",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"Whenever this creature attacks, you may tap or untap target permanent.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

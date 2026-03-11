@@ -1,32 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "CounterAddedOnce",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigDealDamage",
-        "CounterType": "ENERGY",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you get one or more {E}, CARDNAME deals that much damage to any target."
-      }
+      "description": "Revolt — As long as a permanent you controlled left the battlefield this turn, if a source you control would deal noncombat damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent.OppCtrl,Opponent",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "Revolt": "True",
-        "Description": "Revolt — As long as a permanent you controlled left the battlefield this turn, if a source you control would deal noncombat damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DamageReplace",
-        "IsCombat": "False"
-      }
+      "description": "Whenever you get one or more {E}, CARDNAME deals that much damage to any target.",
+      "mode": "CounterAddedOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

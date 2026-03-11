@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player creates a 0/1 colorless Goblin Construct artifact creature token with \"This creature can't block\" and \"At the beginning of your upkeep, this creature deals 1 damage to you.\"",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player creates a 0/1 colorless Goblin Construct artifact creature token with \"This creature can't block\" and \"At the beginning of your upkeep, this creature deals 1 damage to you.\""
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

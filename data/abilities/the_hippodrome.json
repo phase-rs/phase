@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, you may destroy target creature if its power is 0 or less.",
-        "TriggerZones": "Command",
-        "OptionalDecider": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures get -5/-0.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "-5",
-        "Description": "All creatures get -5/-0.",
-        "EffectZone": "Command",
-        "Affected": "Creature"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -5
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, you may destroy target creature if its power is 0 or less.",
+      "mode": "ChaosEnsues",
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

@@ -2,41 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B G"
+            "cost": "2 B G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "CollectEvidence<X>"
+            "cost": "CollectEvidence<X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy up to one target artifact, up to one target creature, up to one target enchantment, and up to one target planeswalker.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "SubAbility": "DBCreature",
-        "TgtPrompt": "Select up to one target artifact",
-        "SpellDescription": "Destroy up to one target artifact, up to one target creature, up to one target enchantment, and up to one target planeswalker.",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select up to one target artifact"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, target creature an opponent controls with power less than or equal to the number of Warriors and Equipment you control can't block this turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, target creature an opponent controls with power less than or equal to the number of Warriors and Equipment you control can't block this turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

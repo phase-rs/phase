@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 1/1 blue Thopter artifact creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_1_1_a_thopter_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 blue Thopter artifact creature token with flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

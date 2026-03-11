@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 for each creature card in your graveyard.",
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each creature card in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

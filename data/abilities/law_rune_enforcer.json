@@ -2,35 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcGE2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Tap target creature with mana value 2 or greater.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature with mana value 2 or greater.",
-        "TgtPrompt": "Select target creature with mana value 2 or greater"
-      }
+      "target_prompt": "Select target creature with mana value 2 or greater"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, put the top two cards of that player's library onto the battlefield face down under your control. They're 2/2 Cyberman artifact creatures.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDig",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put the top two cards of that player's library onto the battlefield face down under your control. They're 2/2 Cyberman artifact creatures.",
-        "ValidTarget": "Player",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

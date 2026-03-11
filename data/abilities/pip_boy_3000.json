@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "Execute": "TrigChoose",
-        "TriggerDescription": "Whenever equipped creature attacks, ABILITY"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "COIN",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a coin counter on CARDNAME. When you do, you may cast target instant or sorcery card with mana value equal to the number of coin counters on CARDNAME from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead. Activate only as a sorcery.",
-        "Defined": "Self",
-        "SorcerySpeed": "True",
-        "RememberAmount": "True",
-        "SubAbility": "DBImmediateTrig"
-      }
+      "description": "Put a coin counter on CARDNAME. When you do, you may cast target instant or sorcery card with mana value equal to the number of coin counters on CARDNAME from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "COIN",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

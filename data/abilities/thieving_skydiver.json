@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked, gain control of target artifact with mana value X or less. If that artifact is an Equipment, attach it to CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, gain control of target artifact with mana value X or less. If that artifact is an Equipment, attach it to CARDNAME.",
-        "ValidCard": "Card.Self+kicked",
-        "Destination": "Battlefield",
-        "Execute": "TrigKicker"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

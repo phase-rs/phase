@@ -1,41 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap"
-      }
-    },
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When enchanted creature becomes the target of a spell or ability, sacrifice CARDNAME."
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidCard": "Creature.EnchantedBy"
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "When enchanted creature becomes the target of a spell or ability, sacrifice CARDNAME.",
+      "mode": "BecomesTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

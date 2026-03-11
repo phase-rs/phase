@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.nonBasic+YouDontCtrl"
-        }
-      },
       "cost": null,
+      "description": "Destroy target nonbasic land you don't control and target nonbasic land of an opponent's choice you don't control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Destroy",
-        "RememberTargets": "True",
-        "TgtPrompt": "Select target nonbasic land you don't control",
-        "SpellDescription": "Destroy target nonbasic land you don't control and target nonbasic land of an opponent's choice you don't control.",
-        "IsCurse": "True",
-        "SubAbility": "DBDestroyLand"
-      }
+      "target_prompt": "Select target nonbasic land you don't control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

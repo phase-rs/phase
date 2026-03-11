@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "CARDNAME deals 1 damage to each creature without flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.withoutFlying",
-        "ValidDescription": "each creature and without flying.",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature without flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

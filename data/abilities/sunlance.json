@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to target nonwhite creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonWhite"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 3 damage to target nonwhite creature.",
-        "TgtPrompt": "Select target nonwhite creature"
-      }
+      "target_prompt": "Select target nonwhite creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

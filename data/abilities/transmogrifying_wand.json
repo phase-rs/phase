@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/CHARGE>"
+            "cost": "SubCounter<1/CHARGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AITgts": "BetterThanEvalRating.130",
-        "SorcerySpeed": "True",
-        "SubAbility": "OxToken",
-        "SpellDescription": "Destroy target creature."
-      }
+      "description": "Destroy target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

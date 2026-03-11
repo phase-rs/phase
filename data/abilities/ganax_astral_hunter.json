@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Dragon you control enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigTreasure",
-        "TriggerDescription": "Whenever CARDNAME or another Dragon you control enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Dragon.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Dragon.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever equipped creature attacks, destroy target creature an opponent controls."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +7/+7.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "7",
-        "AddToughness": "7",
-        "Description": "Equipped creature gets +7/+7.",
-        "AddSVar": "AE",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 7
+        },
+        {
+          "type": "AddToughness",
+          "value": 7
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature attacks, destroy target creature an opponent controls.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,47 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 W U"
+            "cost": "1 W U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card.Legendary/legendary>"
+            "cost": "Discard<1/Card.Legendary/legendary>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw two cards."
-      }
+      "description": "Draw two cards.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may return another target creature you control to its owner's hand. If you do, you gain life equal to that creature's mana value.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you may return another target creature you control to its owner's hand. If you do, you gain life equal to that creature's mana value.",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigRemoveCounter",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may remove a counter from target permanent."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "Description": "CARDNAME can't be blocked."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may remove a counter from target permanent.",
+      "mode": "DamageDone",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

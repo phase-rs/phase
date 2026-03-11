@@ -1,80 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME.",
-              "Defined": "Self",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "tapXType<1/Creature>"
+                "cost": "tapXType<1/Creature>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME.",
-            "Defined": "Self",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "2",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gets +1/+0 until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 1,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "2"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "MustAttack",
-          "params": {
-            "Description": "CARDNAME attacks each combat if able.",
-            "ValidCreature": "Card.Self"
-          }
+          "description": "CARDNAME attacks each combat if able.",
+          "mode": "MustAttack"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage divided as you choose among one, two, or three target attacking or blocking creatures.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking,Creature.blocking"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking or blocking creature to distribute damage to",
-        "TargetMax": "3",
-        "DividedAsYouChoose": "3",
-        "SpellDescription": "CARDNAME deals 3 damage divided as you choose among one, two, or three target attacking or blocking creatures.",
-        "TargetMin": "1"
-      }
+      "target_prompt": "Select target attacking or blocking creature to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+toughnessLE2"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature you control with toughness 2 or less gets +1/+1 and gains flying until end of turn. When CARDNAME leaves the battlefield this turn, sacrifice that creature. When the creature leaves the battlefield this turn, sacrifice CARDNAME.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control with toughness 2 or less",
-        "SubAbility": "PhantasmalMountEffect",
-        "SpellDescription": "Target creature you control with toughness 2 or less gets +1/+1 and gains flying until end of turn. When CARDNAME leaves the battlefield this turn, sacrifice that creature. When the creature leaves the battlefield this turn, sacrifice CARDNAME.",
-        "KW": "Flying"
-      }
+      "target_prompt": "Select target creature you control with toughness 2 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

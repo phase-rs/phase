@@ -2,38 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLE2"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature with mana value 2 or less. If this spell's additional cost was paid, you gain 2 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with mana value 2 or less",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Destroy target creature with mana value 2 or less. If this spell's additional cost was paid, you gain 2 life."
-      }
+      "target_prompt": "Select target creature with mana value 2 or less"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may blight 1. (You may put a -1/-1 counter on a creature you control.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Cost": "Blight<1>",
-        "ValidCard": "Card.Self",
-        "Description": "As an additional cost to cast this spell, you may blight 1. (You may put a -1/-1 counter on a creature you control.)",
-        "EffectZone": "All",
-        "ValidSA": "Spell"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

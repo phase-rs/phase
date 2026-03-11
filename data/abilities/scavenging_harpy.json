@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile target card from an opponent's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME enters, exile target card from an opponent's graveyard.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,26 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Card.Self",
-        "Description": "CARDNAME attacks each combat if able."
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     },
     {
+      "description": "CARDNAME can't be blocked by Walls.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.Wall",
-        "Description": "CARDNAME can't be blocked by Walls.",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

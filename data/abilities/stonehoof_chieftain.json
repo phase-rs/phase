@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature you control attacks, it gains trample and indestructible until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever another creature you control attacks, it gains trample and indestructible until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with mountainwalk can be blocked as though they didn't have mountainwalk.",
       "mode": {
         "Other": "IgnoreLandWalk"
-      },
-      "params": {
-        "Description": "Creatures with mountainwalk can be blocked as though they didn't have mountainwalk.",
-        "ValidKeyword": "Landwalk:Mountain"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Mark of Chaos Ascendant — During your turn, spells you cast from your hand with mana value X or less have cascade, where X is the total amount of life your opponents have lost this turn.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Affected": "Card.YouCtrl+YouOwn+wasCastFromHand+cmcLEX",
-        "AffectedZone": "Stack",
-        "Description": "Mark of Chaos Ascendant — During your turn, spells you cast from your hand with mana value X or less have cascade, where X is the total amount of life your opponents have lost this turn.",
-        "AddKeyword": "Cascade"
-      }
+      "modifications": [
+        {
+          "keyword": "Cascade",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

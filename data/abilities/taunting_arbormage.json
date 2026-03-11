@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked, all creatures able to block target creature this turn do so.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+kicked",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, all creatures able to block target creature this turn do so.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigKicker"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

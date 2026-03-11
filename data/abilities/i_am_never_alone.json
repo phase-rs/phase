@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, create a token that's a copy of your commander, except it's not legendary.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you set this scheme in motion, create a token that's a copy of your commander, except it's not legendary.",
-        "TriggerZones": "Command",
-        "Execute": "DBCopyCommander"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

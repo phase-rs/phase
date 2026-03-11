@@ -1,70 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 2,
-            "toughness": 2,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Target creature you control gets +2/+2 until end of turn. Then it fights up to one target creature you don't control.",
+          "effect": {
+            "power": 2,
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 2,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature you control gets +2/+2 until end of turn. Then it fights up to one target creature you don't control.",
-            "TgtPrompt": "Select target creature you control",
-            "SubAbility": "DBFight"
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G}."
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "DBTap",
-            "ReplacementResult": "Updated",
-            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

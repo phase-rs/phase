@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, it deals 3 damage to target player or planeswalker.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to target player or planeswalker.",
-        "Execute": "TrigDealDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-4 2/2",
       "mode": "Continuous",
-      "params": {
-        "Description": "LEVEL 1-4 2/2",
-        "SetToughness": "2",
-        "Affected": "Card.Self",
-        "SetPower": "2",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 5+ 5/5 First strike",
       "mode": "Continuous",
-      "params": {
-        "Description": "LEVEL 5+ 5/5 First strike",
-        "Affected": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE5_LEVEL",
-        "SetPower": "5",
-        "SetToughness": "5",
-        "AddKeyword": "First Strike"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

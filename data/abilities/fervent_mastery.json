@@ -2,46 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Branch",
-        "params": {
-          "FalseSubAbility": "DBSearch",
-          "SpellDescription": "If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards. Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.",
-          "BranchConditionSVar": "AltCostPaid",
-          "BranchConditionSVarCompare": "GE1",
-          "TrueSubAbility": "OppDiscard",
-          "StackDescription": "Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "FalseSubAbility": "DBSearch",
-        "SpellDescription": "If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards. Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.",
-        "BranchConditionSVar": "AltCostPaid",
-        "BranchConditionSVarCompare": "GE1",
-        "TrueSubAbility": "OppDiscard",
-        "StackDescription": "Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random."
-      }
+      "description": "If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards. Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.",
+      "effect": {
+        "description": "If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards. Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.",
+        "name": "Branch",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {2}{R}{R} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "StackDescription": "If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards. Search your library for up to three cards, put them into your hand, shuffle, then discard three cards at random.",
-        "Cost": "2 R R",
-        "ValidSA": "Spell.Self",
-        "Description": "You may pay {2}{R}{R} rather than pay this spell's mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "DBDig",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may reveal that many cards from the top of your library. Put an artifact card revealed this way into your hand and the rest into your graveyard.",
-        "OptionalDecider": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Description": "CARDNAME gets +X/+0, where X is the highest mana value among artifacts you control.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +X/+0, where X is the highest mana value among artifacts you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may reveal that many cards from the top of your library. Put an artifact card revealed this way into your hand and the rest into your graveyard.",
+      "mode": "DamageDone",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

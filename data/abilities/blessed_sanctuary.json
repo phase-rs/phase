@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever a nontoken creature you control enters, create a 2/2 white Unicorn creature token.",
-        "ValidCard": "Creature.YouCtrl+!token",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "Prevent all noncombat damage that would be dealt to you and creatures you control.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "IsCombat": "False",
-        "Description": "Prevent all noncombat damage that would be dealt to you and creatures you control.",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "You,Creature.YouCtrl"
+      "description": "Whenever a nontoken creature you control enters, create a 2/2 white Unicorn creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

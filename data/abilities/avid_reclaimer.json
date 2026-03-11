@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G U",
-        "params": {
-          "SubAbility": "DBGainLife",
-          "SpellDescription": "Add {G} or {U}. If you control a Nissa planeswalker, you gain 2 life."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Add {G} or {U}. If you control a Nissa planeswalker, you gain 2 life."
-      }
+      "description": "Add {G} or {U}. If you control a Nissa planeswalker, you gain 2 life.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

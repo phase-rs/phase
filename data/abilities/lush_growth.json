@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land is a Mountain, Forest, and Plains.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "RemoveLandTypes": "True",
-        "AddType": "Mountain & Forest & Plains",
-        "Description": "Enchanted land is a Mountain, Forest, and Plains."
-      }
+      "modifications": [
+        {
+          "core_type": "Mountain & Forest & Plains",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

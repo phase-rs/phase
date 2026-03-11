@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": null,
+      "description": "Counter up to four target spells and/or abilities. Untap up to four target artifacts and/or creatures.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select up to four target spells and/or abilities",
-        "TargetMax": "4",
-        "SubAbility": "DBUntap",
-        "SpellDescription": "Counter up to four target spells and/or abilities. Untap up to four target artifacts and/or creatures.",
-        "TargetMin": "0",
-        "TargetType": "Spell,Activated,Triggered"
-      }
+      "target_prompt": "Select up to four target spells and/or abilities"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

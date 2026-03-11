@@ -1,38 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "DBPutCounter",
-        "TriggerDescription": "Whenever chaos ensues, put X +1/+1 counters on target creature, where X is that creature's mana value."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Description": "Green spells cost {1} less to cast.",
-        "ValidCard": "Card.Green",
-        "Amount": "1",
-        "EffectZone": "Command"
-      }
+      "description": "Green spells cost {1} less to cast.",
+      "effect_zone": "Command",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Red spells cost {1} less to cast.",
-        "Amount": "1",
-        "ValidCard": "Card.Red",
-        "EffectZone": "Command",
-        "Type": "Spell"
-      }
+      "description": "Red spells cost {1} less to cast.",
+      "effect_zone": "Command",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, put X +1/+1 counters on target creature, where X is that creature's mana value.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

@@ -2,46 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 and has vigilance and \"{3}, {T}: Tap target creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +1/+1 and has vigilance and \"{3}, {T}: Tap target creature.\"",
-        "AddPower": "1",
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Vigilance",
-        "AddAbility": "ABTap"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "ABTap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

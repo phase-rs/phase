@@ -2,78 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 3,
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.nonCreature+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Put three +1/+1 counters on up to one target noncreature land you control. Untap it. It becomes a 0/0 Elemental creature with vigilance and haste that's still a land.",
+      "effect": {
+        "count": 3,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature land you control",
-        "SpellDescription": "Put three +1/+1 counters on up to one target noncreature land you control. Untap it. It becomes a 0/0 Elemental creature with vigilance and haste that's still a land.",
-        "Planeswalker": "True",
-        "SubAbility": "DBUntap",
-        "TargetMax": "1",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select target noncreature land you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You get an emblem with \"Lands you control have indestructible.\" Search your library for any number of Forest cards, put them onto the battlefield tapped, then shuffle.",
-          "Planeswalker": "True",
-          "Image": "emblem_nissa_who_shakes_the_world",
-          "Duration": "Permanent",
-          "StaticAbilities": "STIndestructible",
-          "Name": "Emblem — Nissa, Who Shakes the World",
-          "SubAbility": "DBChangeZone",
-          "Stackable": "False",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You get an emblem with \"Lands you control have indestructible.\" Search your library for any number of Forest cards, put them onto the battlefield tapped, then shuffle.",
-        "Planeswalker": "True",
-        "Image": "emblem_nissa_who_shakes_the_world",
-        "Duration": "Permanent",
-        "StaticAbilities": "STIndestructible",
-        "Name": "Emblem — Nissa, Who Shakes the World",
-        "SubAbility": "DBChangeZone",
-        "Stackable": "False",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"Lands you control have indestructible.\" Search your library for any number of Forest cards, put them onto the battlefield tapped, then shuffle.",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you tap a Forest for mana, add an additional {G}.",
       "mode": "TapsForMana",
-      "params": {
-        "Execute": "TrigMana",
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "TriggerDescription": "Whenever you tap a Forest for mana, add an additional {G}.",
-        "ValidCard": "Forest",
-        "Activator": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Forest",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

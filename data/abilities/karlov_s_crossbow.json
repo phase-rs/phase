@@ -2,53 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "Permanent",
-          "Forecast": "True",
-          "SpellDescription": "For the remainder of the game, spells you cast named Karlov's Crossbow cost {1} less to cast. (Activate only during your upkeep and only once each turn.)",
-          "StaticAbilities": "ReduceCost",
-          "Name": "Emblem — Karlov's Crossbow",
-          "AILogic": "Always"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "0"
+            "cost": "0",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Reveal<1/CARDNAME>"
+            "cost": "Reveal<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "Forecast": "True",
-        "SpellDescription": "For the remainder of the game, spells you cast named Karlov's Crossbow cost {1} less to cast. (Activate only during your upkeep and only once each turn.)",
-        "StaticAbilities": "ReduceCost",
-        "Name": "Emblem — Karlov's Crossbow",
-        "AILogic": "Always"
-      }
+      "description": "For the remainder of the game, spells you cast named Karlov's Crossbow cost {1} less to cast. (Activate only during your upkeep and only once each turn.)",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, sacrifice CARDNAME and destroy target creature an opponent controls.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature attacks, sacrifice CARDNAME and destroy target creature an opponent controls.",
-        "Execute": "TrigSac"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

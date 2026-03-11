@@ -2,82 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Exile up to two target cards from a single graveyard. You gain 2 life if at least one creature card was exiled this way.",
       "effect": {
-        "type": "ChangeZone",
+        "destination": "Exile",
         "origin": "Graveyard",
-        "destination": "Exile",
         "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SpellDescription": "Exile up to two target cards from a single graveyard. You gain 2 life if at least one creature card was exiled this way.",
-        "TargetMax": "2",
-        "TargetMin": "0",
-        "TgtPrompt": "Select target card from a graveyard",
-        "Planeswalker": "True",
-        "SubAbility": "DBGainLife",
-        "TargetsWithSameController": "True"
-      }
+      "target_prompt": "Select target card from a graveyard"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Exile target nonland permanent with mana value 1 or less.",
       "effect": {
-        "type": "ChangeZone",
+        "destination": "Exile",
         "origin": "Battlefield",
-        "destination": "Exile",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+cmcLE1"
-        }
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Choose target nonland permanent with mana value 1 or less",
-        "SpellDescription": "Exile target nonland permanent with mana value 1 or less."
-      }
+      "target_prompt": "Choose target nonland permanent with mana value 1 or less"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -5,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals damage to target player equal to the number of cards that player owns in exile and you gain that much life.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -5
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBYouGainLife",
-        "Ultimate": "True",
-        "RememberTargets": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals damage to target player equal to the number of cards that player owns in exile and you gain that much life."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

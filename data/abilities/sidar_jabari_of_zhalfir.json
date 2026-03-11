@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Eminence — Whenever you attack with one or more Knights, if CARDNAME is in the command zone or on the battlefield, draw a card, then discard a card.",
       "mode": "AttackersDeclared",
-      "params": {
-        "PresentZone": "Command",
-        "IsPresent": "Card.StrictlySelf",
-        "Execute": "TrigLoot",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Eminence — Whenever you attack with one or more Knights, if CARDNAME is in the command zone or on the battlefield, draw a card, then discard a card.",
-        "ValidAttackers": "Card.Knight+YouCtrl"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Eminence — Whenever you attack with one or more Knights, if CARDNAME is in the command zone or on the battlefield, draw a card, then discard a card.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigLoot",
-        "TriggerDescription": "Eminence — Whenever you attack with one or more Knights, if CARDNAME is in the command zone or on the battlefield, draw a card, then discard a card.",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.StrictlySelf",
-        "PresentZone": "Battlefield",
-        "ValidAttackers": "Card.Knight+YouCtrl",
-        "Secondary": "True"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, return target Knight creature card from your graveyard to the battlefield.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, return target Knight creature card from your graveyard to the battlefield.",
-        "Execute": "TrigReturn",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

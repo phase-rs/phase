@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If a source you control with an odd mana value would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Permanent,Player",
-        "ReplaceWith": "DmgTwice",
-        "ValidSource": "Card.YouCtrl+cmcM21"
-      }
+      "description": "If a source you control with an odd mana value would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

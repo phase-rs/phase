@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discard a card, ABILITY",
       "mode": "Discarded",
-      "params": {
-        "TriggerDescription": "Whenever you discard a card, ABILITY",
-        "ValidCard": "Card.YouOwn",
-        "Execute": "TrigCharm",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,73 +2,80 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.Snow"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target snow land is no longer snow.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Snow"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RemoveTypes": "Snow",
-        "Duration": "Permanent",
-        "TgtPrompt": "Select target snow land",
-        "SpellDescription": "Target snow land is no longer snow."
-      }
+      "target_prompt": "Select target snow land"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Snow"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.nonSnow+Basic"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target nonsnow basic land becomes snow.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Basic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Snow"
         ]
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target nonsnow basic land becomes snow.",
-        "TgtPrompt": "Select target nonsnow basic land",
-        "Duration": "Permanent"
-      }
+      "target_prompt": "Select target nonsnow basic land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

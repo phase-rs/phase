@@ -1,17 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Artifact"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other artifact creatures you control have flying, trample, indestructible, and haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying & Trample & Indestructible & Haste",
-        "Affected": "Creature.Artifact+Other+YouCtrl",
-        "Description": "Other artifact creatures you control have flying, trample, indestructible, and haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,51 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 2,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 G"
+            "cost": "2 G",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Put two +1/+1 counters on NICKNAME. He gains trample until end of turn.",
-        "SubAbility": "DBPump"
-      }
+      "description": "Put two +1/+1 counters on NICKNAME. He gains trample until end of turn.",
+      "effect": {
+        "count": 2,
+        "counter_type": "P1P1",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create a Food token for each legendary creature you control. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigFood",
-        "TriggerDescription": "When NICKNAME enters, create a Food token for each legendary creature you control. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

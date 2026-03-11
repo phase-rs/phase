@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if you gained 4 or more life this turn, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "YouLifeGained",
-        "SVarCompare": "GE4",
-        "Execute": "TrigInvestigate",
-        "TriggerDescription": "At the beginning of each end step, if you gained 4 or more life this turn, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

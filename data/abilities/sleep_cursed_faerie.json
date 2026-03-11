@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 U",
+        "type": "Mana"
+      },
+      "description": "Untap CARDNAME.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped with three stun counters on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped with three stun counters on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

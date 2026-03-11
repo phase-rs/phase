@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Spell,Permanent",
-        "Description": "All instances of color words in the text of spells and permanents are changed to the chosen color word.",
-        "ChangeColorWordsTo": "ChosenColor",
-        "AffectedZone": "Stack,Battlefield"
-      }
+      "affected": {
+        "card_type": "Spell,Permanent",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack,Battlefield",
+      "description": "All instances of color words in the text of spells and permanents are changed to the chosen color word.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

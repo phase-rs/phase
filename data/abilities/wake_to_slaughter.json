@@ -2,32 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Choose up to two target creature cards in your graveyard. An opponent chooses one of them. Return that card to your hand. Return the other to the battlefield under your control. It gains haste. Exile it at the beginning of the next end step.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChoosePlayer",
-        "SpellDescription": "Choose up to two target creature cards in your graveyard. An opponent chooses one of them. Return that card to your hand. Return the other to the battlefield under your control. It gains haste. Exile it at the beginning of the next end step.",
-        "TgtPrompt": "Choose up to two target creature cards in your graveyard",
-        "TgtZone": "Graveyard",
-        "StackDescription": "SpellDescription",
-        "RememberObjects": "Targeted",
-        "TargetMin": "0",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Choose up to two target creature cards in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,42 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Add one mana of any color. Draw a card."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Add one mana of any color. Draw a card."
-      }
+      "description": "Add one mana of any color. Draw a card.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, if you control another creature with power 4 or greater, put a +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, if you control another creature with power 4 or greater, put a +1/+1 counter on CARDNAME.",
-        "IsPresent": "Creature.Other+YouCtrl+powerGE4",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withFlying"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature with flying and all Equipment attached to that creature.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "ChompEquip",
-        "TgtPrompt": "Select target creature with flying",
-        "SpellDescription": "Destroy target creature with flying and all Equipment attached to that creature.",
-        "StackDescription": "REP target creature with flying_{c:Targeted}",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

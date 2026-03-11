@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "RetDiscardedThisTurn",
-        "SpellDescription": "Return to your hand all cards in your graveyard that you cycled or discarded this turn.",
-        "ChangeType": "Card.YouOwn+DiscardedThisTurn"
-      }
+      "description": "Return to your hand all cards in your graveyard that you cycled or discarded this turn.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

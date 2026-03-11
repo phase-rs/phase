@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "Menace,Trample,Reach,Haste",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Dinosaur"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Put your choice of a menace, trample, reach, or haste counter on target Dinosaur. Activate only as a sorcery."
-      }
+      "description": "Put your choice of a menace, trample, reach, or haste counter on target Dinosaur. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "Menace,Trample,Reach,Haste",
+        "target": {
+          "card_type": "Dinosaur",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LE10",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as an opponent has 10 or less life, CARDNAME gets +2/+1 and has intimidate. (It can't be blocked except by artifact creatures and/or creatures that share a color with it.)",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "CheckSVar": "X",
-        "Description": "As long as an opponent has 10 or less life, CARDNAME gets +2/+1 and has intimidate. (It can't be blocked except by artifact creatures and/or creatures that share a color with it.)",
-        "SVarCompare": "LE10",
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "AddKeyword": "Intimidate"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Intimidate",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

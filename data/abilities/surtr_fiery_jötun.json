@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a historic spell, CARDNAME deals 3 damage to any target. (Artifacts, legendaries, and Sagas are historic.)",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDmg",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Historic",
-        "TriggerDescription": "Whenever you cast a historic spell, CARDNAME deals 3 damage to any target. (Artifacts, legendaries, and Sagas are historic.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

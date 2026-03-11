@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Beast or Bird creature spell, you may copy it, except it's an artifact in addition to its other types. (The copy becomes a token.)",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Creature.Bird,Creature.Beast",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "Whenever you cast a Beast or Bird creature spell, you may copy it, except it's an artifact in addition to its other types. (The copy becomes a token.)"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Bird,Creature.Beast"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

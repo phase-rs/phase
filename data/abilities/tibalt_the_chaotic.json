@@ -2,94 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
-          "RandomCopied": "True",
-          "WithoutManaCost": "True",
-          "AnySupportedCard": "Names:Ignorant Bliss,Crack the Earth,Blazing Volley",
-          "CopyCard": "True",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
-        "RandomCopied": "True",
-        "WithoutManaCost": "True",
-        "AnySupportedCard": "Names:Ignorant Bliss,Crack the Earth,Blazing Volley",
-        "CopyCard": "True",
-        "Planeswalker": "True"
-      }
+      "description": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
+      "effect": {
+        "description": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Planeswalker": "True",
-          "RandomCopied": "True",
-          "WithoutManaCost": "True",
-          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
-          "CopyCard": "True",
-          "AnySupportedCard": "Names:Seething Song,Dance with Devils,Flamebreak"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RandomCopied": "True",
-        "WithoutManaCost": "True",
-        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
-        "CopyCard": "True",
-        "AnySupportedCard": "Names:Seething Song,Dance with Devils,Flamebreak"
-      }
+      "description": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
+      "effect": {
+        "description": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
-          "RandomCopied": "True",
-          "CopyCard": "True",
-          "Ultimate": "True",
-          "AnySupportedCard": "Names:Hellion Eruption,Insurrection,Warp World",
-          "Planeswalker": "True",
-          "WithoutManaCost": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
-        "RandomCopied": "True",
-        "CopyCard": "True",
-        "Ultimate": "True",
-        "AnySupportedCard": "Names:Hellion Eruption,Insurrection,Warp World",
-        "Planeswalker": "True",
-        "WithoutManaCost": "True"
-      }
+      "description": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
+      "effect": {
+        "description": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

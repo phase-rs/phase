@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RearrangeTopOfLibrary",
-        "params": {
-          "SubAbility": "DBRearrange",
-          "SpellDescription": "Look at the top three cards of target opponent's library, then put them back in any order. That player looks at the top three cards of your library, then puts them back in any order.",
-          "ValidTgts": "Opponent",
-          "NumCards": "3"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBRearrange",
-        "SpellDescription": "Look at the top three cards of target opponent's library, then put them back in any order. That player looks at the top three cards of your library, then puts them back in any order.",
-        "ValidTgts": "Opponent",
-        "NumCards": "3"
-      }
+      "description": "Look at the top three cards of target opponent's library, then put them back in any order. That player looks at the top three cards of your library, then puts them back in any order.",
+      "effect": {
+        "description": "Look at the top three cards of target opponent's library, then put them back in any order. That player looks at the top three cards of your library, then puts them back in any order.",
+        "name": "RearrangeTopOfLibrary",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

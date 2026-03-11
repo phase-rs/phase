@@ -1,31 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Goblin.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever a Goblin you control enters, you may put a quest counter on CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME has five or more quest counters on it, creatures you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE5_QUEST",
-        "Affected": "Creature.YouCtrl",
-        "Description": "As long as CARDNAME has five or more quest counters on it, creatures you control get +2/+0.",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Goblin you control enters, you may put a quest counter on CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Goblin",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

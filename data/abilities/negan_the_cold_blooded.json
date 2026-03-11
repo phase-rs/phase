@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChoose",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When NICKNAME enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever an opponent sacrifices a creature, you create a Treasure token.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Creature.OppCtrl",
-        "TriggerDescription": "Whenever an opponent sacrifices a creature, you create a Treasure token.",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

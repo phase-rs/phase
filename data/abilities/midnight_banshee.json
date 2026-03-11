@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a -1/-1 counter on each nonblack creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounterAll",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, put a -1/-1 counter on each nonblack creature.",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

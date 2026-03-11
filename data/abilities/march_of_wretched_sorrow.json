@@ -2,54 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to target creature or planeswalker and you gain X life.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker",
-        "AnnounceTitle": "how many black cards to exile",
-        "SpellDescription": "CARDNAME deals X damage to target creature or planeswalker and you gain X life.",
-        "SubAbility": "DBGainLife",
-        "Announce": "Exiled"
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Cost": "ExileFromHand<Y/Card.Black/black cards>",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Description": "As an additional cost to cast this spell, you may exile any number of black cards from your hand. This spell costs {2} less to cast for each card exiled this way."
-      }
+      "description": "As an additional cost to cast this spell, you may exile any number of black cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {2} less to cast for each card exiled this way.",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Secondary": "True",
-        "Amount": "Z",
-        "Relative": "True"
-      }
+      "description": "This spell costs {2} less to cast for each card exiled this way.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

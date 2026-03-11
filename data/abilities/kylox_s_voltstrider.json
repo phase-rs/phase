@@ -2,42 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "CollectEvidence<6>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes an artifact creature until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "CollectEvidence<6>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME becomes an artifact creature until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may cast an instant or sorcery spell from among cards exiled with it. If that spell would be put into a graveyard, put it on the bottom of its owner's library instead.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, you may cast an instant or sorcery spell from among cards exiled with it. If that spell would be put into a graveyard, put it on the bottom of its owner's library instead.",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Execute": "TrigPlay"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

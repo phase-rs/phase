@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control an artifact. (It can't be blocked except by creatures with flying or reach.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "IsPresent": "Artifact.YouCtrl",
-        "Description": "CARDNAME has flying as long as you control an artifact. (It can't be blocked except by creatures with flying or reach.)",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

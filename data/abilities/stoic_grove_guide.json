@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1 BG",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/CARDNAME/this card>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 2/2 black and green Elf creature token. Activate only as a sorcery.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "bg_2_2_elf",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1 BG"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME/this card>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Create a 2/2 black and green Elf creature token. Activate only as a sorcery."
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

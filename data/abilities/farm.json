@@ -1,52 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.attacking,Creature.blocking"
-            }
-          },
           "cost": null,
+          "description": "Destroy target attacking or blocking creature.",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy target attacking or blocking creature.",
-            "TgtPrompt": "Select target attacking or blocking creature"
-          }
+          "target_prompt": "Select target attacking or blocking creature"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw two cards, then discard two cards.",
-            "SubAbility": "DBDiscard"
-          }
+          "description": "Draw two cards, then discard two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

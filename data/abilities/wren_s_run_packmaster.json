@@ -2,38 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 G",
+        "type": "Mana"
+      },
+      "description": "Create a 2/2 green Wolf creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_2_2_wolf",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 green Wolf creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Wolf"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Wolves you control have deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "Affected": "Permanent.Wolf+YouCtrl",
-        "Description": "Wolves you control have deathtouch."
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

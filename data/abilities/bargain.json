@@ -2,24 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
+      "description": "Target opponent draws a card. You gain 7 life.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "TgtPrompt": "Select target opponent to draw a card",
-        "ValidTgts": "Opponent",
-        "AILogic": "LifeLessThan.5",
-        "SpellDescription": "Target opponent draws a card. You gain 7 life."
-      }
+      "target_prompt": "Select target opponent to draw a card"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

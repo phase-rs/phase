@@ -2,43 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "If you control Equipment named Helm of Kaldra, Sword of Kaldra, and Shield of Kaldra, create Kaldra, a legendary 4/4 colorless Avatar creature token. Attach those Equipment to it.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "kaldra",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionSVarCompare": "EQ3",
-        "SubAbility": "DBAttachEach",
-        "AILogic": "Never",
-        "ConditionCheckSVar": "AllThree",
-        "SpellDescription": "If you control Equipment named Helm of Kaldra, Sword of Kaldra, and Shield of Kaldra, create Kaldra, a legendary 4/4 colorless Avatar creature token. Attach those Equipment to it.",
-        "RememberTokens": "True",
-        "StackDescription": "{p:You} creates Kaldra, a legendary 4/4 colorless Avatar creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has first strike, trample, and haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature has first strike, trample, and haste.",
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "First Strike & Trample & Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

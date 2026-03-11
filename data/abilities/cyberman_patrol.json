@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Artifact creatures you control have afflict 3. (Whenever a creature with afflict 3 becomes blocked, defending player loses 3 life.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Artifact creatures you control have afflict 3. (Whenever a creature with afflict 3 becomes blocked, defending player loses 3 life.)",
-        "Affected": "Creature.Artifact+YouCtrl",
-        "AddKeyword": "Afflict:3"
-      }
+      "modifications": [
+        {
+          "keyword": "Afflict:3",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control a black permanent, you may put a +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if you control a black permanent, you may put a +1/+1 counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Permanent.Black+YouCtrl",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, if you control a green permanent, you may put a +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "IsPresent": "Permanent.Green+YouCtrl",
-        "Phase": "Upkeep",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if you control a green permanent, you may put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

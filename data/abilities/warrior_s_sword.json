@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+2 and is a Warrior in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "AddType": "Warrior",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +3/+2 and is a Warrior in addition to its other types."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "core_type": "Warrior",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

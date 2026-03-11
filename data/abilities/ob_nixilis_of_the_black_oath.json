@@ -2,81 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Each opponent loses 1 life. You gain life equal to the life lost this way.",
-        "Defined": "Player.Opponent",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Each opponent loses 1 life. You gain life equal to the life lost this way.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 5/5 black Demon creature token with flying. You lose 2 life.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_5_5_demon_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 5/5 black Demon creature token with flying. You lose 2 life."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You get an emblem with \"{1}{B}, Sacrifice a creature: You gain X life and draw X cards, where X is the sacrificed creature's power.\"",
-          "Stackable": "False",
-          "Abilities": "ObGainLife",
-          "Ultimate": "True",
-          "Name": "Emblem — Ob Nixilis of the Black Oath",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "Image": "emblem_ob_nixilis_of_the_black_oath"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You get an emblem with \"{1}{B}, Sacrifice a creature: You gain X life and draw X cards, where X is the sacrificed creature's power.\"",
-        "Stackable": "False",
-        "Abilities": "ObGainLife",
-        "Ultimate": "True",
-        "Name": "Emblem — Ob Nixilis of the Black Oath",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "Image": "emblem_ob_nixilis_of_the_black_oath"
-      }
+      "description": "You get an emblem with \"{1}{B}, Sacrifice a creature: You gain X life and draw X cards, where X is the sacrificed creature's power.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

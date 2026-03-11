@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell. You may shuffle up to one target card from your graveyard into your library.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target spell. You may shuffle up to one target card from your graveyard into your library.",
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "SubAbility": "DBChangeZone"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

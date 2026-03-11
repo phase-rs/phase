@@ -1,29 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclaredOneTarget",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more Merfolk you control attack a player, draw a card.",
-        "ValidAttackers": "Creature.Merfolk+YouCtrl",
-        "AttackedTarget": "Player",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Merfolk",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Merfolk you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "Other Merfolk you control get +1/+1.",
-        "Affected": "Merfolk.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more Merfolk you control attack a player, draw a card.",
+      "mode": "AttackersDeclaredOneTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

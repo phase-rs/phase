@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 W",
+        "type": "Mana"
+      },
+      "description": "Create a 1/1 white Soldier creature token with lifelink.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_soldier_lifelink",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 white Soldier creature token with lifelink."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, you may pay {2}. If you do, draw a card.",
       "mode": "LifeGained",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you gain life, you may pay {2}. If you do, draw a card.",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

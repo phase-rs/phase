@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Historic spells you cast cost {1} less to cast. (Artifacts, legendaries, and Sagas are historic.)",
-        "ValidCard": "Card.Historic",
-        "Type": "Spell",
-        "Amount": "1",
-        "Activator": "You"
-      }
+      "description": "Historic spells you cast cost {1} less to cast. (Artifacts, legendaries, and Sagas are historic.)",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

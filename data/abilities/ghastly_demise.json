@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy target nonblack creature if its toughness is less than or equal to the number of cards in your graveyard.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ConditionCheckSVar": "Y",
-        "ConditionSVarCompare": "LEX",
-        "SpellDescription": "Destroy target nonblack creature if its toughness is less than or equal to the number of cards in your graveyard.",
-        "TgtPrompt": "Select target nonblack creature",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

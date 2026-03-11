@@ -1,19 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Praesidium Protectiva — When CARDNAME is put into your graveyard from the battlefield, exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self+YouOwn",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Praesidium Protectiva — When CARDNAME is put into your graveyard from the battlefield, exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
-        "Execute": "TrigExile"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

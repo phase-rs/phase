@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withFlying"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature with flying. CARDNAME deals 1 damage to each creature with flying your opponents control.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with flying",
-        "SubAbility": "DBDamageAll",
-        "SpellDescription": "Destroy target creature with flying. CARDNAME deals 1 damage to each creature with flying your opponents control."
-      }
+      "target_prompt": "Select target creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

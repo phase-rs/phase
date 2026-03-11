@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control with toughness 4 or greater dies, draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+toughnessGE4",
-        "TriggerDescription": "Whenever a creature you control with toughness 4 or greater dies, draw a card."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

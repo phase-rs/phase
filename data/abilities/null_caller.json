@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3 B",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/Creature>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a tapped 2/2 black Zombie creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_2_2_zombie",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3 B"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Creature>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenTapped": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a tapped 2/2 black Zombie creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

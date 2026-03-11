@@ -2,50 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Goad",
-        "params": {
-          "ValidTgts": "Creature",
-          "SpellDescription": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "SpellDescription": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
-      }
+      "description": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+      "effect": {
+        "description": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+        "name": "Goad",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a historic spell, create a Treasure token. This ability triggers only once each turn. (Legendaries, artifacts, and Sagas are historic.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Historic",
-        "Execute": "TrigToken",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a historic spell, create a Treasure token. This ability triggers only once each turn. (Legendaries, artifacts, and Sagas are historic.)",
-        "ActivationLimit": "1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

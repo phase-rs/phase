@@ -1,20 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another Frog, Rabbit, Raccoon, or Squirrel you control enters, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever another Frog, Rabbit, Raccoon, or Squirrel you control enters, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Battlefield",
-        "ValidCard": "Frog.Other+YouCtrl,Rabbit.Other+YouCtrl,Raccoon.Other+YouCtrl,Squirrel.Other+YouCtrl",
-        "Execute": "TrigPutCounter",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Frog",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Rabbit.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Raccoon.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Squirrel.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

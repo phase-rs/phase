@@ -2,33 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target spell."
-      }
+      "description": "Counter target spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, any player may pay 5 life. If a player does, counter CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, any player may pay 5 life. If a player does, counter CARDNAME.",
-        "Execute": "TrigCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

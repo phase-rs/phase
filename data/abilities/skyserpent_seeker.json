@@ -2,46 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "Tapped": "True",
-          "Exhaust": "True",
-          "RevealRandomOrder": "True",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal two land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
-          "ValidDescription": "land",
-          "Valid": "Land",
-          "RevealedLibraryPosition": "-1",
-          "Amount": "2",
-          "SubAbility": "DBPutCounter",
-          "RevealedDestination": "Library",
-          "FoundDestination": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4"
+        "cost": "4",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Tapped": "True",
-        "Exhaust": "True",
-        "RevealRandomOrder": "True",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal two land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
-        "ValidDescription": "land",
-        "Valid": "Land",
-        "RevealedLibraryPosition": "-1",
-        "Amount": "2",
-        "SubAbility": "DBPutCounter",
-        "RevealedDestination": "Library",
-        "FoundDestination": "Battlefield"
-      }
+      "description": "Reveal cards from the top of your library until you reveal two land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal two land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

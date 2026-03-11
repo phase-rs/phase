@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 B"
+            "cost": "3 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy target nonblack creature. It can't be regenerated. Its controller loses 2 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target nonblack creature. It can't be regenerated. Its controller loses 2 life.",
-        "SubAbility": "DBDrain",
-        "NoRegen": "True",
-        "TgtPrompt": "Select target nonblack creature"
-      }
+      "target_prompt": "Select target nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

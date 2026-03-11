@@ -2,24 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Blue+withFlying,Creature.Black+withFlying"
-        }
-      },
       "cost": null,
+      "description": "Destroy target blue or black creature with flying.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target blue or black creature with flying.",
-        "TgtPrompt": "Select target blue or black creature with flying"
-      }
+      "target_prompt": "Select target blue or black creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,25 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBSeek",
-        "ConditionPresent": "Card.Self+PromisedGift",
-        "SpellDescription": "Draw two cards. If the gift was promised, seek two nonland cards instead.",
-        "ConditionCompare": "EQ0",
-        "StackDescription": "{p:You} draws two cards.",
-        "ConditionZone": "Stack"
-      }
+      "description": "Draw two cards. If the gift was promised, seek two nonland cards instead.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

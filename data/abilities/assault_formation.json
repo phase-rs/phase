@@ -2,64 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "CanAttack",
-          "TgtPrompt": "Select target creature with defender",
-          "SpellDescription": "Target creature with defender can attack this turn as though it didn't have defender.",
-          "ValidTgts": "Creature.withDefender"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
+      "description": "Target creature with defender can attack this turn as though it didn't have defender.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "CanAttack",
-        "TgtPrompt": "Select target creature with defender",
-        "SpellDescription": "Target creature with defender can attack this turn as though it didn't have defender.",
-        "ValidTgts": "Creature.withDefender"
-      }
+      "target_prompt": "Select target creature with defender"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G"
+        "cost": "2 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control get +0/+1 until end of turn."
-      }
+      "description": "Creatures you control get +0/+1 until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

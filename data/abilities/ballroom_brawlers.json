@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, CARDNAME and up to one other target creature you control both gain your choice of first strike or lifelink until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, CARDNAME and up to one other target creature you control both gain your choice of first strike or lifelink until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSelectTargetCreature"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Drawn",
-      "params": {
-        "ValidCard": "Card.YouCtrl",
-        "TriggerDescription": "Whenever you draw your second card each turn, attach CARDNAME to target creature you control.",
-        "TriggerZones": "Battlefield",
-        "Number": "2",
-        "Execute": "TrigAttach"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+2.",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you draw your second card each turn, attach CARDNAME to target creature you control.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "When you control no snow lands, sacrifice CARDNAME.",
-        "IsPresent": "Land.Snow+YouCtrl",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless defending player controls a snow land.",
-        "ValidCard": "Card.Self",
-        "UnlessDefender": "controlsLand.Snow"
-      }
+      "description": "CARDNAME can't attack unless defending player controls a snow land.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you control no snow lands, sacrifice CARDNAME.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

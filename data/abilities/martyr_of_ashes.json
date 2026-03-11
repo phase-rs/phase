@@ -2,48 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2",
+            "type": "Mana"
+          },
+          {
+            "cost": "Reveal<X/Card.Red>",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals X damage to each creature without flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2"
-          },
-          {
-            "type": "Mana",
-            "cost": "Reveal<X/Card.Red>"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "each creature without flying",
-        "SpellDescription": "CARDNAME deals X damage to each creature without flying.",
-        "ValidCards": "Creature.withoutFlying",
-        "CostDesc": "{2}, Reveal X red cards from your hand, Sacrifice CARDNAME:"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

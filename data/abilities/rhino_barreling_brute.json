@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME attacks, if you've cast a spell with mana value 4 or greater this turn, draw a card.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever NICKNAME attacks, if you've cast a spell with mana value 4 or greater this turn, draw a card.",
-        "CheckSVar": "X"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

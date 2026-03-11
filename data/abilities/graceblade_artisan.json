@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +2/+2 for each Aura attached to it."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +2/+2 for each Aura attached to it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

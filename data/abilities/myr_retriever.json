@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, return another target artifact card from your graveyard to your hand.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME dies, return another target artifact card from your graveyard to your hand."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

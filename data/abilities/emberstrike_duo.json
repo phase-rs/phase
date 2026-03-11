@@ -1,29 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a black spell, CARDNAME gets +1/+1 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a black spell, CARDNAME gets +1/+1 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Black",
-        "Execute": "TrigPumpP1P1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a red spell, CARDNAME gains first strike until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigFirstStrike",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a red spell, CARDNAME gains first strike until end of turn.",
-        "ValidCard": "Card.Red"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

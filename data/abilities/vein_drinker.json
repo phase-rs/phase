@@ -2,51 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "R",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals damage equal to its power to target creature. That creature deals damage equal to its power to CARDNAME.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "R"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage equal to its power to target creature. That creature deals damage equal to its power to CARDNAME.",
-        "SubAbility": "DamageThis"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Creature.DamagedBy",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "DamagedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 1/1 colorless Robot artifact creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, create a 1/1 colorless Robot artifact creature token.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of combat on your turn, target artifact creature you control gets +3/+0 and gains first strike and vigilance until end of turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "TriggerDescription": "At the beginning of combat on your turn, target artifact creature you control gets +3/+0 and gains first strike and vigilance until end of turn."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

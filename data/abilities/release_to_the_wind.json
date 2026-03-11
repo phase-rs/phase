@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": null,
+      "description": "Exile target nonland permanent. For as long as that card remains exiled, its owner may cast it without paying its mana cost.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Exile target nonland permanent. For as long as that card remains exiled, its owner may cast it without paying its mana cost.",
-        "TgtPrompt": "Select target nonland permanent"
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

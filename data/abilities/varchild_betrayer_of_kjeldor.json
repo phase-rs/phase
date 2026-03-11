@@ -1,45 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player creates that many 1/1 red Survivor creature tokens."
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME leaves the battlefield, gain control of all Survivors.",
-        "Destination": "Any",
-        "Execute": "TrigGainControl",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "Survivors your opponents control can't block.",
-        "ValidCard": "Survivor.OppCtrl"
+      "description": "Survivors your opponents control can't block.",
+      "mode": "CantBlock"
+    },
+    {
+      "description": "Survivors your opponents control can't attack you or planeswalkers you control.",
+      "mode": "CantAttack"
+    }
+  ],
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player creates that many 1/1 red Survivor creature tokens.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "Survivors your opponents control can't attack you or planeswalkers you control.",
-        "ValidCard": "Creature.Survivor+OppCtrl",
-        "Target": "You,Planeswalker.YouCtrl"
+      "description": "When NICKNAME leaves the battlefield, gain control of all Survivors.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

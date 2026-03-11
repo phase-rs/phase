@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At end of combat, destroy all creatures blocking or blocked by CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Phase": "EndCombat",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "At end of combat, destroy all creatures blocking or blocked by CARDNAME."
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

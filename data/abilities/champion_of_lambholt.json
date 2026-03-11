@@ -1,31 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever another creature you control enters, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Other+YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with power less than CARDNAME's power can't block creatures you control.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.YouDontCtrl+powerLTX",
-        "ValidAttacker": "Creature.YouCtrl",
-        "Description": "Creatures with power less than CARDNAME's power can't block creatures you control."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature you control enters, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

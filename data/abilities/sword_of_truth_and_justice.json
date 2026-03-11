@@ -1,32 +1,81 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.EquippedBy",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, put a +1/+1 counter on a creature you control, then proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2 and has protection from white and from blue.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddSVar": "SwordOfTruthAndJusticeCE",
-        "AddKeyword": "Protection from white & Protection from blue",
-        "Description": "Equipped creature gets +2/+2 and has protection from white and from blue.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "white",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "blue",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, put a +1/+1 counter on a creature you control, then proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

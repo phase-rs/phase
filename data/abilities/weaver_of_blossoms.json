@@ -1,59 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "SpellDescription": "Add one mana of any color."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add one mana of any color."
-          }
+          "description": "Add one mana of any color.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "SpellDescription": "Add two mana of any one color.",
-              "Amount": "2"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add two mana of any one color.",
-            "Amount": "2"
-          }
+          "description": "Add two mana of any one color.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

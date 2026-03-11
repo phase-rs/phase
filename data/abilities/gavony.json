@@ -1,27 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, creatures you control gain indestructible until end of turn.",
-        "Execute": "RolledChaos"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have vigilance.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature",
-        "Description": "All creatures have vigilance.",
-        "EffectZone": "Command",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, creatures you control gain indestructible until end of turn.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

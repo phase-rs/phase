@@ -2,36 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "Max speed — {3}, {T}, Discard a card: Draw a card.",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "ABDraw",
-        "Description": "Max speed — {3}, {T}, Discard a card: Draw a card.",
-        "CharacteristicDefining": "True",
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed"
-      }
+      "modifications": [
+        {
+          "ability": "ABDraw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Sorcery"
-        }
-      },
       "cost": null,
+      "description": "Counter target sorcery spell.",
+      "effect": {
+        "target": {
+          "card_type": "Sorcery",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target sorcery spell",
-        "SpellDescription": "Counter target sorcery spell."
-      }
+      "target_prompt": "Select target sorcery spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

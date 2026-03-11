@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)",
-        "PresentDefined": "Self",
-        "IsPresent": "Card.tapped",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Main",
-        "Execute": "TrigDread",
-        "PhaseCount": "2"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

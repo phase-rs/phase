@@ -2,29 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create two 1/1 green Elf Warrior creature tokens. Clash with an opponent. If you win, those creatures gain deathtouch until end of turn.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_elf_warrior",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBClash",
-        "RememberTokens": "True",
-        "SpellDescription": "Create two 1/1 green Elf Warrior creature tokens. Clash with an opponent. If you win, those creatures gain deathtouch until end of turn.",
-        "TokenAmount": "2",
-        "TokenOwner": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

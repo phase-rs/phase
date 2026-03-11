@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell. Its controller loses 3 life and you gain 3 life.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell",
-        "SpellDescription": "Counter target spell. Its controller loses 3 life and you gain 3 life.",
-        "SubAbility": "DBDrain"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

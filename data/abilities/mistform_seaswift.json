@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBAnimate",
-          "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn.",
-          "Type": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn.",
-        "Type": "Creature"
-      }
+      "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+      "effect": {
+        "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

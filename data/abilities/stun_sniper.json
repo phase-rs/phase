@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 1 damage to target creature. Tap that creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 1 damage to target creature. Tap that creature.",
-        "SubAbility": "DBTap"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

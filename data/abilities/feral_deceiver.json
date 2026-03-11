@@ -2,54 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "NoReveal": "True",
-          "SpellDescription": "Look at the top card of your library."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NoReveal": "True",
-        "SpellDescription": "Look at the top card of your library."
-      }
+      "description": "Look at the top card of your library.",
+      "effect": {
+        "description": "Look at the top card of your library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "RememberRevealed": "True",
-          "NoPeek": "True",
-          "SubAbility": "DBPump",
-          "SpellDescription": "Reveal the top card of your library.",
-          "ActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberRevealed": "True",
-        "NoPeek": "True",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Reveal the top card of your library.",
-        "ActivationLimit": "1"
-      }
+      "description": "Reveal the top card of your library.",
+      "effect": {
+        "description": "Reveal the top card of your library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Metalcraft — When CARDNAME enters, if you control three or more artifacts, CARDNAME gets +3/+3 and gains haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Metalcraft": "True",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Metalcraft — When CARDNAME enters, if you control three or more artifacts, CARDNAME gets +3/+3 and gains haste until end of turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

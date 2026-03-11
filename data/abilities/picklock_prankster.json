@@ -1,39 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Mill four cards. Then put an instant, sorcery, or Faerie card from among the milled cards into your hand.",
           "effect": {
-            "type": "Mill",
             "count": 4,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberMilled": "True",
-            "SubAbility": "DBChangeZone",
-            "SpellDescription": "Mill four cards. Then put an instant, sorcery, or Faerie card from among the milled cards into your hand."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

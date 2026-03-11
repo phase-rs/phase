@@ -2,64 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Put a charge counter on CARDNAME, then you may cast an instant or sorcery spell with mana value equal to the number of charge counters on CARDNAME from your hand without paying its mana cost.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "CHARGE",
         "count": 1,
+        "counter_type": "CHARGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a charge counter on CARDNAME, then you may cast an instant or sorcery spell with mana value equal to the number of charge counters on CARDNAME from your hand without paying its mana cost.",
-        "SubAbility": "DBCast"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<X/CHARGE>"
+            "cost": "SubCounter<X/CHARGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry X.",
-        "AILogic": "BrainJar"
-      }
+      "description": "Scry X.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

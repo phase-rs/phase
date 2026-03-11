@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidCard": "Creature,Enchantment",
-        "ValidSA": "Spell",
-        "Caster": "Player",
-        "Description": "Any player may cast creature and enchantment spells as though they had flash."
-      }
+      "description": "Any player may cast creature and enchantment spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

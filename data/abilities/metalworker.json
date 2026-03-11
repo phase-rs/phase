@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "SpellDescription": "Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
-          "RevealValid": "Card.Artifact+YouCtrl",
-          "AnyNumber": "True",
-          "SubAbility": "DBMetalWorkerMana",
-          "RememberRevealed": "True"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
-        "RevealValid": "Card.Artifact+YouCtrl",
-        "AnyNumber": "True",
-        "SubAbility": "DBMetalWorkerMana",
-        "RememberRevealed": "True"
-      }
+      "description": "Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
+      "effect": {
+        "description": "Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

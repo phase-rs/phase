@@ -2,88 +2,78 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "M1M1",
-        "count": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B B"
+            "cost": "2 B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put two -1/-1 counters on target creature an opponent controls. Activate only as a sorcery.",
+      "effect": {
+        "count": 2,
+        "counter_type": "M1M1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature an opponent controls",
-        "SpellDescription": "Put two -1/-1 counters on target creature an opponent controls. Activate only as a sorcery.",
-        "IsCurse": "True",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, tap target creature an opponent controls. That creature doesn't untap during its controller's next untap step.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, tap target creature an opponent controls. That creature doesn't untap during its controller's next untap step.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

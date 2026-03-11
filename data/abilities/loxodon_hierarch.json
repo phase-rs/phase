@@ -2,50 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "Defined": "Valid Creature.YouCtrl",
-          "SpellDescription": "Regenerate each creature you control."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G W"
+            "cost": "G W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Valid Creature.YouCtrl",
-        "SpellDescription": "Regenerate each creature you control."
-      }
+      "description": "Regenerate each creature you control.",
+      "effect": {
+        "description": "Regenerate each creature you control.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you gain 4 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "When CARDNAME enters, you gain 4 life.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

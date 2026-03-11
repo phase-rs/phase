@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Card.Self",
-        "IsPresent": "Knight.YouCtrl,Soldier.YouCtrl",
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME can't attack unless you control a Knight or Soldier."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Knight",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Soldier.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack unless you control a Knight or Soldier.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

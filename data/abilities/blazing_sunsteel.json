@@ -1,27 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever equipped creature is dealt damage, it deals that much damage to any target.",
-        "ValidTarget": "Creature.EquippedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+0 for each opponent you have.",
-        "AddPower": "Y"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 for each opponent you have.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature is dealt damage, it deals that much damage to any target.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

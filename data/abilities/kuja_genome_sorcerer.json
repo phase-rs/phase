@@ -1,43 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\" Then if you control four or more Wizards, transform Kuja.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "TriggerDescription": "At the beginning of your end step, create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\" Then if you control four or more Wizards, transform Kuja."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [],
       "replacements": [
         {
-          "event": "DamageDone",
-          "params": {
-            "Description": "Flare Star — If a Wizard you control would deal damage to a permanent or player, it deals double that damage instead.",
-            "ActiveZones": "Battlefield",
-            "ReplaceWith": "DmgTwice",
-            "ValidTarget": "Permanent,Player",
-            "ValidSource": "Wizard.YouCtrl"
-          }
+          "description": "Flare Star — If a Wizard you control would deal damage to a permanent or player, it deals double that damage instead.",
+          "event": "DamageDone"
         }
-      ]
+      ],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

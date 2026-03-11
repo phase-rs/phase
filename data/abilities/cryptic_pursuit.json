@@ -1,30 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell from your hand, manifest the top card of your library. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant.wasCastFromYourHandByYou,Sorcery.wasCastFromYourHandByYou",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigManifest",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell from your hand, manifest the top card of your library. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a face-down creature you control dies, exile it if it's an instant or sorcery card. You may cast that card until the end of your next turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a face-down creature you control dies, exile it if it's an instant or sorcery card. You may cast that card until the end of your next turn.",
-        "ValidCard": "Creature.faceDown+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

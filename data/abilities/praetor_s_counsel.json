@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChange",
-        "SpellDescription": "Return all cards from your graveyard to your hand. Exile CARDNAME. You have no maximum hand size for the rest of the game.",
-        "ChangeType": "Card.YouOwn"
-      }
+      "description": "Return all cards from your graveyard to your hand. Exile CARDNAME. You have no maximum hand size for the rest of the game.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

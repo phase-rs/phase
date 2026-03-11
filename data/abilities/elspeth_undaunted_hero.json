@@ -2,80 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
+      "description": "Put a +1/+1 counter on each of up to two target creatures.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creatures",
-        "SpellDescription": "Put a +1/+1 counter on each of up to two target creatures.",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select target creatures"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Search your library and/or graveyard for a card named Sunlit Hoplite and put it onto the battlefield. If you search your library this way, shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Search your library and/or graveyard for a card named Sunlit Hoplite and put it onto the battlefield. If you search your library this way, shuffle.",
-        "ChangeType": "Card.YouOwn+namedSunlit Hoplite",
-        "OriginAlternative": "Graveyard",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "Planeswalker": "True",
-        "SpellDescription": "Until end of turn, creatures you control gain flying and get +X/+X, where X is your devotion to white.",
-        "Ultimate": "True",
-        "KW": "Flying"
-      }
+      "description": "Until end of turn, creatures you control gain flying and get +X/+X, where X is your devotion to white.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

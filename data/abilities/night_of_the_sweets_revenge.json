@@ -2,61 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "5 G G"
+            "cost": "5 G G",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Creatures you control get +X/+X until end of turn, where X is the number of Foods you control. Activate only as a sorcery.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Creatures you control get +X/+X until end of turn, where X is the number of Foods you control. Activate only as a sorcery.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Food",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Foods you control have \"{T}: Add {G}.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
-        "Destination": "Battlefield",
-        "Execute": "TrigFood"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddAbility": "AnyMana",
-        "Affected": "Food.YouCtrl",
-        "Description": "Foods you control have \"{T}: Add {G}.\""
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

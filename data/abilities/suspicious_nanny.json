@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, it reassembles target Contraption that player controls.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, it reassembles target Contraption that player controls.",
-        "Execute": "TrigReassemble",
-        "ValidSource": "Card.Self"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

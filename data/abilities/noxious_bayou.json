@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo B G",
-        "params": {
-          "SubAbility": "DBPain",
-          "SpellDescription": "Add {B} or {G}. You get a poison counter."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPain",
-        "SpellDescription": "Add {B} or {G}. You get a poison counter."
-      }
+      "description": "Add {B} or {G}. You get a poison counter.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

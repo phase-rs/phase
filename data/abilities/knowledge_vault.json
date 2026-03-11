@@ -2,74 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Exile",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "TopOfLibrary",
-        "SpellDescription": "Exile the top card of your library face down.",
-        "RememberChanged": "True",
-        "ExileFaceDown": "True"
-      }
+      "description": "Exile the top card of your library face down.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SacrificeAll",
-        "params": {
-          "ImprintSacrificed": "True",
-          "SpellDescription": "Sacrifice CARDNAME. If you do, discard your hand, then put all cards exiled with CARDNAME into their owner's hand.",
-          "SubAbility": "DBDiscardHand",
-          "Defined": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ImprintSacrificed": "True",
-        "SpellDescription": "Sacrifice CARDNAME. If you do, discard your hand, then put all cards exiled with CARDNAME into their owner's hand.",
-        "SubAbility": "DBDiscardHand",
-        "Defined": "Self"
-      }
+      "description": "Sacrifice CARDNAME. If you do, discard your hand, then put all cards exiled with CARDNAME into their owner's hand.",
+      "effect": {
+        "description": "Sacrifice CARDNAME. If you do, discard your hand, then put all cards exiled with CARDNAME into their owner's hand.",
+        "name": "SacrificeAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME leaves the battlefield, put all cards exiled with CARDNAME into their owner's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigGraveyard",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, put all cards exiled with CARDNAME into their owner's graveyard.",
-        "Hidden": "True",
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

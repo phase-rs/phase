@@ -1,80 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "PayLife<1>"
+                "cost": "PayLife<1>",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card/card>"
+                "cost": "Discard<1/Card/card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBMill",
-            "SorcerySpeed": "True",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Draw a card, mill a card, then put a ritual counter on CARDNAME. Then if it has three or more ritual counters on it, remove them and transform it. Activate only as a sorcery."
-          }
+          "description": "Draw a card, mill a card, then put a ritual counter on CARDNAME. Then if it has three or more ritual counters on it, remove them and transform it. Activate only as a sorcery.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 B"
+            "cost": "2 B",
+            "type": "Mana"
           },
+          "description": "Exile target creature card from a graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBPutCounter",
-            "StackDescription": "Exile {c:Targeted} from the graveyard.",
-            "TgtPrompt": "Select target creature card from a graveyard",
-            "SpellDescription": "Exile target creature card from a graveyard."
-          }
+          "target_prompt": "Select target creature card from a graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

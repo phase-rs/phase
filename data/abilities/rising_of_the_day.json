@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have haste.",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Legendary creatures you control get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Legendary creatures you control get +1/+0.",
-        "Affected": "Creature.Legendary+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

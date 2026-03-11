@@ -2,37 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "3",
-          "SpellDescription": "Add {G}{G}{G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "3",
-        "SpellDescription": "Add {G}{G}{G}."
-      }
+      "description": "Add {G}{G}{G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Elf",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Elves you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Elf.Other+YouCtrl",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "Other Elves you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

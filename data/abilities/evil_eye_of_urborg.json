@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidBlocker": "Creature",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroyBlocker",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, destroy that creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "Non-Eye creatures you control can't attack.",
-        "ValidCard": "Creature.nonEye+YouCtrl"
-      }
+      "description": "Non-Eye creatures you control can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes blocked by a creature, destroy that creature.",
+      "mode": "AttackerBlockedByCreature",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

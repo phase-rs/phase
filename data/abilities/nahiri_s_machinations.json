@@ -2,42 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to target blocking creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.blocking"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target blocking creature",
-        "SpellDescription": "CARDNAME deals 1 damage to target blocking creature."
-      }
+      "target_prompt": "Select target blocking creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, target creature you control gains indestructible until end of turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "Execute": "TrigPump",
-        "TriggerDescription": "At the beginning of combat on your turn, target creature you control gains indestructible until end of turn."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

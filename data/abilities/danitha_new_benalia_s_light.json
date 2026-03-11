@@ -1,21 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Affected": "Aura.YouOwn,Equipment.YouOwn",
-        "Condition": "PlayerTurn",
-        "Description": "Once during each of your turns, you may cast an Aura or Equipment spell from your graveyard.",
-        "AffectedZone": "Graveyard",
-        "MayPlayLimit": "1",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "card_type": "Aura",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn,Equipment.YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Once during each of your turns, you may cast an Aura or Equipment spell from your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

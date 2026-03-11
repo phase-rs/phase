@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent attacks, if they attacked you and/or a planeswalker you control, draw a card.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "AttackedTarget": "You,Planeswalker.YouCtrl",
-        "TriggerDescription": "Whenever an opponent attacks, if they attacked you and/or a planeswalker you control, draw a card."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

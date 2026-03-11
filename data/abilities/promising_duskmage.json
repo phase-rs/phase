@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, if it had a +1/+1 counter on it, draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME dies, if it had a +1/+1 counter on it, draw a card.",
-        "ValidCard": "Card.Self+counters_GE1_P1P1",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

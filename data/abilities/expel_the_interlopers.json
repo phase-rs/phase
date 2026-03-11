@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseNumber",
-        "params": {
-          "AILogic": "SweepCreatures",
-          "SpellDescription": "Choose a number between 0 and 10.",
-          "Min": "0",
-          "Defined": "You",
-          "Max": "10",
-          "SubAbility": "DBDestroyAll"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "SweepCreatures",
-        "SpellDescription": "Choose a number between 0 and 10.",
-        "Min": "0",
-        "Defined": "You",
-        "Max": "10",
-        "SubAbility": "DBDestroyAll"
-      }
+      "description": "Choose a number between 0 and 10.",
+      "effect": {
+        "description": "Choose a number between 0 and 10.",
+        "name": "ChooseNumber",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

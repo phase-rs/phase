@@ -2,33 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage divided as you choose among any number of target creatures. Whenever a creature dealt damage this way dies this turn, populate. (Create a token that's a copy of a creature token you control.)",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBRepeat",
-        "DividedAsYouChoose": "X",
-        "TargetMax": "MaxTgts",
-        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of target creatures. Whenever a creature dealt damage this way dies this turn, populate. (Create a token that's a copy of a creature token you control.)",
-        "TgtPrompt": "Select any number of target creatures",
-        "TargetMin": "0",
-        "RememberDamaged": "True"
-      }
+      "target_prompt": "Select any number of target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

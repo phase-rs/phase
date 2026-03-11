@@ -2,42 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PermanentCreature",
-        "params": {}
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U"
+            "cost": "2 U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Creature>"
+            "cost": "ExileFromGrave<1/Creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {}
+      "effect": {
+        "name": "PermanentCreature",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

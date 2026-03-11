@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

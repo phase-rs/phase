@@ -2,43 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "ActivationPhases": "BeginCombat->EndCombat",
-          "SubAbility": "DBAddCombat",
-          "SpellDescription": "Untap all attacking creatures. They gain trample, lifelink, and haste until end of turn. After this phase, there is an additional combat phase. Activate only during combat.",
-          "ValidCards": "Creature.attacking"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
+        "cost": "W U B R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "BeginCombat->EndCombat",
-        "SubAbility": "DBAddCombat",
-        "SpellDescription": "Untap all attacking creatures. They gain trample, lifelink, and haste until end of turn. After this phase, there is an additional combat phase. Activate only during combat.",
-        "ValidCards": "Creature.attacking"
-      }
+      "description": "Untap all attacking creatures. They gain trample, lifelink, and haste until end of turn. After this phase, there is an additional combat phase. Activate only during combat.",
+      "effect": {
+        "description": "Untap all attacking creatures. They gain trample, lifelink, and haste until end of turn. After this phase, there is an additional combat phase. Activate only during combat.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Warrior attacks, you may have its controller create a 1/1 white Warrior creature token that's tapped and attacking.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever a Warrior attacks, you may have its controller create a 1/1 white Warrior creature token that's tapped and attacking.",
-        "ValidCard": "Warrior",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Warrior",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

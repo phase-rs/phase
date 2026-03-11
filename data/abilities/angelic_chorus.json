@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control enters, you gain life equal to its toughness.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control enters, you gain life equal to its toughness.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigGainLife",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

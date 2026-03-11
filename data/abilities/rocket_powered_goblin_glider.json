@@ -1,29 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this Equipment enters, if it was cast from your graveyard, attach it to target creature you control.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self+wasCastFromYourGraveyard",
-        "Execute": "TrigAttach",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0 and has flying and haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+0 and has flying and haste.",
-        "AddPower": "2",
-        "AddKeyword": "Flying & Haste",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Equipment enters, if it was cast from your graveyard, attach it to target creature you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

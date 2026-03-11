@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ThisTurnEntered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has hexproof as long as it entered this turn.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Description": "CARDNAME has hexproof as long as it entered this turn.",
-        "Affected": "Card.Self+ThisTurnEntered"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

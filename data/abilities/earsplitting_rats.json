@@ -2,37 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, each player discards a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, each player discards a card.",
-        "Origin": "Any",
-        "Execute": "TrigDiscard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 1 damage to each of up to two target creatures. Those creatures can't block this turn.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "2",
-        "SpellDescription": "CARDNAME deals 1 damage to each of up to two target creatures. Those creatures can't block this turn.",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

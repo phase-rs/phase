@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters or is turned face up, put X +1/+1 counters on it, where X is the number of other creatures you control.",
       "event": "TurnFaceUp",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Description": "As CARDNAME enters or is turned face up, put X +1/+1 counters on it, where X is the number of other creatures you control.",
-        "ReplaceWith": "AddCounters"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

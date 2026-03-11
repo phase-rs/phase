@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you gain control of all enchantments. (You don't get to move Auras.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigGainControl",
-        "TriggerDescription": "When CARDNAME dies, you gain control of all enchantments. (You don't get to move Auras.)",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

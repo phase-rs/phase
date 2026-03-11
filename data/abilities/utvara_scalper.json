@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Card.Self",
-        "Description": "CARDNAME attacks each combat if able."
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

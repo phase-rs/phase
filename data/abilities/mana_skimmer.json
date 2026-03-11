@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a player, tap target land that player controls. That land doesn't untap during its controller's next untap step.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TapTarget",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, tap target land that player controls. That land doesn't untap during its controller's next untap step."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,27 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "TrigDamageDone",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\"",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          },
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted creature is legendary, it gets +1/+1 and has ward {1}. (Whenever enchanted creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as enchanted creature is legendary, it gets +1/+1 and has ward {1}. (Whenever enchanted creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Creature.EnchantedBy+Legendary",
-        "AddKeyword": "Ward:1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Ward:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

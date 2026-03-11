@@ -1,19 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control an artifact, CARDNAME gets +1/+0 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Artifact.YouCtrl",
-        "Description": "As long as you control an artifact, CARDNAME gets +1/+0 and has haste.",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

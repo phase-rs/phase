@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Zombie you control dies, you draw a card and you lose 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self,Zombie.Other+YouCtrl",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME or another Zombie you control dies, you draw a card and you lose 1 life."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Zombie.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

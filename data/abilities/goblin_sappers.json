@@ -2,86 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StackDescription": "{c:Targeted} can't be blocked this turn. Destroy it and CARDNAME at end of combat.",
-          "ValidTgts": "Creature.YouCtrl",
-          "TgtPrompt": "Select target creature you control",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Target creature you control can't be blocked this turn. Destroy it and CARDNAME at end of combat.",
-          "StaticAbilities": "Unblockable",
-          "SubAbility": "DelTrigBoth",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R R"
+            "cost": "R R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control can't be blocked this turn. Destroy it and CARDNAME at end of combat.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{c:Targeted} can't be blocked this turn. Destroy it and CARDNAME at end of combat.",
-        "ValidTgts": "Creature.YouCtrl",
-        "TgtPrompt": "Select target creature you control",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Target creature you control can't be blocked this turn. Destroy it and CARDNAME at end of combat.",
-        "StaticAbilities": "Unblockable",
-        "SubAbility": "DelTrigBoth",
-        "ExileOnMoved": "Battlefield"
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "StaticAbilities": "Unblockable",
-          "StackDescription": "{c:Targeted} can't be blocked this turn. Destroy it at end of combat.",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "TgtPrompt": "Select target creature you control",
-          "SubAbility": "DelTrigFriend",
-          "SpellDescription": "Target creature you control can't be blocked this turn. Destroy it at end of combat."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R R R R"
+            "cost": "R R R R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control can't be blocked this turn. Destroy it at end of combat.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "StaticAbilities": "Unblockable",
-        "StackDescription": "{c:Targeted} can't be blocked this turn. Destroy it at end of combat.",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "TgtPrompt": "Select target creature you control",
-        "SubAbility": "DelTrigFriend",
-        "SpellDescription": "Target creature you control can't be blocked this turn. Destroy it at end of combat."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

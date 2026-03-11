@@ -1,19 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "EnchantedBy Aura.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+Other+EnchantedBy Aura.YouCtrl",
-        "Description": "Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.",
-        "AddKeyword": "Flying",
-        "SetToughness": "4",
-        "SetPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,23 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature loses all abilities and is a blue Fish with base power and toughness 0/1.",
       "mode": "Continuous",
-      "params": {
-        "RemoveAllAbilities": "True",
-        "SetToughness": "1",
-        "Description": "Enchanted creature loses all abilities and is a blue Fish with base power and toughness 0/1.",
-        "RemoveCreatureTypes": "True",
-        "AddType": "Creature & Fish",
-        "Affected": "Creature.EnchantedBy",
-        "SetColor": "Blue",
-        "RemoveCardTypes": "True",
-        "SetPower": "0"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 0
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Creature & Fish",
+          "type": "AddType"
+        },
+        {
+          "colors": [
+            "Blue"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

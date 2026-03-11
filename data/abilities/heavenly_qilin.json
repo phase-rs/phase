@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, another target creature you control gains flying until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, another target creature you control gains flying until end of turn.",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigElderSpawnSacrifice",
-        "TriggerDescription": "At the beginning of your upkeep, unless you sacrifice an Island, sacrifice CARDNAME and it deals 6 damage to you.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by red creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by red creatures.",
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Creature.Red"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, unless you sacrifice an Island, sacrifice CARDNAME and it deals 6 damage to you.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

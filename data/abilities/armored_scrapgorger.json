@@ -2,43 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME gets +3/+0 as long as it has three or more oil counters on it.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME becomes tapped, exile target card from a graveyard and put an oil counter on CARDNAME.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME becomes tapped, exile target card from a graveyard and put an oil counter on CARDNAME."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE3_OIL",
-        "Description": "CARDNAME gets +3/+0 as long as it has three or more oil counters on it.",
-        "AddPower": "3"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

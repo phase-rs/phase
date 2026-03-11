@@ -2,79 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "RestrictValid": "Spell.Creature",
-          "SpellDescription": "Add {B}. Spend this mana only to cast a creature spell."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Creature",
-        "SpellDescription": "Add {B}. Spend this mana only to cast a creature spell."
-      }
+      "description": "Add {B}. Spend this mana only to cast a creature spell.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Bat.YouOwn,Lizard.YouOwn,Rat.YouOwn,Squirrel.YouOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target Bat, Lizard, Rat, or Squirrel card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Bat",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Lizard.YouOwn,Rat.YouOwn,Squirrel.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Bat, Lizard, Rat, or Squirrel card in your graveyard",
-        "SpellDescription": "Return target Bat, Lizard, Rat, or Squirrel card from your graveyard to your hand."
-      }
+      "target_prompt": "Select target Bat, Lizard, Rat, or Squirrel card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "DBEffect",
-        "TriggerDescription": "When CARDNAME enters, all damage that would be dealt this turn to you and permanents you control is dealt to enchanted creature instead."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +0/+3.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +0/+3.",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, all damage that would be dealt this turn to you and permanents you control is dealt to enchanted creature instead.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

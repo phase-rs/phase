@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create two 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This creature can't block.\" (Players dealt combat damage by them also get a poison counter.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, create two 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This creature can't block.\" (Players dealt combat damage by them also get a poison counter.)",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

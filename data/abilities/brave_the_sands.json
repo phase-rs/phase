@@ -1,25 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Vigilance",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have vigilance."
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "CanBlockAmount": "1",
-        "Description": "Each creature you control can block an additional creature each combat."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control can block an additional creature each combat.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

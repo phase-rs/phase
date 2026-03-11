@@ -2,32 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "M1M1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBRegenerate",
-        "SpellDescription": "Put a -1/-1 counter on target creature. Then if that creature's toughness is 1 or greater, regenerate it.",
-        "RememberTargets": "True"
-      }
+      "description": "Put a -1/-1 counter on target creature. Then if that creature's toughness is 1 or greater, regenerate it.",
+      "effect": {
+        "count": 1,
+        "counter_type": "M1M1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

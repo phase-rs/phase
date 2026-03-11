@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChooseCard",
-        "choices": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.White+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "The next X damage that would be dealt this turn to target white creature you control is dealt to CARDNAME instead.",
+      "effect": {
+        "choices": [],
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChooseCard"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target white creature you control",
-        "Mandatory": "True",
-        "Defined": "You",
-        "SpellDescription": "The next X damage that would be dealt this turn to target white creature you control is dealt to CARDNAME instead.",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBSetVarBefore"
-      }
+      "target_prompt": "Select target white creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

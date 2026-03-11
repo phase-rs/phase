@@ -1,27 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature attacks, defending player sacrifices a creature. If they do, you create a Walker token.",
-        "Execute": "TrigSac",
-        "ValidCard": "Card.EquippedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0 and has menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Menace",
-        "Description": "Equipped creature gets +2/+0 and has menace.",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature attacks, defending player sacrifices a creature. If they do, you create a Walker token.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

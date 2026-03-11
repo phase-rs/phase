@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Commander creatures you own have \"{1}, Sacrifice another creature or an artifact: This creature deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Commander creatures you own have \"{1}, Sacrifice another creature or an artifact: This creature deals 1 damage to any target.\"",
-        "Affected": "Creature.IsCommander+YouOwn",
-        "AddAbility": "DealDamage"
-      }
+      "modifications": [
+        {
+          "ability": "DealDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

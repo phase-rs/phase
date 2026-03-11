@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, it deals 3 damage to each creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to each creature.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

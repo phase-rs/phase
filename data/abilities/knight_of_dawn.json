@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "Choice",
-          "SpellDescription": "CARDNAME gains protection from the color of your choice until end of turn.",
-          "Defined": "Self",
-          "Choices": "AnyColor"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W W"
+        "cost": "W W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Gains": "Choice",
-        "SpellDescription": "CARDNAME gains protection from the color of your choice until end of turn.",
-        "Defined": "Self",
-        "Choices": "AnyColor"
-      }
+      "description": "CARDNAME gains protection from the color of your choice until end of turn.",
+      "effect": {
+        "description": "CARDNAME gains protection from the color of your choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

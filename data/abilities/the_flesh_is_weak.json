@@ -1,38 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
-        "Execute": "TrigPutCounters",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with +1/+1 counters on them are artifacts in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
-        "AddType": "Artifact",
-        "Description": "Creatures you control with +1/+1 counters on them are artifacts in addition to their other types."
-      }
+      "modifications": [
+        {
+          "core_type": "Artifact",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Nonartifact creatures get -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.nonArtifact",
-        "AffectedZone": "Battlefield",
-        "AddPower": "-1",
-        "AddToughness": "-1",
-        "Description": "Nonartifact creatures get -1/-1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

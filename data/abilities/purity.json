@@ -1,31 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Graveyard",
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "If noncombat damage would be dealt to you, prevent that damage. You gain life equal to the damage prevented this way.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "GainLife",
-        "PreventionEffect": "True",
-        "IsCombat": "False",
-        "Description": "If noncombat damage would be dealt to you, prevent that damage. You gain life equal to the damage prevented this way.",
-        "ValidTarget": "You"
+      "description": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

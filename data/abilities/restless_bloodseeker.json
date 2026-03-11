@@ -1,90 +1,69 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Mode": "Transform",
-              "Defined": "Self",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
-            }
-          },
           "cost": {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "Transform",
-            "Defined": "Self",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if you gained life this turn, create a Blood token.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, if you gained life this turn, create a Blood token.",
-            "Phase": "End of Turn",
-            "CheckSVar": "X",
-            "Execute": "DBToken"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "LoseLife",
-            "amount": 2
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "4 B"
+            "cost": "4 B",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Each opponent loses 2 life and you gain 2 life.",
-            "Defined": "Player.Opponent",
-            "SubAbility": "DBGainLife"
-          }
+          "description": "Each opponent loses 2 life and you gain 2 life.",
+          "effect": {
+            "amount": 2,
+            "type": "LoseLife"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if you gained life this turn, create a Blood token.",
           "mode": "Phase",
-          "params": {
-            "Execute": "DBToken",
-            "TriggerDescription": "At the beginning of your end step, if you gained life this turn, create a Blood token.",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "Phase": "End of Turn",
-            "CheckSVar": "X"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

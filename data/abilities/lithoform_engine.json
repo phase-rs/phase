@@ -2,110 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "ValidTgts": "Card,Emblem",
-          "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-          "TgtPrompt": "Select target activated or triggered ability you control",
-          "StackDescription": "SpellDescription",
-          "MayChooseTarget": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Card,Emblem",
-        "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-        "TgtPrompt": "Select target activated or triggered ability you control",
-        "StackDescription": "SpellDescription",
-        "MayChooseTarget": "True"
-      }
+      "target_prompt": "Select target activated or triggered ability you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TgtPrompt": "Select target instant or sorcery spell you control",
-          "MayChooseTarget": "True",
-          "TargetType": "Spell",
-          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target instant or sorcery spell you control",
-        "MayChooseTarget": "True",
-        "TargetType": "Spell",
-        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-      }
+      "target_prompt": "Select target instant or sorcery spell you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TargetType": "Spell",
-          "ValidTgts": "Permanent.YouCtrl",
-          "TgtPrompt": "Select target permanent spell you control",
-          "SpellDescription": "Copy target permanent spell you control. (The copy becomes a token.)"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target permanent spell you control. (The copy becomes a token.)",
+      "effect": {
+        "description": "Copy target permanent spell you control. (The copy becomes a token.)",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "ValidTgts": "Permanent.YouCtrl",
-        "TgtPrompt": "Select target permanent spell you control",
-        "SpellDescription": "Copy target permanent spell you control. (The copy becomes a token.)"
-      }
+      "target_prompt": "Select target permanent spell you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

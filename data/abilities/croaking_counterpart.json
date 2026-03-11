@@ -2,37 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SetPower": "1",
-          "SetToughness": "1",
-          "ValidTgts": "Creature.nonFrog",
-          "TgtPrompt": "Select target non-Frog creature",
-          "SetColor": "Green",
-          "StackDescription": "Create a token that's a copy of {c:Targeted}, except it's a 1/1 green Frog.",
-          "SpellDescription": "Create a token that's a copy of target non-Frog creature, except it's a 1/1 green Frog.",
-          "SetCreatureTypes": "Frog"
-        }
-      },
       "cost": null,
+      "description": "Create a token that's a copy of target non-Frog creature, except it's a 1/1 green Frog.",
+      "effect": {
+        "description": "Create a token that's a copy of target non-Frog creature, except it's a 1/1 green Frog.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SetPower": "1",
-        "SetToughness": "1",
-        "ValidTgts": "Creature.nonFrog",
-        "TgtPrompt": "Select target non-Frog creature",
-        "SetColor": "Green",
-        "StackDescription": "Create a token that's a copy of {c:Targeted}, except it's a 1/1 green Frog.",
-        "SpellDescription": "Create a token that's a copy of target non-Frog creature, except it's a 1/1 green Frog.",
-        "SetCreatureTypes": "Frog"
-      }
+      "target_prompt": "Select target non-Frog creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

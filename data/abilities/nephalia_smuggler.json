@@ -2,39 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 U"
+            "cost": "3 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile another target creature you control, then return that card to the battlefield under your control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature you control",
-        "SubAbility": "SmuggleIn",
-        "RememberTargets": "True",
-        "SpellDescription": "Exile another target creature you control, then return that card to the battlefield under your control."
-      }
+      "target_prompt": "Select another target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

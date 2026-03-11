@@ -2,35 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Hellbent —",
-        "Activation": "Hellbent",
-        "SpellDescription": "Draw a card. Activate only if you have no cards in hand."
-      }
+      "description": "Draw a card. Activate only if you have no cards in hand.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

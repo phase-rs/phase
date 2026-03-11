@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a instant or sorcery spell, you may switch CARDNAME's power and toughness until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a instant or sorcery spell, you may switch CARDNAME's power and toughness until end of turn.",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigChangePT"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

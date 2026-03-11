@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a growth counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, put a growth counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of each opponent's draw step, that player draws an additional card for each growth counter on CARDNAME, then CARDNAME deals damage to the player equal to the number of cards they drew this way.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "TriggerDescription": "At the beginning of each opponent's draw step, that player draws an additional card for each growth counter on CARDNAME, then CARDNAME deals damage to the player equal to the number of cards they drew this way.",
-        "Phase": "Draw",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

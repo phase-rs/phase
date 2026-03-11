@@ -2,49 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to any target, where X is 3 plus the number of charge counters on CARDNAME.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to any target, where X is 3 plus the number of charge counters on CARDNAME."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Land>",
+        "type": "Mana"
+      },
+      "description": "Put two charge counters on CARDNAME. You may choose a new target for it. Any player may activate this ability but only if CARDNAME is on the stack.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "CHARGE",
         "count": 2,
+        "counter_type": "CHARGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Land>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeTarget",
-        "Activator": "Player",
-        "SpellDescription": "Put two charge counters on CARDNAME. You may choose a new target for it. Any player may activate this ability but only if CARDNAME is on the stack.",
-        "Defined": "Self",
-        "ActivationZone": "Stack"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

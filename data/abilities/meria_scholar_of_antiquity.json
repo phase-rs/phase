@@ -2,46 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Artifact.!token/nontoken artifact>"
+        "cost": "tapXType<1/Artifact.!token/nontoken artifact>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Artifact.!token/nontoken artifact>"
+        "cost": "tapXType<2/Artifact.!token/nontoken artifact>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBEffect",
-        "RememberChanged": "True",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top card of your library. You may play it this turn."
-      }
+      "description": "Exile the top card of your library. You may play it this turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

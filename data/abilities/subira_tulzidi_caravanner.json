@@ -2,70 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "TgtPrompt": "Select another target creature with power 2 or less",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "RememberObjects": "Targeted",
-          "AILogic": "Pump",
-          "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
-          "ValidTgts": "Creature.Other+powerLE2",
-          "StaticAbilities": "Unblockable"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Another target creature with power 2 or less can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "TgtPrompt": "Select another target creature with power 2 or less",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "RememberObjects": "Targeted",
-        "AILogic": "Pump",
-        "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
-        "ValidTgts": "Creature.Other+powerLE2",
-        "StaticAbilities": "Unblockable"
-      }
+      "target_prompt": "Select another target creature with power 2 or less"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "Damage",
-          "SpellDescription": "Until end of turn, whenever a creature you control with power 2 or less deals combat damage to a player, draw a card."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Hand>"
+            "cost": "Discard<1/Hand>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "Damage",
-        "SpellDescription": "Until end of turn, whenever a creature you control with power 2 or less deals combat damage to a player, draw a card."
-      }
+      "description": "Until end of turn, whenever a creature you control with power 2 or less deals combat damage to a player, draw a card.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

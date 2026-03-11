@@ -1,32 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, if there are cards exiled with CARDNAME, put them into their owner's graveyard, then CARDNAME deals that much damage to each opponent.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigGraveyard",
-        "TriggerDescription": "At the beginning of your end step, if there are cards exiled with CARDNAME, put them into their owner's graveyard, then CARDNAME deals that much damage to each opponent.",
-        "CheckSVar": "Y",
-        "TriggerZones": "Battlefield",
-        "SVarCompare": "GT0",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

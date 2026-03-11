@@ -1,27 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigExplore",
-        "ValidSource": "Pirate.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more Pirates you control deal damage to a player, NICKNAME explores.",
-        "ValidTarget": "Player"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Creature.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more Pirates you control deal damage to a player, NICKNAME explores.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Pirate",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

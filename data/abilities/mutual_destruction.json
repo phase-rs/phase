@@ -2,47 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature."
-      }
+      "description": "Destroy target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "characteristic_defining": true,
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flash as long as you control a permanent with flash.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flash",
-        "CharacteristicDefining": "True",
-        "IsPresent": "Permanent.YouCtrl+hasKeywordFlash",
-        "Description": "CARDNAME has flash as long as you control a permanent with flash."
-      }
+      "modifications": [
+        {
+          "keyword": "Flash",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

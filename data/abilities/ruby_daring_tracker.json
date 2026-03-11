@@ -2,37 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo R G",
-        "params": {
-          "SpellDescription": "Add {R} or {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R} or {G}."
-      }
+      "description": "Add {R} or {G}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks while you control a creature with power 4 or greater, NICKNAME gets +2/+2 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks while you control a creature with power 4 or greater, NICKNAME gets +2/+2 until end of turn.",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Creature.YouCtrl+powerGE4",
-        "TriggerZones": "Battlefield",
-        "NoResolvingCheck": "True",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

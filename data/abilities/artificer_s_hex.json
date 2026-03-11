@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigDestroy",
-        "IsPresent": "Card.EnchantedBy+AttachedTo Creature",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, if enchanted Equipment is attached to a creature, destroy that creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "AddSVar": "DNEq"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, if enchanted Equipment is attached to a creature, destroy that creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

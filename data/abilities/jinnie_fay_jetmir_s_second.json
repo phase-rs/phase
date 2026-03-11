@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "Optional": "True",
-        "Description": "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "GenericChoice"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, draw two cards.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has flying.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw two cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

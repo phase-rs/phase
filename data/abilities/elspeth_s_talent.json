@@ -1,29 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AbilityCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.",
-        "ValidCard": "Planeswalker.EnchantedBy+inRealZoneBattlefield",
-        "Execute": "TrigPumpAll",
-        "ValidSA": "Activated.Loyalty"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Planeswalker",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted planeswalker has \"[+1]: Create three 1/1 white Soldier creature tokens.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted planeswalker has \"[+1]: Create three 1/1 white Soldier creature tokens.\"",
-        "Affected": "Planeswalker.EnchantedBy",
-        "AddAbility": "ElspethPlus"
-      }
+      "modifications": [
+        {
+          "ability": "ElspethPlus",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.",
+      "mode": "AbilityCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Planeswalker",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

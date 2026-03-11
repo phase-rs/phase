@@ -2,28 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.OppCtrl,Enchantment.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppCtrl,Enchantment.OppCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
-        "Shuffle": "True",
-        "TgtPrompt": "Select target artifact or enchantment an opponent controls"
-      }
+      "target_prompt": "Select target artifact or enchantment an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

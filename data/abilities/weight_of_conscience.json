@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<2/Creature.sharesCreatureTypeWith/creatures that share a creature type>",
+        "type": "Mana"
+      },
+      "description": "Exile enchanted creature.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Creature.sharesCreatureTypeWith/creatures that share a creature type>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile enchanted creature.",
-        "Defined": "Enchanted"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't attack."
-      }
+      "description": "Enchanted creature can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

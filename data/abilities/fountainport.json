@@ -2,114 +2,103 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "PayLife<1>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 1/1 blue Fish creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_1_1_fish",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "PayLife<1>"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 blue Fish creature token."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "Create a Treasure token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_a_treasure_sac",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "4"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a Treasure token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

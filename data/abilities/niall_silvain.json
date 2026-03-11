@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Creature",
-          "SpellDescription": "Regenerate target creature."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G G G G"
+            "cost": "G G G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "SpellDescription": "Regenerate target creature."
-      }
+      "description": "Regenerate target creature.",
+      "effect": {
+        "description": "Regenerate target creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Tapped"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other tapped creatures you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+tapped+YouCtrl",
-        "AddKeyword": "Indestructible",
-        "Description": "Other tapped creatures you control have indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,58 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Exile",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "5"
+            "cost": "5",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Hand>"
+            "cost": "Discard<1/Hand>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Hidden": "True",
-        "ChangeType": "Card.ExiledWithSource",
-        "SpellDescription": "Put all cards exiled with CARDNAME into their owner's hand.",
-        "AILogic": "DiscardAllAndRetExiled.minAdv2"
-      }
+      "description": "Put all cards exiled with CARDNAME into their owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Exile",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may exile the top card of your library face down.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigKyrenExile",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, you may exile the top card of your library face down."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

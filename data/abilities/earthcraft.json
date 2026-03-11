@@ -2,27 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.Basic"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Creature>"
+        "cost": "tapXType<1/Creature>",
+        "type": "Mana"
       },
+      "description": "Untap target basic land.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Basic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target basic land",
-        "SpellDescription": "Untap target basic land."
-      }
+      "target_prompt": "Select target basic land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

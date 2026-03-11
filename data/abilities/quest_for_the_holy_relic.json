@@ -2,53 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "SubCounter<5/QUEST>"
+            "cost": "SubCounter<5/QUEST>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Equipment",
-        "SpellDescription": "Search your library for an Equipment card, put it onto the battlefield, and attach it to a creature you control. Then shuffle your library.",
-        "AttachAfter": "Creature.YouCtrl",
-        "ChangeNum": "1"
-      }
+      "description": "Search your library for an Equipment card, put it onto the battlefield, and attach it to a creature you control. Then shuffle your library.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, you may put a quest counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you cast a creature spell, you may put a quest counter on CARDNAME.",
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

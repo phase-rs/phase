@@ -2,30 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+!token+YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Return any number of target nonland, nontoken permanents you control to their owners' hands. Draw a card for each card returned to your hand this way.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target nonland, nontoken permanent you control",
-        "TargetMin": "0",
-        "TargetMax": "X",
-        "RememberChanged": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Return any number of target nonland, nontoken permanents you control to their owners' hands. Draw a card for each card returned to your hand this way."
-      }
+      "target_prompt": "Select target nonland, nontoken permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

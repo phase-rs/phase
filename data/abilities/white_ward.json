@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has protection from white. This effect doesn't remove CARDNAME.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has protection from white. This effect doesn't remove CARDNAME.",
-        "AddKeyword": "Protection:Card.White:white:Card.CardUID_HostCardUID"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.White:white:Card.CardUID_HostCardUID",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

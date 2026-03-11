@@ -2,39 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Vote",
-        "params": {
-          "AILogic": "Judgment",
-          "RememberVotedObjects": "True",
-          "SpellDescription": "Secret council — Each player secretly votes for a creature you don't control, then those votes are revealed.",
-          "Defined": "Player",
-          "StoreVoteNum": "True",
-          "SubAbility": "DBRepeatStun",
-          "Secretly": "True",
-          "VoteCard": "Creature.YouDontCtrl",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Judgment",
-        "RememberVotedObjects": "True",
-        "SpellDescription": "Secret council — Each player secretly votes for a creature you don't control, then those votes are revealed.",
-        "Defined": "Player",
-        "StoreVoteNum": "True",
-        "SubAbility": "DBRepeatStun",
-        "Secretly": "True",
-        "VoteCard": "Creature.YouDontCtrl",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Secret council — Each player secretly votes for a creature you don't control, then those votes are revealed.",
+      "effect": {
+        "description": "Secret council — Each player secretly votes for a creature you don't control, then those votes are revealed.",
+        "name": "Vote",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

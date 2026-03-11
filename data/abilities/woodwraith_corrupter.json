@@ -2,46 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": 4,
-        "toughness": 4,
-        "types": [
-          "Creature",
-          "Elemental",
-          "Horror"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Forest"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B G"
+            "cost": "1 B G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target Forest becomes a 4/4 black and green Elemental Horror creature. It's still a land.",
+      "duration": "Permanent",
+      "effect": {
+        "power": 4,
+        "target": {
+          "card_type": "Forest",
+          "type": "Typed"
+        },
+        "toughness": 4,
+        "type": "Animate",
+        "types": [
+          "Creature",
+          "Elemental",
+          "Horror"
         ]
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "EOT",
-        "SpellDescription": "Target Forest becomes a 4/4 black and green Elemental Horror creature. It's still a land.",
-        "TgtPrompt": "Select target Forest",
-        "Duration": "Permanent",
-        "Colors": "Black,Green",
-        "OverwriteColors": "True"
-      }
+      "target_prompt": "Select target Forest"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

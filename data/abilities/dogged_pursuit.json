@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, each opponent loses 1 life and you gain 1 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, each opponent loses 1 life and you gain 1 life.",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDrain"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

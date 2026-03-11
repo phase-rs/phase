@@ -2,30 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ForgetOnCast": "Instant.YouCtrl,Sorcery.YouCtrl",
-          "SpellDescription": "The next instant or sorcery spell you cast this turn costs {X} less to cast, where X is the number of Wizards you control as this ability resolves.",
-          "StaticAbilities": "ReduceCost",
-          "SetChosenNumber": "X"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ForgetOnCast": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "SpellDescription": "The next instant or sorcery spell you cast this turn costs {X} less to cast, where X is the number of Wizards you control as this ability resolves.",
-        "StaticAbilities": "ReduceCost",
-        "SetChosenNumber": "X"
-      }
+      "description": "The next instant or sorcery spell you cast this turn costs {X} less to cast, where X is the number of Wizards you control as this ability resolves.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

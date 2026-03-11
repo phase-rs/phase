@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw X cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw X cards.",
-        "Execute": "TrigDraw",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you cast a blue spell, tap target nonland permanent an opponent controls.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Blue",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigTap",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a blue spell, tap target nonland permanent an opponent controls."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

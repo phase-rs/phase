@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "RolledDie",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you roll a die, put a +1/+1 counter on CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME has trample as you've rolled three or more dice this turn.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "SVarCompare": "GE3",
-        "Description": "CARDNAME has trample as you've rolled three or more dice this turn."
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you roll a die, put a +1/+1 counter on CARDNAME.",
+      "mode": "RolledDie",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

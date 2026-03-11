@@ -2,49 +2,85 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "IsPresent": "Card.EquippedBy",
-          "Defined": "Equipped",
-          "SpellDescription": "You may tap or untap equipped creature."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Card.EquippedBy",
-        "Defined": "Equipped",
-        "SpellDescription": "You may tap or untap equipped creature."
-      }
+      "description": "You may tap or untap equipped creature.",
+      "effect": {
+        "description": "You may tap or untap equipped creature.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Tapped"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "EquippedBy"
+            },
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as equipped creature is tapped, tapped creatures you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.EquippedBy+tapped",
-        "Description": "As long as equipped creature is tapped, tapped creatures you control get +2/+0.",
-        "Affected": "Creature.tapped+YouCtrl",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "EquippedBy"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as equipped creature is untapped, untapped creatures you control get +0/+2.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as equipped creature is untapped, untapped creatures you control get +0/+2.",
-        "Affected": "Creature.untapped+YouCtrl",
-        "IsPresent": "Card.EquippedBy+untapped",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

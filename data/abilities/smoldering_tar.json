@@ -2,44 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "It deals 4 damage to target creature. Activate only as a sorcery.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "It deals 4 damage to target creature. Activate only as a sorcery."
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, target player loses 1 life.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "At the beginning of your upkeep, target player loses 1 life.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

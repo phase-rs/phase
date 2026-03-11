@@ -2,74 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SpellDescription": "Add {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}."
-      }
+      "description": "Add {U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "Static": "True",
-          "Execute": "DBEffect",
-          "SpellDescription": "The next spell you cast this turn can't be countered.",
-          "Mode": "SpellCast",
-          "ThisTurn": "True",
-          "ValidActivatingPlayer": "You",
-          "ValidCard": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Static": "True",
-        "Execute": "DBEffect",
-        "SpellDescription": "The next spell you cast this turn can't be countered.",
-        "Mode": "SpellCast",
-        "ThisTurn": "True",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card"
-      }
+      "description": "The next spell you cast this turn can't be countered.",
+      "effect": {
+        "description": "The next spell you cast this turn can't be countered.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This land enters tapped unless you control a Mountain or a Forest.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "LandTapped",
-        "Description": "This land enters tapped unless you control a Mountain or a Forest."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

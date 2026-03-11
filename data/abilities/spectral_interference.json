@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Counter target artifact or creature spell unless its controller pays {4}.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "4",
-        "SpellDescription": "Counter target artifact or creature spell unless its controller pays {4}.",
-        "TgtPrompt": "Select target artifact or creature spell",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target artifact or creature spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

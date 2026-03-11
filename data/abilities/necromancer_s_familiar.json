@@ -2,49 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "KW": "Indestructible",
-        "SpellDescription": "CARDNAME gains indestructible until end of turn. Tap it.",
-        "SubAbility": "DBTap"
-      }
+      "description": "CARDNAME gains indestructible until end of turn. Tap it.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Hellbent — CARDNAME has lifelink as long as you have no cards in hand.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "Hellbent — CARDNAME has lifelink as long as you have no cards in hand.",
-        "AddKeyword": "Lifelink",
-        "Condition": "Hellbent"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

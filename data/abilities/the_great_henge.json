@@ -2,54 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}{G}. You gain 2 life.",
-          "SubAbility": "DBGainLife",
-          "Amount": "2",
-          "AILogic": "AtOppEOT"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}{G}. You gain 2 life.",
-        "SubAbility": "DBGainLife",
-        "Amount": "2",
-        "AILogic": "AtOppEOT"
-      }
+      "description": "Add {G}{G}. You gain 2 life.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME costs {X} less to cast, where X is the greatest power among creatures you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever a nontoken creature you control enters, put a +1/+1 counter on it and draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a nontoken creature you control enters, put a +1/+1 counter on it and draw a card.",
-        "ValidCard": "Creature.!token+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Amount": "X",
-        "Description": "CARDNAME costs {X} less to cast, where X is the greatest power among creatures you control."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

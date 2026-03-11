@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Condition": "PlayerTurn",
-        "ValidCard": "Card",
-        "Caster": "Opponent",
-        "Description": "Your opponents can't cast spells during your turn."
-      }
+      "description": "Your opponents can't cast spells during your turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

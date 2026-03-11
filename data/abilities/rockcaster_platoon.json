@@ -2,33 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 2 damage to each creature with flying and each player.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 2 damage to each creature with flying and each player.",
-        "ValidPlayers": "Player",
-        "ValidCards": "Creature.withFlying",
-        "ValidDescription": "each creature with flying and each player."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

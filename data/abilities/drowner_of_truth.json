@@ -1,60 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you cast this spell, if {C} was spent to cast it, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this creature: Add {C}.\"",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "When you cast this spell, if {C} was spent to cast it, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this creature: Add {C}.\"",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken",
-            "CheckSVar": "CastSA>Count$Adamant_1.Colorless.1.0"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Combo G U",
-            "params": {
-              "SpellDescription": "Add {G} or {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G} or {U}."
+          "description": "Add {G} or {U}.",
+          "effect": {
+            "produced": [
+              "Green",
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "ETBTapped",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Description": "CARDNAME enters tapped.",
-            "ReplacementResult": "Updated"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

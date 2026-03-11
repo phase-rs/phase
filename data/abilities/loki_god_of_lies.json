@@ -1,21 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell that targets only a single creature, gain control of that creature until end of turn. If it's your turn, untap that creature and it gains haste until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "IsSingleTarget": "True",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card",
-        "Execute": "TrigGainControl",
-        "TargetsValid": "Creature.inZoneBattlefield",
-        "TriggerDescription": "Whenever you cast a spell that targets only a single creature, gain control of that creature until end of turn. If it's your turn, untap that creature and it gains haste until end of turn.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

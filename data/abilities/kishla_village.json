@@ -2,60 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 G"
+            "cost": "3 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Surveil 2.",
-        "Amount": "2"
-      }
+      "description": "Surveil 2.",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This land enters tapped unless you control an Island or a Swamp.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "This land enters tapped unless you control an Island or a Swamp.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplaceWith": "LandTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

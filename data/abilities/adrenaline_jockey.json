@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell, if it's not their turn, this creature deals 4 damage to them.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "ValidCard": "Card",
-        "TriggerDescription": "Whenever a player casts a spell, if it's not their turn, this creature deals 4 damage to them.",
-        "ValidActivatingPlayer": "Player.NonActive"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you activate an exhaust ability, put a +1/+1 counter on this creature.",
       "mode": "AbilityCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "ValidSA": "Activated.Exhaust",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you activate an exhaust ability, put a +1/+1 counter on this creature."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, create a 4/4 red and white Golem artifact creature token.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.MultiColor",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you cast a multicolored spell, create a 4/4 red and white Golem artifact creature token.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

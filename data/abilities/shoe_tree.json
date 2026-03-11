@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +1/+1 for each shoe counter on it.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each shoe counter on it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

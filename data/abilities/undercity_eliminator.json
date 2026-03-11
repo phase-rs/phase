@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may sacrifice an artifact or creature. When you do, exile target creature an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigImmediateTrig",
-        "TriggerDescription": "When CARDNAME enters, you may sacrifice an artifact or creature. When you do, exile target creature an opponent controls.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBProliferate",
-        "SpellDescription": "Put a +1/+1 counter on target creature, then proliferate. (any number of permanents and/or players, then give each another counter of each kind already there.)"
-      }
+      "description": "Put a +1/+1 counter on target creature, then proliferate. (any number of permanents and/or players, then give each another counter of each kind already there.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

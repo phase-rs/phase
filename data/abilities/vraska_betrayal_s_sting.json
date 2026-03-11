@@ -2,87 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You draw a card and you lose 1 life. Proliferate.",
-        "Planeswalker": "True",
-        "SubAbility": "DBLoseLife"
-      }
+      "description": "You draw a card and you lose 1 life. Proliferate.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Target creature becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Treasure"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveAllAbilities": "True",
-        "Abilities": "TreasureSac",
-        "RemoveCardTypes": "True",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "StackDescription": "{c:Targeted} becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities.",
-        "SpellDescription": "Target creature becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Poison",
-        "params": {
-          "SpellDescription": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
-          "Planeswalker": "True",
-          "ConditionCheckSVar": "X",
-          "ValidTgts": "Player",
-          "ConditionSVarCompare": "LT9",
-          "Ultimate": "True",
-          "StackDescription": "If {p:Targeted} has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
-          "Num": "Difference"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
-        "Planeswalker": "True",
-        "ConditionCheckSVar": "X",
-        "ValidTgts": "Player",
-        "ConditionSVarCompare": "LT9",
-        "Ultimate": "True",
-        "StackDescription": "If {p:Targeted} has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
-        "Num": "Difference"
-      }
+      "description": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+      "effect": {
+        "description": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+        "name": "Poison",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create three 1/1 colorless Servo artifact creature tokens. You may cast a spell with mana value 3 or less from your hand without paying its mana cost.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_1_1_a_servo",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "TokenAmount": "3",
-        "SubAbility": "DBPlay",
-        "SpellDescription": "Create three 1/1 colorless Servo artifact creature tokens. You may cast a spell with mana value 3 or less from your hand without paying its mana cost."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,46 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W U B R G",
+        "type": "Mana"
+      },
+      "description": "This Vehicle becomes an artifact creature. Put two +1/+1 counters on it. (Activate each exhaust ability only once.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPutCounter",
-        "Exhaust": "True",
-        "Defined": "Self",
-        "Duration": "Permanent",
-        "SpellDescription": "This Vehicle becomes an artifact creature. Put two +1/+1 counters on it. (Activate each exhaust ability only once.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this Vehicle enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this Vehicle enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

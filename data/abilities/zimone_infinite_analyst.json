@@ -1,33 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast your first spell with {X} in its mana cost each turn, put two +1/+1 counters on NICKNAME.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.hasXCost",
-        "ActivatorThisTurnCast": "EQ1",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Amount": "Y",
-        "Description": "The first spell you cast with {X} in its mana cost each turn costs {1} less to cast for each +1/+1 counter on NICKNAME.",
-        "SVarCompare": "EQ0",
-        "ValidCard": "Card.hasXCost",
-        "Type": "Spell",
-        "CheckSVar": "X"
-      }
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "The first spell you cast with {X} in its mana cost each turn costs {1} less to cast for each +1/+1 counter on NICKNAME.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast your first spell with {X} in its mana cost each turn, put two +1/+1 counters on NICKNAME.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

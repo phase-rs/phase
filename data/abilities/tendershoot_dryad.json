@@ -1,30 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of each upkeep, create a 1/1 green Saproling creature token.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Saproling"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "type": "SelfRef"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Saprolings you control get +2/+2 as long as you have the city's blessing.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "IsPresent": "Card.Self",
-        "Description": "Saprolings you control get +2/+2 as long as you have the city's blessing.",
-        "Condition": "Blessing",
-        "Affected": "Creature.Saproling+YouCtrl",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each upkeep, create a 1/1 green Saproling creature token.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

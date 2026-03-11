@@ -1,20 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another nontoken artifact you control enters, create a 2/2 white Human Knight creature token with \"This creature gets +2/+2 as long as an artifact entered the battlefield under your control this turn.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Artifact.!token+Other+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another nontoken artifact you control enters, create a 2/2 white Human Knight creature token with \"This creature gets +2/+2 as long as an artifact entered the battlefield under your control this turn.\"",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Artifact",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

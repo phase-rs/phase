@@ -1,32 +1,81 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.EquippedBy",
-        "CombatDamage": "True",
-        "Execute": "TrigDiscard",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, that player discards a card and you untap all lands you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2 and has protection from black and from green.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+2 and has protection from black and from green.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "AddSVar": "SwordOfFeastAndFamineCE",
-        "AddKeyword": "Protection from black & Protection from green"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "black",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "green",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, that player discards a card and you untap all lands you control.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

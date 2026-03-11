@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, investigate once for each nontoken attacking creature.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigInvestigate",
-        "TriggerDescription": "Whenever CARDNAME attacks, investigate once for each nontoken attacking creature.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

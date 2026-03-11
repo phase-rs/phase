@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you draw X cards and you lose X life, where X is the number of Zombies you control.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, you draw X cards and you lose X life, where X is the number of Zombies you control."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

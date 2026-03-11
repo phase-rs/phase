@@ -1,30 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a blue spell, if NICKNAME is a creature, he gets +1/+1 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a blue spell, if NICKNAME is a creature, he gets +1/+1 until end of turn.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Blue",
-        "Execute": "TrigPump",
-        "IsPresent": "Card.Self+Creature",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, untap NICKNAME. Until your next turn, he becomes a land and gains \"{T}: Add {U}.\" (He's not a creature during that time.)",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, untap NICKNAME. Until your next turn, he becomes a land and gains \"{T}: Add {U}.\" (He's not a creature during that time.)",
-        "ValidPlayer": "You",
-        "Execute": "TrigUntap",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,40 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "Y",
-          "RestrictValid": "Spell.Instant,Spell.Sorcery,Spell.Demon,Spell.Spirit",
-          "SpellDescription": "Add X mana of any one color, where X is the number of soul counters on CARDNAME. Spend this mana only to cast instant, sorcery, Demon, and Spirit spells."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "Y",
-        "RestrictValid": "Spell.Instant,Spell.Sorcery,Spell.Demon,Spell.Spirit",
-        "SpellDescription": "Add X mana of any one color, where X is the number of soul counters on CARDNAME. Spend this mana only to cast instant, sorcery, Demon, and Spirit spells."
-      }
+      "description": "Add X mana of any one color, where X is the number of soul counters on CARDNAME. Spend this mana only to cast instant, sorcery, Demon, and Spirit spells.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Morbid — At the beginning of each end step, if a creature died this turn, put a soul counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Morbid — At the beginning of each end step, if a creature died this turn, put a soul counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

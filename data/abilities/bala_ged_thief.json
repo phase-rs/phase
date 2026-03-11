@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Ally you control enters, target player reveals a number of cards from their hand equal to the number of Allies you control. You choose one of them. That player discards that card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "DBDiscard",
-        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, target player reveals a number of cards from their hand equal to the number of Allies you control. You choose one of them. That player discards that card.",
-        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Ally.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

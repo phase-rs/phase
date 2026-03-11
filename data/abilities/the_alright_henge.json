@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "2",
-          "SpellDescription": "Add {G}{G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "SpellDescription": "Add {G}{G}."
-      }
+      "description": "Add {G}{G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nontoken creature enters the battlefield under your control, put a +1/+1 counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a nontoken creature enters the battlefield under your control, put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Creature.!token+YouCtrl",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

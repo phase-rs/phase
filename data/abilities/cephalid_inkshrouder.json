@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains shroud until end of turn and can't be blocked this turn. (A creature with shroud can't be the target of spells or abilities.)",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "CARDNAME gains shroud until end of turn and can't be blocked this turn.",
-        "KW": "Shroud",
-        "SpellDescription": "CARDNAME gains shroud until end of turn and can't be blocked this turn. (A creature with shroud can't be the target of spells or abilities.)",
-        "SubAbility": "DBUnblockable"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

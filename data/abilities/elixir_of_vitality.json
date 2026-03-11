@@ -2,73 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 4
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 4 life."
-      }
+      "description": "You gain 4 life.",
+      "effect": {
+        "amount": 4,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 8
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "8"
+            "cost": "8",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 8 life."
-      }
+      "description": "You gain 8 life.",
+      "effect": {
+        "amount": 8,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

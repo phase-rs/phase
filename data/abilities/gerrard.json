@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your draw step, draw an additional card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Draw",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "At the beginning of your draw step, draw an additional card."
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

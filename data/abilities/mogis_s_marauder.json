@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, up to X target creatures each gain intimidate and haste until end of turn, where X is your devotion to black.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, up to X target creatures each gain intimidate and haste until end of turn, where X is your devotion to black."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

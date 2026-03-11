@@ -2,36 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "AILogic": "Pump",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "ActivationPhases": "Declare Attackers",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "Cast this spell only during the declare attackers step. Target creature can't be blocked this turn."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "AILogic": "Pump",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "ActivationPhases": "Declare Attackers",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "Cast this spell only during the declare attackers step. Target creature can't be blocked this turn."
-      }
+      "description": "Cast this spell only during the declare attackers step. Target creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

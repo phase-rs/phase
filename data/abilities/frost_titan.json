@@ -1,38 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {2}.",
       "mode": "BecomesTarget",
-      "params": {
-        "Execute": "TrigCounter",
-        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {2}.",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "ValidTarget": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, tap target permanent. It doesn't untap during its controller's next untap step.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigTap",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, tap target permanent. It doesn't untap during its controller's next untap step.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, tap target permanent. It doesn't untap during its controller's next untap step.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, tap target permanent. It doesn't untap during its controller's next untap step."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "RememberTargets": "True",
-          "TgtPrompt": "Select target attacking creature",
-          "SubAbility": "FeintPump",
-          "SpellDescription": "Tap all creatures blocking target attacking creature. Prevent all combat damage that would be dealt this turn by that creature and each creature blocking it.",
-          "ValidCards": "Creature.blockingRemembered",
-          "ValidTgts": "Creature.attacking"
-        }
-      },
       "cost": null,
+      "description": "Tap all creatures blocking target attacking creature. Prevent all combat damage that would be dealt this turn by that creature and each creature blocking it.",
+      "effect": {
+        "description": "Tap all creatures blocking target attacking creature. Prevent all combat damage that would be dealt this turn by that creature and each creature blocking it.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberTargets": "True",
-        "TgtPrompt": "Select target attacking creature",
-        "SubAbility": "FeintPump",
-        "SpellDescription": "Tap all creatures blocking target attacking creature. Prevent all combat damage that would be dealt this turn by that creature and each creature blocking it.",
-        "ValidCards": "Creature.blockingRemembered",
-        "ValidTgts": "Creature.attacking"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

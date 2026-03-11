@@ -2,45 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Put an ice counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "ICE",
         "count": 1,
+        "counter_type": "ICE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an ice counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/ICE>"
+        "cost": "SubCounter<1/ICE>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

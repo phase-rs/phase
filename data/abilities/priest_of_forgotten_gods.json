@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "TargetMax": "MaxTgts",
-        "SubAbility": "DBSac",
-        "TargetMin": "0",
-        "SpellDescription": "Any number of target players each lose 2 life and sacrifice a creature. You add {B}{B} and draw a card."
-      }
+      "description": "Any number of target players each lose 2 life and sacrifice a creature. You add {B}{B} and draw a card.",
+      "effect": {
+        "amount": 2,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

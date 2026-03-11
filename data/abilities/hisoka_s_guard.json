@@ -2,57 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+Other"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control other than CARDNAME has shroud for as long as CARDNAME remains tapped. (It can't be the target of spells or abilities.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature you control other than CARDNAME has shroud for as long as CARDNAME remains tapped. (It can't be the target of spells or abilities.)",
-        "RememberTargets": "True",
-        "StackDescription": "SpellDescription",
-        "TgtPrompt": "Select target creature other than CARDNAME that you control"
-      }
+      "target_prompt": "Select target creature other than CARDNAME that you control"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
   "triggers": [
     {
       "mode": "Untaps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "ClearRemembered",
-        "Static": "True",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Affected": "Creature.IsRemembered"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

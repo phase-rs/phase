@@ -2,48 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "DBEffect,DBPump"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DBEffect,DBPump"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each upkeep, create a 1/1 Phyrexian Serpent Squirrel artifact creature token named Toski's Coil with \"Whenever this creature deals combat damage to a player, draw a card.\"",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigToken"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This spell can't be countered.",
-        "Layer": "CantHappen",
-        "ValidSA": "Spell"
-      }
+      "description": "At the beginning of each upkeep, create a 1/1 Phyrexian Serpent Squirrel artifact creature token named Toski's Coil with \"Whenever this creature deals combat damage to a player, draw a card.\"",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

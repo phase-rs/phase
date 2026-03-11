@@ -2,26 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLE3+YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Return target creature card with mana value 3 or less from your graveyard to the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target creature card with mana value 3 or less from your graveyard to the battlefield.",
-        "TgtPrompt": "Choose target creature card with mana value 3 or less in your graveyard"
-      }
+      "target_prompt": "Choose target creature card with mana value 3 or less in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

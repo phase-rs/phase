@@ -2,84 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 black Vampire creature token with lifelink.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_1_1_vampire_lifelink",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 black Vampire creature token with lifelink.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Always",
-          "StaticAbilities": "STPump",
-          "Duration": "Permanent",
-          "Planeswalker": "True",
-          "Name": "Emblem — Sorin, Lord of Innistrad",
-          "SpellDescription": "You get an emblem with \"Creatures you control get +1/+0.\"",
-          "Image": "emblem_sorin_lord_of_innistrad"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Always",
-        "StaticAbilities": "STPump",
-        "Duration": "Permanent",
-        "Planeswalker": "True",
-        "Name": "Emblem — Sorin, Lord of Innistrad",
-        "SpellDescription": "You get an emblem with \"Creatures you control get +1/+0.\"",
-        "Image": "emblem_sorin_lord_of_innistrad"
-      }
+      "description": "You get an emblem with \"Creatures you control get +1/+0.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "Destroy up to three target creatures and/or other planeswalkers. Return each card put into a graveyard this way to the battlefield under your control.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker.Other"
-        }
+          "filters": [
+            {
+              "card_type": "Creature,Planeswalker",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy up to three target creatures and/or other planeswalkers. Return each card put into a graveyard this way to the battlefield under your control.",
-        "Planeswalker": "True",
-        "RememberTargets": "True",
-        "ForgetOtherTargets": "True",
-        "SubAbility": "DBChangeZoneAll",
-        "TargetMin": "0",
-        "TargetMax": "3",
-        "Ultimate": "True",
-        "TgtPrompt": "Select target creatures or other planeswalkers"
-      }
+      "target_prompt": "Select target creatures or other planeswalkers"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

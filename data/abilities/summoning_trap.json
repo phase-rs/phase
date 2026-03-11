@@ -2,55 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 7,
-        "destination": "Battlefield"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "SpellDescription": "Look at the top seven cards of your library. You may put a creature card from among them onto the battlefield. Put the rest on the bottom of your library in any order.",
-        "ChangeValid": "Creature",
-        "ChangeNum": "1"
+      "description": "Look at the top seven cards of your library. You may put a creature card from among them onto the battlefield. Put the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 7,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "SetTrap"
+      },
+      "description": "If a creature spell you cast this turn was countered by a spell or ability an opponent controlled, you may pay {0} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
+      "mode": {
+        "Other": "AlternativeCost"
       }
     }
   ],
   "triggers": [
     {
-      "mode": "Countered",
-      "params": {
-        "Execute": "TrackValidCounters",
-        "ValidCause": "SpellAbility.OppCtrl",
-        "Static": "True",
-        "ValidSA": "Spell.Creature+wasCastByYou"
-      }
+      "mode": "Countered"
     },
     {
       "mode": "Phase",
-      "params": {
-        "Phase": "Cleanup",
-        "Execute": "TrigReset",
-        "Static": "True"
-      }
+      "phase": "Cleanup"
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "ValidSA": "Spell.Self",
-        "Description": "If a creature spell you cast this turn was countered by a spell or ability an opponent controlled, you may pay {0} rather than pay this spell's mana cost.",
-        "CheckSVar": "SetTrap",
-        "EffectZone": "All"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

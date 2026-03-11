@@ -1,26 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Enchanted creature gets +1/+1 for each creature you control.",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+1 for each creature you control.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          },
+          {
+            "type": "Other",
+            "value": "Human"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted creature is a Human, it has first strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy+Human",
-        "AddKeyword": "First Strike",
-        "Description": "As long as enchanted creature is a Human, it has first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

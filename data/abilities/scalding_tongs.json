@@ -1,22 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you have three or fewer cards in hand, CARDNAME deals 1 damage to target opponent or planeswalker.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if you have three or fewer cards in hand, CARDNAME deals 1 damage to target opponent or planeswalker.",
-        "Phase": "Upkeep",
-        "IsPresent": "Card.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "LE3",
-        "Execute": "TrigDealDamage",
-        "ValidPlayer": "You",
-        "PresentZone": "Hand"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

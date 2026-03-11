@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player mills two cards.",
       "effect": {
-        "type": "Mill",
         "count": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player mills two cards.",
-        "SubAbility": "DBChangeZone",
-        "Defined": "Player"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

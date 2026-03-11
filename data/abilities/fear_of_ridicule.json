@@ -1,29 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigExile",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "ValidSource": "Creature.Enchantment+YouCtrl",
-        "TriggerDescription": "Whenever one or more enchantment creatures you control deal combat damage to a player, exile a random creature card from that player's library. Create a token that's a copy of that card, except it's a 1/1 enchantment creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Enchantment"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchantment creatures you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Enchantment+YouCtrl",
-        "AddKeyword": "Menace",
-        "Description": "Enchantment creatures you control have menace."
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever one or more enchantment creatures you control deal combat damage to a player, exile a random creature card from that player's library. Create a token that's a copy of that card, except it's a 1/1 enchantment creature.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Enchantment"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

@@ -1,41 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When this Aura enters, tap enchanted permanent.",
-        "Origin": "Any",
-        "Execute": "TrigTap"
+      "description": "Enchanted permanent doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.AttachedBy",
-        "RemoveAllAbilities": "True",
-        "Description": "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step."
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
-        "ValidCard": "Permanent.AttachedBy",
-        "Secondary": "True",
-        "Layer": "CantHappen"
-      }
+      "description": "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Aura enters, tap enchanted permanent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

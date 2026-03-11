@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "ExileFromGrave<3/Artifact>",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "ExileFromGrave<3/Artifact>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return CARDNAME from your graveyard to your hand.",
-        "Defined": "Self",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may sacrifice three artifacts rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Description": "You may sacrifice three artifacts rather than pay this spell's mana cost.",
-        "Cost": "Sac<3/Artifact>",
-        "ValidSA": "Spell.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

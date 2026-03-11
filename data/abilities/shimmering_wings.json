@@ -2,36 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return CARDNAME to its owner's hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has flying. (It can't be blocked except by creatures with flying or reach.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Description": "Enchanted creature has flying. (It can't be blocked except by creatures with flying or reach.)",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

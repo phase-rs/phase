@@ -2,45 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "Choice",
-          "Choices": "AnyColor",
-          "SpellDescription": "Target creature or enchantment you control gains protection from the color of your choice until end of turn.",
-          "ValidTgts": "Creature.YouCtrl,Enchantment.YouCtrl",
-          "TgtPrompt": "Select target creature or enchantment you control"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature or enchantment you control gains protection from the color of your choice until end of turn.",
+      "effect": {
+        "description": "Target creature or enchantment you control gains protection from the color of your choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Gains": "Choice",
-        "Choices": "AnyColor",
-        "SpellDescription": "Target creature or enchantment you control gains protection from the color of your choice until end of turn.",
-        "ValidTgts": "Creature.YouCtrl,Enchantment.YouCtrl",
-        "TgtPrompt": "Select target creature or enchantment you control"
-      }
+      "target_prompt": "Select target creature or enchantment you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

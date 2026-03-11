@@ -2,39 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 W",
+        "type": "Mana"
+      },
+      "description": "Exile enchanted creature.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "Defined": "Enchanted",
-        "SpellDescription": "Exile enchanted creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "Enchanted creature can't attack or block.",
-        "ValidCard": "Creature.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

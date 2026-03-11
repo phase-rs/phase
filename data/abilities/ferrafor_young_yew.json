@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "MultiplyCounter",
-        "counter_type": "",
-        "multiplier": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Double the number of each kind of counter on target creature."
-      }
+      "description": "Double the number of each kind of counter on target creature.",
+      "effect": {
+        "counter_type": "",
+        "multiplier": 2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "MultiplyCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create a number of 1/1 green Saproling creature tokens equal to the number of counters among creatures target player controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "TriggerDescription": "When NICKNAME enters, create a number of 1/1 green Saproling creature tokens equal to the number of counters among creatures target player controls.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

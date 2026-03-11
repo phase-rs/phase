@@ -2,62 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "TRAP",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W"
+            "cost": "2 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put a trap counter on target land you control.",
+      "effect": {
+        "count": 1,
+        "counter_type": "TRAP",
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a trap counter on target land you control.",
-        "TgtPrompt": "Select target land you control"
-      }
+      "target_prompt": "Select target land you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "CARDNAME deals 3 damage to target attacking creature without flying.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+withoutFlying"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 3 damage to target attacking creature without flying.",
-        "TgtPrompt": "Select target attacking creature without flying"
-      }
+      "target_prompt": "Select target attacking creature without flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

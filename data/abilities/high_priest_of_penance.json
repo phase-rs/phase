@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, you may destroy target nonland permanent.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, you may destroy target nonland permanent.",
-        "ValidTarget": "Card.Self",
-        "OptionalDecider": "You",
-        "Execute": "TrigDestroy"
+      "optional": true,
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

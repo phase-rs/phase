@@ -2,60 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Put an elixir counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "ELIXIR",
         "count": 1,
+        "counter_type": "ELIXIR",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an elixir counter on CARDNAME.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<All/ELIXIR>"
+            "cost": "SubCounter<All/ELIXIR>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "You gain 2 life for each elixir counter removed this way."
-      }
+      "description": "You gain 2 life for each elixir counter removed this way.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

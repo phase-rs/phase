@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo Any",
-        "params": {
-          "Amount": "2",
-          "RestrictValid": "Spell.Elemental,Activated.Elemental+inZoneBattlefield",
-          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Elemental spells or activate abilities of Elementals."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "RestrictValid": "Spell.Elemental,Activated.Elemental+inZoneBattlefield",
-        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Elemental spells or activate abilities of Elementals."
-      }
+      "description": "Add two mana in any combination of colors. Spend this mana only to cast Elemental spells or activate abilities of Elementals.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

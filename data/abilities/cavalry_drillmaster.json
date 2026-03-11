@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target creature gets +2/+0 and gains first strike until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPump",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, target creature gets +2/+0 and gains first strike until end of turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

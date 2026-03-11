@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for a basic land card and reveal it. You may put that card onto the battlefield tapped if you control a land named Wastes. Otherwise, put that card into your hand. Then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Library",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "ChangeType": "Land.Basic",
-        "SubAbility": "DBChangeZone",
-        "Shuffle": "False",
-        "SpellDescription": "Search your library for a basic land card and reveal it. You may put that card onto the battlefield tapped if you control a land named Wastes. Otherwise, put that card into your hand. Then shuffle.",
-        "ChangeTypeDesc": "basic land",
-        "Reveal": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

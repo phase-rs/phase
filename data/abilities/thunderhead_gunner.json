@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Draw a card. Activate only as a sorcery and only once each turn.",
-        "ActivationLimit": "1"
-      }
+      "description": "Draw a card. Activate only as a sorcery and only once each turn.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, put a +1/+1 counter on each other creature you control. You gain 1 life for each other creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a +1/+1 counter on each other creature you control. You gain 1 life for each other creature you control.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigPutCounterAll"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, put a +1/+1 counter on each other creature you control. You gain 1 life for each other creature you control.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigPutCounterAll",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a +1/+1 counter on each other creature you control. You gain 1 life for each other creature you control.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

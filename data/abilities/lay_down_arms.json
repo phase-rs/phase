@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLEX"
-        }
-      },
       "cost": null,
+      "description": "Exile target creature with mana value less than or equal to the number of Plains you control. Its controller gains 3 life.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with mana value less or equal to the number of Plains you control",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Exile target creature with mana value less than or equal to the number of Plains you control. Its controller gains 3 life."
-      }
+      "target_prompt": "Select target creature with mana value less or equal to the number of Plains you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

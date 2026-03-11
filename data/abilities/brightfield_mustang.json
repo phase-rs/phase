@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks while saddled, untap it and put a +1/+1 counter on it.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self+IsSaddled",
-        "TriggerDescription": "Whenever this creature attacks while saddled, untap it and put a +1/+1 counter on it.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsSaddled"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell other than your first spell each turn, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "GT1",
-        "ValidCard": "Card.YouCtrl",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a spell other than your first spell each turn, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

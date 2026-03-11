@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell of the chosen color, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.ChosenColor",
-        "TriggerDescription": "Whenever you cast a spell of the chosen color, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

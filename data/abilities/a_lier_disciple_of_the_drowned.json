@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flashback",
-        "Affected": "Instant.YouOwn,Sorcery.YouOwn",
-        "AffectedZone": "Graveyard",
-        "Condition": "PlayerTurn",
-        "Description": "As long as it's your turn, each instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "Spells can't be countered.",
-        "ActiveZones": "Battlefield",
-        "ValidSA": "Spell"
-      }
+      "description": "Spells can't be countered.",
+      "event": "Counter"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn,Sorcery.YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "As long as it's your turn, each instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Flashback",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

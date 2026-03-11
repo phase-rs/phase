@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, draw cards equal to its power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, draw cards equal to its power.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

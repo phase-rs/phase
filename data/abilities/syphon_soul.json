@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage to each other player. You gain life equal to the damage dealt this way.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 2 damage to each other player. You gain life equal to the damage dealt this way.",
-        "SubAbility": "DBGainLife",
-        "Defined": "Player.Other"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

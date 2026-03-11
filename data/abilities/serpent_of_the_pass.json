@@ -1,32 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "EffectZone": "All",
-        "Description": "If there are three or more Lesson cards in your graveyard, you may cast this spell as though it had flash.",
-        "ValidCard": "Card.Self",
-        "PresentZone": "Graveyard",
-        "PresentCompare": "GE3",
-        "Caster": "You",
-        "IsPresent": "Lesson.YouOwn",
-        "ValidSA": "Spell"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Lesson",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If there are three or more Lesson cards in your graveyard, you may cast this spell as though it had flash.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "This spell costs {1} less to cast for each noncreature, nonland card in your graveyard."
-      }
+      "description": "This spell costs {1} less to cast for each noncreature, nonland card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

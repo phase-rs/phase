@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Player"
-        }
-      },
       "cost": null,
+      "description": "Target creature or player gains flying until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature,Player",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Flying",
-        "SubAbility": "NoDamage",
-        "SpellDescription": "Target creature or player gains flying until end of turn.",
-        "TgtPrompt": "Select target creature or player"
-      }
+      "target_prompt": "Select target creature or player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

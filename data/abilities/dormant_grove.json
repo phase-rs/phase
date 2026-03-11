@@ -1,41 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has toughness 6 or greater, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has toughness 6 or greater, transform CARDNAME.",
-            "Phase": "BeginCombat",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPutCounter",
-            "ValidPlayer": "You"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other creatures you control have vigilance.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.Other+YouCtrl",
-            "Description": "Other creatures you control have vigilance.",
-            "AddKeyword": "Vigilance"
-          }
+          "modifications": [
+            {
+              "keyword": "Vigilance",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

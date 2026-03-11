@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo Any",
-        "params": {
-          "Amount": "2",
-          "RestrictValid": "Spell.Instant,Spell.Sorcery",
-          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast instant or sorcery spells."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "RestrictValid": "Spell.Instant,Spell.Sorcery",
-        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast instant or sorcery spells."
-      }
+      "description": "Add two mana in any combination of colors. Spend this mana only to cast instant or sorcery spells.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your third spell each turn, exile a random card from your library. Until end of turn, you may play that card without paying its mana cost.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever you cast your third spell each turn, exile a random card from your library. Until end of turn, you may play that card without paying its mana cost.",
-        "TriggerZones": "Battlefield",
-        "ActivatorThisTurnCast": "EQ3",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

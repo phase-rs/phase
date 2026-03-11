@@ -1,55 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "AddTurn",
-            "params": {
-              "SpellDescription": "Take an extra turn after this one.",
-              "NumTurns": "1",
-              "Exhaust": "True"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "Waterbend<20>"
+            "cost": "Waterbend<20>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Take an extra turn after this one.",
-            "NumTurns": "1",
-            "Exhaust": "True"
-          }
+          "description": "Take an extra turn after this one.",
+          "effect": {
+            "description": "Take an extra turn after this one.",
+            "name": "AddTurn",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell, create a 1/1 colorless Spirit creature token with \"This token can't block or be blocked by non-Spirit creatures.\"",
           "mode": "SpellCast",
-          "params": {
-            "ValidActivatingPlayer": "You",
-            "ValidCard": "Card",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "TriggerDescription": "Whenever you cast a spell, create a 1/1 colorless Spirit creature token with \"This token can't block or be blocked by non-Spirit creatures.\""
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "PreventionEffect": "True",
-        "ActiveZones": "Battlefield",
-        "Description": "If a spell would deal damage to a permanent or player, prevent 1 damage that spell would deal to that permanent or player.",
-        "ValidSource": "Spell",
-        "ReplaceWith": "DBReplace",
-        "ValidTarget": "Permanent,Player"
-      }
+      "description": "If a spell would deal damage to a permanent or player, prevent 1 damage that spell would deal to that permanent or player.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

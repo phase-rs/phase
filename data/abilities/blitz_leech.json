@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target creature an opponent controls gets -2/-2 until end of turn. Remove all counters from that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -2/-2 until end of turn. Remove all counters from that creature."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

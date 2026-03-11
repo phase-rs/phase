@@ -2,36 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "This turn, you may play basic lands from outside the game.",
-          "CostDesc": "Exile a card from your hand:"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "ExileFromHand<1/Card>"
+        "cost": "ExileFromHand<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This turn, you may play basic lands from outside the game.",
-        "CostDesc": "Exile a card from your hand:"
-      }
+      "description": "This turn, you may play basic lands from outside the game.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Basic"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Basic lands you control have \"{T}: Add one mana of any color.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Basic lands you control have \"{T}: Add one mana of any color.\"",
-        "AddAbility": "AnyMana",
-        "Affected": "Land.Basic+YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

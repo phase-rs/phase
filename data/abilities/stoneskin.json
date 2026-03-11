@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +0/+10.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +0/+10.",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "10"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 10
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

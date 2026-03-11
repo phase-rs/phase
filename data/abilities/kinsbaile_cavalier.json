@@ -1,17 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Knight"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Knight creatures you control have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Knight+YouCtrl",
-        "AddKeyword": "Double Strike",
-        "Description": "Knight creatures you control have double strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

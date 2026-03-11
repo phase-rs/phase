@@ -1,22 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Bear Form — During your turn, CARDNAME is a Bear with base power and toughness 4/2. (It loses all other creature types.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Condition": "PlayerTurn",
-        "AddType": "Creature & Bear",
-        "SetToughness": "2",
-        "SetPower": "4",
-        "Description": "Bear Form — During your turn, CARDNAME is a Bear with base power and toughness 4/2. (It loses all other creature types.)",
-        "Affected": "Card.Self",
-        "RemoveCreatureTypes": "True"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        },
+        {
+          "core_type": "Creature & Bear",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

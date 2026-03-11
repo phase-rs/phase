@@ -1,77 +1,74 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME enters or attacks, draw a card, then discard a card.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Execute": "TrigDraw",
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, draw a card, then discard a card.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever NICKNAME enters or attacks, draw a card, then discard a card.",
           "mode": "Attacks",
-          "params": {
-            "Secondary": "True",
-            "Execute": "TrigDraw",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, draw a card, then discard a card."
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your upkeep, if there are fourteen or more cards in your graveyard, you may transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "Execute": "TrigTransform",
-            "IsPresent": "Card.YouOwn",
-            "TriggerDescription": "At the beginning of your upkeep, if there are fourteen or more cards in your graveyard, you may transform NICKNAME.",
-            "PresentCompare": "GE14",
-            "OptionalDecider": "You",
-            "ValidPlayer": "You",
-            "PresentZone": "Graveyard"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Card.YouCtrl",
-            "Condition": "PlayerTurn",
-            "MayPlay": "True",
-            "Description": "Echo of the Lost — During your turn, you may play cards from your graveyard.",
-            "AffectedZone": "Graveyard"
+          "description": "If a card or token would be put into your graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Description": "If a card or token would be put into your graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard",
-            "ActiveZones": "Battlefield",
-            "ValidCard": "Card.YouOwn"
-          }
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "affected_zone": "Graveyard",
+          "description": "Echo of the Lost — During your turn, you may play cards from your graveyard.",
+          "mode": "Continuous"
         }
-      ]
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

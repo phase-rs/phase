@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +0/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control get +0/+1.",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

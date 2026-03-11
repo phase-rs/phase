@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target card from your graveyard to your hand. If you return a nonland card to your hand this way, CARDNAME deals damage equal to that card's mana value to any target. Exile CARDNAME.",
-        "SubAbility": "DBVengefulRebirthDamage",
-        "RememberTargets": "True"
-      }
+      "description": "Return target card from your graveyard to your hand. If you return a nonland card to your hand this way, CARDNAME deals damage equal to that card's mana value to any target. Exile CARDNAME.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "SubAbility": "DBAnimateAll",
-        "SpellDescription": "Until end of turn, each creature you control gets +2/+2 and gains trample and \"This creature can't be blocked by more than one creature.\"",
-        "KW": "Trample"
-      }
+      "description": "Until end of turn, each creature you control gets +2/+2 and gains trample and \"This creature can't be blocked by more than one creature.\"",
+      "effect": {
+        "power": 2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 2,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

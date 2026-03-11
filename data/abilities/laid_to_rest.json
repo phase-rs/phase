@@ -1,31 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Human you control dies, draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Human.YouCtrl",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever a Human you control dies, draw a card.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Human",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature you control with a +1/+1 counter on it dies, you gain 2 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1",
-        "Origin": "Battlefield",
-        "Execute": "DBGainLife",
-        "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it dies, you gain 2 life."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

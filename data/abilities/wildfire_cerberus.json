@@ -2,37 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 R R",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 R R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes monstrous, it deals 2 damage to each opponent and each creature they control.",
       "mode": "BecomeMonstrous",
-      "params": {
-        "TriggerDescription": "When CARDNAME becomes monstrous, it deals 2 damage to each opponent and each creature they control.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDamageAll"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,62 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Defined": "Self",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
-          "Amount": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
-        "Amount": "1"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R R R",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter on CARDNAME. Activate only during your upkeep.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R R R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME. Activate only during your upkeep.",
-        "ActivationPhases": "Upkeep"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "ReplaceDamage",
-        "ValidTarget": "Card.Self",
-        "PreventionEffect": "True",
-        "ActiveZones": "Battlefield",
-        "AlwaysReplace": "True",
-        "Description": "For each 1 damage that would be dealt to CARDNAME, if it has a +1/+1 counter on it, remove a +1/+1 counter from it and prevent that 1 damage."
-      }
+      "description": "For each 1 damage that would be dealt to CARDNAME, if it has a +1/+1 counter on it, remove a +1/+1 counter from it and prevent that 1 damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

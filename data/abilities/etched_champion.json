@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — CARDNAME has protection from each color as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "Metalcraft — CARDNAME has protection from each color as long as you control three or more artifacts.",
-        "AddKeyword": "Protection from each color",
-        "Condition": "Metalcraft"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "each",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "color",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

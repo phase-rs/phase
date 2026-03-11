@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an Aura becomes attached to CARDNAME, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"",
       "mode": "Attached",
-      "params": {
-        "ValidSource": "Aura",
-        "Execute": "TrigToken",
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Whenever an Aura becomes attached to CARDNAME, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Aura",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is equipped, it gets +0/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "As long as CARDNAME is equipped, it gets +0/+2.",
-        "Affected": "Card.Self+equipped"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

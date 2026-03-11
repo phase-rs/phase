@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/Land>"
+            "cost": "Return<1/Land>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control gains shroud until end of turn. (It can't be the target of spells or abilities.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "KW": "Shroud",
-        "SpellDescription": "Target creature you control gains shroud until end of turn. (It can't be the target of spells or abilities.)"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

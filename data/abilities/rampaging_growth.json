@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for a basic land card and put that card onto the battlefield, then shuffle. Until end of turn, that land becomes a 4/3 Insect creature with reach and haste. It's still a land.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "Search your library for a basic land card and put that card onto the battlefield, then shuffle. Until end of turn, that land becomes a 4/3 Insect creature with reach and haste. It's still a land.",
-        "ChangeNum": "1",
-        "ChangeTypeDesc": "basic land",
-        "RememberChanged": "True",
-        "ChangeType": "Land.Basic"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent,Player",
-        "Description": "If a red instant or sorcery spell you control or a red planeswalker you control would deal damage to a permanent or player, it deals that much damage plus 2 to that permanent or player instead.",
-        "ValidSource": "Instant.YouCtrl+Red,Sorcery.YouCtrl+Red,Planeswalker.YouCtrl+Red",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DmgPlus2"
-      }
+      "description": "If a red instant or sorcery spell you control or a red planeswalker you control would deal damage to a permanent or player, it deals that much damage plus 2 to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

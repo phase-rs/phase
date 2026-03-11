@@ -2,39 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create a 3/3 green Phyrexian Beast creature token with toxic 1. (Players dealt combat damage by this creature also get a poison counter.)",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_phyrexian_beast_toxic",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 3/3 green Phyrexian Beast creature token with toxic 1. (Players dealt combat damage by this creature also get a poison counter.)"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Corrupted — As long as an opponent has three or more poison counters and CARDNAME is in your graveyard, it has flashback {2}{G}. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SVarCompare": "GE3",
-        "EffectZone": "Graveyard",
-        "AddKeyword": "Flashback:2 G",
-        "AffectedZone": "Graveyard",
-        "CheckSVar": "X",
-        "Description": "Corrupted — As long as an opponent has three or more poison counters and CARDNAME is in your graveyard, it has flashback {2}{G}. (You may cast this card from your graveyard for its flashback cost. Then exile it.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Flashback:2",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "G",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

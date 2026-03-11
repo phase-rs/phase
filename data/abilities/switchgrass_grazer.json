@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it deals 1 damage to any target. If CARDNAME is saddled and a creature was dealt damage this way, that creature perpetually gains \"This creature can't block\" and \"Damage isn't removed from this creature during cleanup steps.\"",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDamage",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, it deals 1 damage to any target. If CARDNAME is saddled and a creature was dealt damage this way, that creature perpetually gains \"This creature can't block\" and \"Damage isn't removed from this creature during cleanup steps.\""
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

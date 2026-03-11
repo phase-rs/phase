@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "AddTrigger": "ArmorAttack",
-        "AddSVar": "ArmorConjure & ArmorSetAtt & ArmorClean",
-        "Description": "Equipped creature has \"Whenever this creature attacks, conjure a card named Ball Lightning onto the battlefield tapped and attacking.\""
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"Whenever this creature attacks, conjure a card named Ball Lightning onto the battlefield tapped and attacking.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

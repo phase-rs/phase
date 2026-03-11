@@ -1,23 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if twenty or more creature cards are in your graveyard, you win the game.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "PresentZone": "Graveyard",
-        "Execute": "TrigWin",
-        "ValidPlayer": "You",
-        "IsPresent": "Creature",
-        "TriggerZones": "Battlefield",
-        "PresentPlayer": "You",
-        "PresentCompare": "GE20",
-        "TriggerDescription": "At the beginning of your upkeep, if twenty or more creature cards are in your graveyard, you win the game."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

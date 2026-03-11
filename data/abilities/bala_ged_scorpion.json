@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may destroy target creature with power 1 or less.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigDestroy",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you may destroy target creature with power 1 or less."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

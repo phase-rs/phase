@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, scry 1.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DBScry",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, scry 1."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, choose land or nonland. Seek a permanent card of the chosen type.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChoose",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, choose land or nonland. Seek a permanent card of the chosen type.",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

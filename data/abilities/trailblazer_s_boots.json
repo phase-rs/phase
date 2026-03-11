@@ -1,17 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has nonbasic landwalk.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:Land.nonBasic:Nonbasic land",
-        "Description": "Equipped creature has nonbasic landwalk.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Land.nonBasic:Nonbasic",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "land",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

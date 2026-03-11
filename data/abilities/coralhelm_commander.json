@@ -1,34 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 2-3 3/3 Flying",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE3_LEVEL",
-        "PresentCompare": "EQ1",
-        "Description": "LEVEL 2-3 3/3 Flying",
-        "SetToughness": "3",
-        "SetPower": "3"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 4+ 4/4 Flying,,,Other Merfolk creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE4_LEVEL",
-        "PresentCompare": "EQ1",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying",
-        "AddStaticAbility": "SBoost",
-        "SetToughness": "4",
-        "Description": "LEVEL 4+ 4/4 Flying,,,Other Merfolk creatures you control get +1/+1.",
-        "SetPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

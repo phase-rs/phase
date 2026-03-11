@@ -1,30 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast artifact spells from your graveyard by paying 3 life in addition to paying their other costs. If you cast a spell this way, that artifact enters with a finality counter on it.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigEffect",
-        "ValidCard": "Card.CastSa Spell.MayPlaySource",
-        "Static": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "CastSa Spell.MayPlaySource"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.YouCtrl",
-        "Description": "You may cast artifact spells from your graveyard by paying 3 life in addition to paying their other costs. If you cast a spell this way, that artifact enters with a finality counter on it.",
-        "MayPlay": "True",
-        "AffectedZone": "Graveyard",
-        "RaiseCost": "PayLife<3>",
-        "EffectZone": "Battlefield"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

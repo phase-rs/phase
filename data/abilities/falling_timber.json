@@ -2,34 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Prevent all combat damage target creature would deal this turn. If this spell was kicked, prevent all combat damage another target creature would deal this turn.",
-          "TargetMin": "X",
-          "TargetMax": "X",
-          "ForgetOnMoved": "Battlefield",
-          "ReplacementEffects": "RPrevent",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Prevent all combat damage target creature would deal this turn. If this spell was kicked, prevent all combat damage another target creature would deal this turn.",
-        "TargetMin": "X",
-        "TargetMax": "X",
-        "ForgetOnMoved": "Battlefield",
-        "ReplacementEffects": "RPrevent",
-        "ValidTgts": "Creature"
-      }
+      "description": "Prevent all combat damage target creature would deal this turn. If this spell was kicked, prevent all combat damage another target creature would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

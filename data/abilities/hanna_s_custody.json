@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "type": "Typed"
+      },
+      "description": "All artifacts have shroud. (They can't be the targets of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "All artifacts have shroud. (They can't be the targets of spells or abilities.)",
-        "AddKeyword": "Shroud",
-        "Affected": "Artifact"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

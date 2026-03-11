@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Paradox — Whenever you cast a spell from anywhere other than your hand, CARDNAME deals 2 damage to target player. That player discards a card, then draws a card. Put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Paradox — Whenever you cast a spell from anywhere other than your hand, CARDNAME deals 2 damage to target player. That player discards a card, then draws a card. Put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Card.!wasCastFromYourHand",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

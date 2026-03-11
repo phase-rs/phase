@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +4/+4 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Trample",
-        "AddToughness": "4",
-        "Description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +4/+4 and has trample.",
-        "AddPower": "4",
-        "Condition": "Metalcraft"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

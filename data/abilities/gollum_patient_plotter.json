@@ -2,50 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Return NICKNAME from your graveyard to your hand. Activate only as a sorcery.",
-        "ActivationZone": "Graveyard"
-      }
+      "description": "Return NICKNAME from your graveyard to your hand. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME leaves the battlefield, the Ring tempts you.",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTempt",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, the Ring tempts you."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

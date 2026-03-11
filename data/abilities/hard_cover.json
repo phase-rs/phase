@@ -1,19 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +0/+2 and has \"{T}: Draw a card, then discard a card.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "2",
-        "AddAbility": "ABDraw",
-        "AddSVar": "HardCoverDiscard",
-        "Description": "Enchanted creature gets +0/+2 and has \"{T}: Draw a card, then discard a card.\""
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "ability": "ABDraw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

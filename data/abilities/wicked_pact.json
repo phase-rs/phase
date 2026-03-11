@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy two target nonblack creatures. You lose 5 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TargetMax": "2",
-        "TgtPrompt": "Select target nonblack creatures",
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Destroy two target nonblack creatures. You lose 5 life."
-      }
+      "target_prompt": "Select target nonblack creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

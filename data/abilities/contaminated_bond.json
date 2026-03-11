@@ -1,28 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
-        "Execute": "TrigLoseLifeAttack",
-        "ValidCard": "Card.AttachedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
       "mode": "Blocks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigLoseLifeBlock"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

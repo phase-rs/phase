@@ -2,104 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 red Monk creature token with prowess.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_1_1_monk_prowess",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 red Monk creature token with prowess.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Exile the top two cards of your library. Choose one of them. You may play that card this turn.",
       "effect": {
-        "type": "Dig",
         "count": 2,
-        "destination": "Exile"
+        "destination": "Exile",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RememberChanged": "True",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top two cards of your library. Choose one of them. You may play that card this turn.",
-        "SubAbility": "DBChoose"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Choose target creature an opponent controls. Whenever you attack this turn, CARDNAME deals damage equal to the number of attacking creatures to that creature.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Whenever you attack this turn, CARDNAME deals damage equal to the number of attacking creatures to {c:ThisTargetedCard}.",
-        "SpellDescription": "Choose target creature an opponent controls. Whenever you attack this turn, CARDNAME deals damage equal to the number of attacking creatures to that creature.",
-        "SubAbility": "DBEffect",
-        "TgtPrompt": "Choose target creature an opponent controls",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Choose target creature an opponent controls"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "AILogic": "Always",
-          "Name": "Emblem — Jaya, Fiery Negotiator",
-          "Planeswalker": "True",
-          "Image": "emblem_jaya_fiery_negotiator",
-          "Triggers": "CopySpell",
-          "SpellDescription": "You get an emblem with \"Whenever you cast a red instant or sorcery spell, copy it twice. You may choose new targets for the copies.\"",
-          "Duration": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "AILogic": "Always",
-        "Name": "Emblem — Jaya, Fiery Negotiator",
-        "Planeswalker": "True",
-        "Image": "emblem_jaya_fiery_negotiator",
-        "Triggers": "CopySpell",
-        "SpellDescription": "You get an emblem with \"Whenever you cast a red instant or sorcery spell, copy it twice. You may choose new targets for the copies.\"",
-        "Duration": "Permanent"
-      }
+      "description": "You get an emblem with \"Whenever you cast a red instant or sorcery spell, copy it twice. You may choose new targets for the copies.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

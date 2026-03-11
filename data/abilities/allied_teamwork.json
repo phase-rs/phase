@@ -1,29 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "TriggerDescription": "When this enchantment enters, create a 1/1 white Ally creature token.",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Ally",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Allies you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Ally.YouCtrl",
-        "AddToughness": "1",
-        "Description": "Allies you control get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this enchantment enters, create a 1/1 white Ally creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

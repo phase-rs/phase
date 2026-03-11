@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Permanent.nonLand",
-        "IsCurse": "True",
-        "SpellDescription": "Exile all nonland permanents."
-      }
+      "description": "Exile all nonland permanents.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

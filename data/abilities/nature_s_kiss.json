@@ -2,38 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Card.TopGraveyard>"
+            "cost": "ExileFromGrave<1/Card.TopGraveyard>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{1}, Exile the top card of your graveyard:",
-        "Defined": "Enchanted",
-        "SpellDescription": "Enchanted creature gets +1/+1 until end of turn."
-      }
+      "description": "Enchanted creature gets +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

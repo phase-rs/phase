@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Exile target creature or enchantment, then return it to the battlefield under its owner's control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature,Enchantment",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target creature or enchantment, then return it to the battlefield under its owner's control.",
-        "TgtPrompt": "Select target creature or enchantment",
-        "RememberTargets": "True",
-        "SubAbility": "DBReturn"
-      }
+      "target_prompt": "Select target creature or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

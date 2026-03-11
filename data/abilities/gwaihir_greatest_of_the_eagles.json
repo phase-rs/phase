@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME attacks, target attacking creature gains flying until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks, target attacking creature gains flying until end of turn.",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each end step, if you gained 3 or more life this turn, create a 3/3 white Bird creature token with flying and \"Whenever this creature attacks, target attacking creature gains flying until end of turn.\"",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each end step, if you gained 3 or more life this turn, create a 3/3 white Bird creature token with flying and \"Whenever this creature attacks, target attacking creature gains flying until end of turn.\"",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "LifeGained",
-        "SVarCompare": "GE3",
-        "Execute": "TrigToken"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

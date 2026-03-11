@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.blockedBySource",
-        "Description": "Prevent all damage that would be dealt to CARDNAME by creatures it's blocking.",
-        "Prevent": "True",
-        "ValidTarget": "Creature.Self"
-      }
+      "description": "Prevent all damage that would be dealt to CARDNAME by creatures it's blocking.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

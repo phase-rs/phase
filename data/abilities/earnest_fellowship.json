@@ -1,17 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Each creature has protection from its colors.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature has protection from its colors.",
-        "Affected": "Creature",
-        "AddKeyword": "Protection from cardColors"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "cardColors",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

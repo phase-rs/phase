@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, mill ten cards.",
       "mode": "Phase",
-      "params": {
-        "Execute": "LetheMill",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, mill ten cards.",
-        "TriggerZones": "Command",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, target player mills ten cards.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, target player mills ten cards."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

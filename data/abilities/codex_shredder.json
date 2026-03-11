@@ -2,60 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 1,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills a card. (They put the top card of their library into their graveyard.)"
-      }
+      "description": "Target player mills a card. (They put the top card of their library into their graveyard.)",
+      "effect": {
+        "count": 1,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "5"
+            "cost": "5",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target card in your graveyard",
-        "SpellDescription": "Return target card from your graveyard to your hand."
-      }
+      "target_prompt": "Select target card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

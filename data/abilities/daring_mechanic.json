@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Mount,Vehicle"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W"
+        "cost": "3 W",
+        "type": "Mana"
       },
+      "description": "Put a +1/+1 counter on target Mount or Vehicle.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Mount,Vehicle",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on target Mount or Vehicle.",
-        "TgtPrompt": "Select target Mount or Vehicle"
-      }
+      "target_prompt": "Select target Mount or Vehicle"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

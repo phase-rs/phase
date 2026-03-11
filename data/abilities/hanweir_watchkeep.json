@@ -1,51 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "WerewolfTransformCondition": "True",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "WerewolfUntransformCondition": "True",
-            "Execute": "TrigTransform",
-            "Phase": "Upkeep",
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "TriggerZones": "Battlefield"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "MustAttack",
-          "params": {
-            "ValidCreature": "Card.Self",
-            "Description": "CARDNAME attacks each combat if able."
-          }
+          "description": "CARDNAME attacks each combat if able.",
+          "mode": "MustAttack"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

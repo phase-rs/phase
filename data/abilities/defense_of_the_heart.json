@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if an opponent controls three or more creatures, sacrifice CARDNAME, search your library for up to two creature cards, put those cards onto the battlefield, then shuffle.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if an opponent controls three or more creatures, sacrifice CARDNAME, search your library for up to two creature cards, put those cards onto the battlefield, then shuffle.",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "CheckSVar": "X",
-        "SVarCompare": "GE3",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 for each Gate you control and has vigilance and menace.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+0 for each Gate you control and has vigilance and menace.",
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Vigilance & Menace",
-        "AddPower": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

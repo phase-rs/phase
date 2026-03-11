@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may put an artifact card with mana value less than or equal to that damage from your hand onto the battlefield.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigChange",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may put an artifact card with mana value less than or equal to that damage from your hand onto the battlefield.",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "OptionalDecider": "You"
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,58 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C U",
-        "params": {
-          "SpellDescription": "Add {C}{U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}{U}."
-      }
+      "description": "Add {C}{U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1."
-      }
+      "description": "Scry 1.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would enter, sacrifice an untapped Island instead. If you do, put CARDNAME onto the battlefield. If you don't, put it into its owner's graveyard.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "PayBeforeETB",
-        "Destination": "Battlefield",
-        "Description": "If CARDNAME would enter, sacrifice an untapped Island instead. If you do, put CARDNAME onto the battlefield. If you don't, put it into its owner's graveyard.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

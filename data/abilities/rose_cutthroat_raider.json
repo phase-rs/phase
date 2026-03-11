@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Raid — At end of combat on your turn, if you attacked this turn, create a Junk token for each opponent you attacked. (It's an artifact with \"{T}, Sacrifice this artifact: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.\")",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "RaidTest",
-        "Phase": "EndCombat",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Raid — At end of combat on your turn, if you attacked this turn, create a Junk token for each opponent you attacked. (It's an artifact with \"{T}, Sacrifice this artifact: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.\")",
-        "ValidPlayer": "You"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you sacrifice a Junk, add {R}.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Junk.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMana",
-        "TriggerDescription": "Whenever you sacrifice a Junk, add {R}."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Junk",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

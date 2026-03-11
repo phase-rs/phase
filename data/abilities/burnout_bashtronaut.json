@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "This creature gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This creature gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "MaxSpeed",
-        "Affected": "Card.Self",
-        "AddStaticAbility": "MaxSpeedStatic",
-        "Description": "Max speed — This creature has double strike."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — This creature has double strike.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

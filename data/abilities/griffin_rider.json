@@ -1,20 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Griffin",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Griffin, CARDNAME gets +3/+3 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Griffin.YouCtrl",
-        "AddKeyword": "Flying",
-        "Description": "As long as you control a Griffin, CARDNAME gets +3/+3 and has flying.",
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "AddToughness": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

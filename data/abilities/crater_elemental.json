@@ -2,68 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Fixed",
-          "value": 4
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "It deals 4 damage to target creature."
-      }
+      "description": "It deals 4 damage to target creature.",
+      "effect": {
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME has base power 8 until end of turn. Activate only if creatures you control have total power 8 or greater.",
       "effect": {
-        "type": "Animate",
         "power": 8,
-        "toughness": null,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME has base power 8 until end of turn. Activate only if creatures you control have total power 8 or greater.",
-        "Defined": "Self",
-        "SVarCompare": "GE8",
-        "PrecostDesc": "Formidable —",
-        "CheckSVar": "FormidableTest"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

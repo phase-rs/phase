@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<1/P1P1>",
+        "type": "Mana"
+      },
+      "description": "It deals 1 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/P1P1>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Triskelion",
-        "SpellDescription": "It deals 1 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

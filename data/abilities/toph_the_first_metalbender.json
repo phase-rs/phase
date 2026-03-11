@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
-        "ValidPlayer": "You",
-        "Execute": "TrigEarthbend"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Nontoken artifacts you control are lands in addition to their other types. (They don't gain the ability to {T} for mana.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.!token+YouCtrl",
-        "AddType": "Land",
-        "Description": "Nontoken artifacts you control are lands in addition to their other types. (They don't gain the ability to {T} for mana.)"
-      }
+      "modifications": [
+        {
+          "core_type": "Land",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

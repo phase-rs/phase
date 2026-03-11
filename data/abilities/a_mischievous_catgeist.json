@@ -1,54 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, draw a card.",
           "mode": "DamageDone",
-          "params": {
-            "Execute": "TrigDraw",
-            "ValidSource": "Card.Self",
-            "ValidTarget": "Player",
-            "CombatDamage": "True",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card."
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "AddToughness": "1",
-            "Description": "Enchanted creature gets +1/+1 and has \"Whenever this creature deals combat damage to a player, draw a card.\"",
-            "Affected": "Creature.EnchantedBy",
-            "AddPower": "1",
-            "AddTrigger": "TrigDamageDone"
-          }
-        }
-      ],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ValidCard": "Card.Self",
-            "Destination": "Graveyard"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature gets +1/+1 and has \"Whenever this creature deals combat damage to a player, draw a card.\"",
+          "mode": "Continuous",
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

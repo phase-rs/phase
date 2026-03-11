@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME blocks a creature, destroy that creature and CARDNAME.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidBlocker": "Card.Self",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When CARDNAME blocks a creature, destroy that creature and CARDNAME.",
-        "ValidCard": "Creature"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

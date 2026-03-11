@@ -2,39 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "R",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 2 damage to target blue creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.Blue"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "R"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target blue creature",
-        "SpellDescription": "CARDNAME deals 2 damage to target blue creature."
-      }
+      "target_prompt": "Select target blue creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

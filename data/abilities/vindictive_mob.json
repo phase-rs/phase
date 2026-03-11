@@ -1,30 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When CARDNAME enters, sacrifice a creature.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by Saprolings.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by Saprolings.",
-        "ValidBlocker": "Creature.Saproling",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, sacrifice a creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may return target land card from your graveyard to the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, you may return target land card from your graveyard to the battlefield.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

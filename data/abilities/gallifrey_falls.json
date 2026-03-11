@@ -1,69 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 4 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
           "effect": {
-            "type": "DamageAll",
             "amount": {
               "type": "Fixed",
               "value": 4
             },
             "target": {
-              "type": "All",
-              "filter": ""
-            }
+              "type": "Any"
+            },
+            "type": "DamageAll"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature",
-            "RememberDamaged": "True",
-            "SubAbility": "DBCleanup",
-            "ReplaceDyingDefined": "Remembered",
-            "SpellDescription": "CARDNAME deals 4 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Phases",
-            "params": {
-              "SpellDescription": "Any number of target creatures you control phase out.",
-              "ValidTgts": "Creature.YouCtrl",
-              "TgtPrompt": "Select any number of target creatures you control",
-              "TargetMax": "MaxTgts",
-              "TargetMin": "0"
-            }
-          },
           "cost": null,
+          "description": "Any number of target creatures you control phase out.",
+          "effect": {
+            "description": "Any number of target creatures you control phase out.",
+            "name": "Phases",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Any number of target creatures you control phase out.",
-            "ValidTgts": "Creature.YouCtrl",
-            "TgtPrompt": "Select any number of target creatures you control",
-            "TargetMax": "MaxTgts",
-            "TargetMin": "0"
-          }
+          "target_prompt": "Select any number of target creatures you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "8",
+        "type": "Mana"
+      },
+      "description": "CARDNAME has base power and toughness 10/10 until end of turn. Activate only if you control an Oko planeswalker.",
       "effect": {
-        "type": "Animate",
         "power": 10,
-        "toughness": 10,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 10,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "8"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "IsPresent": "Planeswalker.YouCtrl+Oko",
-        "SpellDescription": "CARDNAME has base power and toughness 10/10 until end of turn. Activate only if you control an Oko planeswalker."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

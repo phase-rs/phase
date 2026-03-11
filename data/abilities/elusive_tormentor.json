@@ -1,79 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME."
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "AttackerUnblocked",
-          "params": {
-            "Execute": "TrigTransform",
-            "ValidCard": "Card.Self",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may pay {2}{B}. If you do, transform it."
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBlock",
-          "params": {
-            "Description": "CARDNAME can't block and can't be blocked.",
-            "ValidCard": "Creature.Self"
-          }
+          "description": "CARDNAME can't block and can't be blocked.",
+          "mode": "CantBlock"
         },
         {
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "ValidAttacker": "Creature.Self"
           }
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever CARDNAME attacks and isn't blocked, you may pay {2}{B}. If you do, transform it.",
+          "mode": "AttackerUnblocked",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

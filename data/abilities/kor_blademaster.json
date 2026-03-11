@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Warrior",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Equipped Warriors you control have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Warrior.YouCtrl+equipped",
-        "AddKeyword": "Double Strike",
-        "Description": "Equipped Warriors you control have double strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

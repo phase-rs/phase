@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Plains,Island"
-        }
-      },
       "cost": null,
+      "description": "Destroy target Plains or Island. CARDNAME deals 3 damage to that land's controller.",
+      "effect": {
+        "target": {
+          "card_type": "Plains,Island",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDealDamage",
-        "TgtPrompt": "Choose target plains or island.",
-        "SpellDescription": "Destroy target Plains or Island. CARDNAME deals 3 damage to that land's controller."
-      }
+      "target_prompt": "Choose target plains or island."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,55 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 4 damage to target creature.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 4
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 4 damage to target creature."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "LoseLife",
-            "amount": 0
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Each opponent loses X life.",
-            "Defined": "Player.Opponent"
-          }
+          "description": "Each opponent loses X life.",
+          "effect": {
+            "amount": 0,
+            "type": "LoseLife"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, put a flying counter on target creature you control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, put a flying counter on target creature you control.",
-        "Destination": "Graveyard",
-        "Execute": "TrigPutCounter",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

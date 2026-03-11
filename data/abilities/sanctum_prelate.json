@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Noncreature spells with mana value equal to the chosen number can't be cast.",
-        "ValidCard": "Card.nonCreature+cmcEQChosen"
-      }
+      "description": "Noncreature spells with mana value equal to the chosen number can't be cast.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

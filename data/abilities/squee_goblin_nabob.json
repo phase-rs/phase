@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may return CARDNAME from your graveyard to your hand.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Graveyard",
-        "OptionalDecider": "You",
-        "Execute": "TrigChange",
-        "TriggerDescription": "At the beginning of your upkeep, you may return CARDNAME from your graveyard to your hand.",
-        "Phase": "Upkeep"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

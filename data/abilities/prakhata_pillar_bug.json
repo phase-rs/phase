@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains lifelink until end of turn. (Damage dealt by this creature also causes you to gain that much life.)",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains lifelink until end of turn. (Damage dealt by this creature also causes you to gain that much life.)",
-        "KW": "Lifelink",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

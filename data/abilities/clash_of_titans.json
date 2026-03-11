@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Fight",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Target creature fights another target creature. (Each deals damage equal to its power to the other.)",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Fight"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature fights another target creature. (Each deals damage equal to its power to the other.)",
-        "TgtPrompt": "Select target creatures",
-        "TargetMin": "2",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

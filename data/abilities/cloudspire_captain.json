@@ -1,29 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Mount",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Vehicle.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Mounts and Vehicles you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "Mounts and Vehicles you control get +1/+1.",
-        "Affected": "Mount.YouCtrl,Vehicle.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "description": "This creature saddles Mounts and crews Vehicles as though its power were 2 greater.",
       "mode": {
         "Other": "TapPowerValue"
-      },
-      "params": {
-        "Value": "2",
-        "ValidSA": "Activated.Saddle+Mount,Activated.Crew+Vehicle",
-        "ValidCard": "Card.Self",
-        "Description": "This creature saddles Mounts and crews Vehicles as though its power were 2 greater."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

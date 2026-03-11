@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "None",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ImprintCards": "Valid Creature.attacking",
-        "StackDescription": "None",
-        "SubAbility": "DBRepeatPlayer"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,26 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Return target creature card you own to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature card you own",
-        "SpellDescription": "Return target creature card you own to your hand."
-      }
+      "target_prompt": "Select target creature card you own"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

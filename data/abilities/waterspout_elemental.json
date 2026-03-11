@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked, return all other creatures to their owners' hands and you skip your next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigKicker",
-        "ValidCard": "Card.Self+kicked",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, return all other creatures to their owners' hands and you skip your next turn.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

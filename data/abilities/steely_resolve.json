@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures of the chosen type have shroud. (They can't be the targets of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures of the chosen type have shroud. (They can't be the targets of spells or abilities.)",
-        "Affected": "Creature.ChosenType",
-        "AddKeyword": "Shroud"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

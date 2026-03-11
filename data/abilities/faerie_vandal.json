@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
-        "Number": "2",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

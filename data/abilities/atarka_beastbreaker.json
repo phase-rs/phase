@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +4/+4 until end of turn. Activate only if creatures you control have total power 8 or greater.",
       "effect": {
-        "type": "Pump",
         "power": 4,
-        "toughness": 4,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 4,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +4/+4 until end of turn. Activate only if creatures you control have total power 8 or greater.",
-        "Defined": "Self",
-        "CheckSVar": "FormidableTest",
-        "SVarCompare": "GE8",
-        "PrecostDesc": "Formidable —"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

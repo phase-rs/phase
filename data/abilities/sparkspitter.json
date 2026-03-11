@@ -2,40 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "spark_elemental",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 3/1 red Elemental creature token named Spark Elemental. It has trample, haste, and \"At the beginning of the end step, sacrifice Spark Elemental.\""
-      }
+      "description": "Create a 3/1 red Elemental creature token named Spark Elemental. It has trample, haste, and \"At the beginning of the end step, sacrifice Spark Elemental.\"",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "spark_elemental",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

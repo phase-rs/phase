@@ -2,35 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Prevent all combat damage target creature would deal this turn.",
-          "ReplacementEffects": "RPrevent"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Prevent all combat damage target creature would deal this turn.",
-        "ReplacementEffects": "RPrevent"
-      }
+      "description": "Prevent all combat damage target creature would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

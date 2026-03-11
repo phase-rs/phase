@@ -1,29 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player or battle, create a Treasure token.",
-        "Execute": "TrigTreasure",
-        "ValidSource": "Creature.EquippedBy",
-        "ValidTarget": "Player,Battle"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 and has menace. (It can't be blocked except by two or more creatures.)",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Equipped creature gets +1/+0 and has menace. (It can't be blocked except by two or more creatures.)",
-        "AddKeyword": "Menace",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player or battle, create a Treasure token.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Player,Battle",
+        "type": "Typed"
+      }
+    }
+  ]
 }

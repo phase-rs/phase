@@ -2,52 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to any target."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantPreventDamage"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "EffectZone": "Stack",
-        "SVarCompare": "GE5",
-        "Description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
-        "ValidSource": "Spell.Self"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "GE5",
-        "Secondary": "True"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "condition": {
+        "compare": "GE5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
+      "effect_zone": "Stack",
+      "mode": {
+        "Other": "CantPreventDamage"
+      }
+    }
+  ],
+  "triggers": []
 }

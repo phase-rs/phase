@@ -1,77 +1,87 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create two 2/2 green Wolf creature tokens.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "Execute": "TrigToken",
-            "TriggerDescription": "When CARDNAME enters, create two 2/2 green Wolf creature tokens."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 G G"
+            "cost": "2 G G",
+            "type": "Mana"
           },
+          "description": "Another target Wolf or Werewolf you control fights target creature you don't control.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "filters": [
+                {
+                  "card_type": "Wolf",
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "Other",
+                      "value": "YouCtrl,Werewolf.Other"
+                    }
+                  ],
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Another target Wolf or Werewolf you control fights target creature you don't control.",
-            "SubAbility": "DBFight",
-            "AILogic": "Fight",
-            "StackDescription": "{c:ThisTargetedCard}",
-            "TgtPrompt": "Select another target Wolf or Werewolf you control"
-          }
+          "target_prompt": "Select another target Wolf or Werewolf you control"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME enters or attacks, create two 2/2 green Wolf creature tokens.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 2/2 green Wolf creature tokens.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME enters or attacks, create two 2/2 green Wolf creature tokens.",
           "mode": "Attacks",
-          "params": {
-            "Secondary": "True",
-            "Execute": "TrigToken",
-            "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 2/2 green Wolf creature tokens.",
-            "ValidCard": "Card.Self"
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

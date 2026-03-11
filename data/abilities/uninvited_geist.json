@@ -1,42 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "When CARDNAME deals combat damage to a player, transform it.",
           "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "Execute": "TrigTransform",
-            "ValidTarget": "Player",
-            "ValidSource": "Card.Self",
-            "TriggerDescription": "When CARDNAME deals combat damage to a player, transform it."
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "description": "CARDNAME can't be blocked.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "Description": "CARDNAME can't be blocked.",
-            "ValidAttacker": "Creature.Self"
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

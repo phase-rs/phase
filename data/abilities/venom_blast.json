@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Put two +1/+1 counters on target creature you control. It deals damage equal to its power to up to one other target creature.",
+      "effect": {
+        "count": 2,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put two +1/+1 counters on target creature you control. It deals damage equal to its power to up to one other target creature.",
-        "TgtPrompt": "Select target creature you control",
-        "SubAbility": "DBDamage"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

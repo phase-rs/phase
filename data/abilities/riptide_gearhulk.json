@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, for each opponent, put up to one target nonland permanent that player controls into its owner's library third from the top.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "ReturnOneEach",
-        "TriggerDescription": "When this creature enters, for each opponent, put up to one target nonland permanent that player controls into its owner's library third from the top.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

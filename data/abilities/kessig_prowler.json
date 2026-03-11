@@ -1,55 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "4 G"
+            "cost": "4 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME."
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "description": "CARDNAME can't be blocked by more than one creature.",
           "mode": {
             "Other": "MinMaxBlocker"
-          },
-          "params": {
-            "ValidCard": "Card.Self",
-            "Max": "1",
-            "Description": "CARDNAME can't be blocked by more than one creature."
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

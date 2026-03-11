@@ -1,58 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature gets +X/+0 until end of turn, where X is its power."
-          }
+          "description": "Target creature gets +X/+0 until end of turn, where X is its power.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "Double Strike",
-            "SpellDescription": "Target creature gains double strike until end of turn."
-          }
+          "description": "Target creature gains double strike until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

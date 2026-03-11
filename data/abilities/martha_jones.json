@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Woman Who Walked the Earth — When CARDNAME enters, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigInvestigate",
-        "TriggerDescription": "Woman Who Walked the Earth — When CARDNAME enters, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you sacrifice a Clue, CARDNAME and up to one other target creature can't be blocked this turn.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigPump",
-        "ValidCard": "Clue",
-        "TriggerDescription": "Whenever you sacrifice a Clue, CARDNAME and up to one other target creature can't be blocked this turn.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Clue",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SubAbility": "CopyFight",
-          "SpellDescription": "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this permanent enters, if it's a creature, it fights up to one target creature you don't control.\"",
-          "ConditionManaNotSpent": "R G",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Permanent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "CopyFight",
-        "SpellDescription": "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this permanent enters, if it's a creature, it fights up to one target creature you don't control.\"",
-        "ConditionManaNotSpent": "R G",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Permanent"
-      }
+      "description": "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this permanent enters, if it's a creature, it fights up to one target creature you don't control.\"",
+      "effect": {
+        "description": "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this permanent enters, if it's a creature, it fights up to one target creature you don't control.\"",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Exile up to one target artifact or creature. Return it to the battlefield under its owner's control at the beginning of the next end step. CARDNAME deals 4 damage to each creature.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "SpeTgtPrompt": "Select target creature you control",
-        "SubAbility": "DelTrig",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile up to one target artifact or creature. Return it to the battlefield under its owner's control at the beginning of the next end step. CARDNAME deals 4 damage to each creature.",
-        "TgtPrompt": "Choose target artifact or creature"
-      }
+      "target_prompt": "Choose target artifact or creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

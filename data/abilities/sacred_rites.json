@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Discard any number of cards. Creatures you control get +0/+1 until end of turn for each card discarded this way.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "Optional": "True",
-        "AnyNumber": "True",
-        "SpellDescription": "Discard any number of cards. Creatures you control get +0/+1 until end of turn for each card discarded this way.",
-        "RememberDiscarded": "True",
-        "SubAbility": "DBPumpAll",
-        "Mode": "TgtChoose"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

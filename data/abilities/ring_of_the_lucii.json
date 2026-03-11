@@ -2,58 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}{C}.",
-          "Amount": "2"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}{C}.",
-        "Amount": "2"
-      }
+      "description": "Add {C}{C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Tap target nonland permanent.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target nonland permanent.",
-        "TgtPrompt": "Select target nonland permanent"
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

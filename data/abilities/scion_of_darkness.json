@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may put target creature card from that player's graveyard onto the battlefield under your control.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may put target creature card from that player's graveyard onto the battlefield under your control.",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "Execute": "TrigGainControl",
-        "CombatDamage": "True",
-        "OptionalDecider": "You"
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

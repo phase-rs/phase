@@ -2,40 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Draft",
-        "params": {
-          "SpellDescription": "Draft a card from CARDNAME's spellbook.",
-          "Spellbook": "Arcane Encyclopedia,Daredevil Dragster,Diamond Mare,Filigree Familiar,Fountain of Renewal,Gilded Lotus,Golden Egg,Guild Globe,Heraldic Banner,Honored Heirloom,Key to the City,Prophetic Prism,Stuffed Bear,Treasure Vault,Zephyr Boots"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draft a card from CARDNAME's spellbook.",
-        "Spellbook": "Arcane Encyclopedia,Daredevil Dragster,Diamond Mare,Filigree Familiar,Fountain of Renewal,Gilded Lotus,Golden Egg,Guild Globe,Heraldic Banner,Honored Heirloom,Key to the City,Prophetic Prism,Stuffed Bear,Treasure Vault,Zephyr Boots"
-      }
+      "description": "Draft a card from CARDNAME's spellbook.",
+      "effect": {
+        "description": "Draft a card from CARDNAME's spellbook.",
+        "name": "Draft",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creatures you control become blocked, create a Treasure token.",
       "mode": "AttackerBlockedOnce",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigTreasure",
-        "TriggerDescription": "Whenever one or more creatures you control become blocked, create a Treasure token.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

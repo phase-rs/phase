@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped if it was played from your hand.",
       "event": "Moved",
-      "params": {
-        "ValidCause": "LandAbility.YouCtrl",
-        "Origin": "Hand",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped if it was played from your hand."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

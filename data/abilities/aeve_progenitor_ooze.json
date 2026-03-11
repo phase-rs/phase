@@ -1,17 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Token"
+          },
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME isn't legendary if it's a token.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME isn't legendary if it's a token.",
-        "Affected": "Card.token+Self",
-        "RemoveType": "Legendary"
-      }
+      "modifications": [
+        {
+          "core_type": "Legendary",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

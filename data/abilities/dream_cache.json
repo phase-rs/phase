@@ -2,22 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Draw three cards, then put two cards from your hand both on top of your library or both on the bottom of your library.",
-        "SubAbility": "ChangeZoneDB"
-      }
+      "description": "Draw three cards, then put two cards from your hand both on top of your library or both on the bottom of your library.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

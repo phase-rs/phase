@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, create a 1/1 white Human Soldier creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, create a 1/1 white Human Soldier creature token.",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

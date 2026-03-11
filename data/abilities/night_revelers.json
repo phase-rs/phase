@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Human",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has haste as long as an opponent controls a human.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Human.OppCtrl",
-        "Affected": "Card.Self",
-        "AddKeyword": "Haste",
-        "Description": "CARDNAME has haste as long as an opponent controls a human."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

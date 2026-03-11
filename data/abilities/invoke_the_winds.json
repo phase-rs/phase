@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Gain control of target artifact or creature.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBUntap",
-        "TgtPrompt": "Select target artifact or creature",
-        "SpellDescription": "Gain control of target artifact or creature."
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

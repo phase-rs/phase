@@ -1,21 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Creatures of the chosen type don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Description": "Creatures of the chosen type don't untap during their controllers' untap steps.",
-        "ValidCard": "Creature.ChosenType",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

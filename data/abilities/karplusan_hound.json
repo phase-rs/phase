@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if you control a Chandra planeswalker, this creature deals 2 damage to any target.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DBDealDamage",
-        "TriggerDescription": "Whenever CARDNAME attacks, if you control a Chandra planeswalker, this creature deals 2 damage to any target.",
-        "IsPresent": "Planeswalker.Chandra+YouCtrl",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

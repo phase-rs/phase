@@ -1,73 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card.nonCreature"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "U"
+                "cost": "U",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Counter target noncreature spell unless its controller pays {3}.",
+          "effect": {
+            "target": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Creature"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target noncreature spell",
-            "SpellDescription": "Counter target noncreature spell unless its controller pays {3}.",
-            "TargetType": "Spell",
-            "UnlessCost": "3"
-          }
+          "target_prompt": "Select target noncreature spell"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [],
       "replacements": [
         {
-          "event": "Counter",
-          "params": {
-            "Layer": "CantHappen",
-            "ActiveZones": "Battlefield",
-            "Description": "Noncreature spells you control can't be countered.",
-            "ValidSA": "Spell.nonCreature+YouCtrl"
-          }
+          "description": "Noncreature spells you control can't be countered.",
+          "event": "Counter"
         },
         {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
           "event": "Moved",
-          "params": {
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ReplaceWith": "Exile",
-            "ValidCard": "Card.Self",
-            "Destination": "Graveyard"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ]
+      ],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

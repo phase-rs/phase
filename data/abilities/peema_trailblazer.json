@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayEnergy<6>",
+        "type": "Mana"
+      },
+      "description": "Put two +1/+1 counters on this creature. Then draw cards equal to the greatest power among creatures you control. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<6>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put two +1/+1 counters on this creature. Then draw cards equal to the greatest power among creatures you control. (Activate each exhaust ability only once.)",
-        "SubAbility": "DBDraw",
-        "Exhaust": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever this creature deals combat damage to a player, you get that many {E} (energy counters).",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigEnergy",
-        "TriggerDescription": "Whenever this creature deals combat damage to a player, you get that many {E} (energy counters).",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

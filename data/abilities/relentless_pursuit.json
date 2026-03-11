@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigMultiple",
-        "params": {
-          "DigNum": "4",
-          "ChangeValid": "Creature,Land",
-          "DestinationZone2": "Graveyard",
-          "Optional": "True",
-          "Reveal": "True",
-          "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DigNum": "4",
-        "ChangeValid": "Creature,Land",
-        "DestinationZone2": "Graveyard",
-        "Optional": "True",
-        "Reveal": "True",
-        "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard."
-      }
+      "description": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+      "effect": {
+        "description": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+        "name": "DigMultiple",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

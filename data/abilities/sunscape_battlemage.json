@@ -1,29 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked with its {2}{U} kicker, draw two cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+kicked 1",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {2}{U} kicker, draw two cards.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigKicker"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME enters, if it was kicked with its {1}{G} kicker, destroy target creature with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {1}{G} kicker, destroy target creature with flying.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self+kicked 2",
-        "Execute": "TrigKicker2"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

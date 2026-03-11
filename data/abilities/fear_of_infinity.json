@@ -1,41 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
+    }
+  ],
   "triggers": [
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerZones": "Graveyard",
-        "Origin": "Any",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand.",
-        "Execute": "TrigChange",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand.",
       "mode": "FullyUnlock",
-      "params": {
-        "OptionalDecider": "You",
-        "Secondary": "True",
-        "TriggerZones": "Graveyard",
-        "ValidPlayer": "You",
-        "ValidCard": "Card.Room",
-        "Execute": "TrigChange",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand."
+      "optional": true,
+      "secondary": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Room"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

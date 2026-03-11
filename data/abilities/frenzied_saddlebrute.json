@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "All creatures can attack your opponents and planeswalkers your opponents control as though those creatures had haste.",
       "mode": {
         "Other": "CanAttackIfHaste"
-      },
-      "params": {
-        "ValidTarget": "Opponent,Planeswalker.OppCtrl",
-        "Description": "All creatures can attack your opponents and planeswalkers your opponents control as though those creatures had haste."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

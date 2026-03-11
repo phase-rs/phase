@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact, enchantment, or planeswalker.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact, enchantment, or planeswalker",
-        "SpellDescription": "Destroy target artifact, enchantment, or planeswalker."
-      }
+      "target_prompt": "Select target artifact, enchantment, or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

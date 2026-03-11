@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures entering don't cause abilities to trigger.",
       "mode": {
         "Other": "DisableTriggers"
-      },
-      "params": {
-        "ValidCause": "Creature",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "Destination": "Battlefield",
-        "Description": "Creatures entering don't cause abilities to trigger."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

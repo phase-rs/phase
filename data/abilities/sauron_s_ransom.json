@@ -2,39 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TwoPiles",
-        "params": {
-          "Separator": "Opponent",
-          "SubAbility": "TrigTempt",
-          "Defined": "You",
-          "DefinedCards": "Top_4_OfLibrary",
-          "SpellDescription": "Choose an opponent. They look at the top four cards of your library and separate them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard. The Ring tempts you.",
-          "ChosenPile": "DBHand",
-          "Chooser": "You",
-          "FaceDown": "One",
-          "UnchosenPile": "DBGrave"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Separator": "Opponent",
-        "SubAbility": "TrigTempt",
-        "Defined": "You",
-        "DefinedCards": "Top_4_OfLibrary",
-        "SpellDescription": "Choose an opponent. They look at the top four cards of your library and separate them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard. The Ring tempts you.",
-        "ChosenPile": "DBHand",
-        "Chooser": "You",
-        "FaceDown": "One",
-        "UnchosenPile": "DBGrave"
-      }
+      "description": "Choose an opponent. They look at the top four cards of your library and separate them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard. The Ring tempts you.",
+      "effect": {
+        "description": "Choose an opponent. They look at the top four cards of your library and separate them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard. The Ring tempts you.",
+        "name": "TwoPiles",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

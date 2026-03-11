@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks the player with the most life or tied for most life, it can't be blocked this turn.",
       "mode": "Attacks",
-      "params": {
-        "Attacked": "Player.withMostLife",
-        "ValidCard": "Card.Self",
-        "Execute": "DBUnblockable",
-        "TriggerDescription": "Whenever CARDNAME attacks the player with the most life or tied for most life, it can't be blocked this turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

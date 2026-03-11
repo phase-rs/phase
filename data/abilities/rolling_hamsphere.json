@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, create three 1/1 red Hamster creature tokens, then it deals X damage to any target, where X is the number of Hamsters you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +1/+1 for each Hamster you control.",
-        "AddPower": "X",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each Hamster you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, create three 1/1 red Hamster creature tokens, then it deals X damage to any target, where X is the number of Hamsters you control.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

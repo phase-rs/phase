@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice a permanent, CARDNAME deals 1 damage to any target.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you sacrifice a permanent, CARDNAME deals 1 damage to any target.",
-        "ValidCard": "Permanent.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

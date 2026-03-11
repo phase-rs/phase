@@ -1,20 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Cat"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is equipped, Cat creatures you control get +2/+2 and have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Cat+YouCtrl",
-        "IsPresent": "Card.Self+equipped",
-        "Description": "As long as CARDNAME is equipped, Cat creatures you control get +2/+2 and have double strike.",
-        "AddToughness": "2",
-        "AddPower": "2",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

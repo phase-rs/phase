@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, copy the next instant or sorcery spell with mana value 2 or less you cast this turn when you cast it. You may choose new targets for the copy.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, copy the next instant or sorcery spell with mana value 2 or less you cast this turn when you cast it. You may choose new targets for the copy.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigEffect"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

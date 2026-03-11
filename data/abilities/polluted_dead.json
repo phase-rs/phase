@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, destroy target land.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, destroy target land.",
-        "Execute": "TrigDestroy",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

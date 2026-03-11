@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBReturn",
-          "RepeatCards": "Creature.Spirit",
-          "SpellDescription": "For each Spirit, return it to its owner's hand unless that player pays {3}."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBReturn",
-        "RepeatCards": "Creature.Spirit",
-        "SpellDescription": "For each Spirit, return it to its owner's hand unless that player pays {3}."
-      }
+      "description": "For each Spirit, return it to its owner's hand unless that player pays {3}.",
+      "effect": {
+        "description": "For each Spirit, return it to its owner's hand unless that player pays {3}.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

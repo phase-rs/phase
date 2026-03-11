@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+1 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "AddPower": "3",
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +3/+1 and has haste.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

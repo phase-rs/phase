@@ -2,68 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You gain 1 life for each creature you control."
-      }
+      "description": "You gain 1 life for each creature you control.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create three 1/1 white Soldier creature tokens.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_soldier",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "TokenAmount": "3",
-        "Planeswalker": "True",
-        "SpellDescription": "Create three 1/1 white Soldier creature tokens."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy all other permanents except for lands and tokens.",
-        "ValidCards": "Permanent.nonLand+!token+StrictlyOther",
-        "Planeswalker": "True",
-        "Ultimate": "True"
-      }
+      "description": "Destroy all other permanents except for lands and tokens.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,41 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "cloud_sprite",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 blue Faerie creature token named Cloud Sprite. It has flying and \"Cloud Sprite can block only creatures with flying.\""
-      }
+      "description": "Create a 1/1 blue Faerie creature token named Cloud Sprite. It has flying and \"Cloud Sprite can block only creatures with flying.\"",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "cloud_sprite",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

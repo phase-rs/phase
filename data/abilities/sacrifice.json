@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add an amount of black mana equal to the sacrificed creature's mana value.",
-          "Amount": "X"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add an amount of black mana equal to the sacrificed creature's mana value.",
-        "Amount": "X"
-      }
+      "description": "Add an amount of black mana equal to the sacrificed creature's mana value.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,96 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast an instant spell from your hand, it gains rebound. (Exile it as it resolves. At the beginning of your next upkeep, you may cast it from exile without paying its mana cost.)",
           "mode": "SpellCast",
-          "params": {
-            "ValidCard": "Instant.wasCastFromYourHand",
-            "TriggerDescription": "Whenever you cast an instant spell from your hand, it gains rebound. (Exile it as it resolves. At the beginning of your next upkeep, you may cast it from exile without paying its mana cost.)",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "AddRebound"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant",
+            "type": "Typed"
           }
         },
         {
+          "description": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control with three time counters on it.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "Origin": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control with three time counters on it."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "SpellDescription": "Add {U}. Remove a time counter from CARDNAME.",
-              "SubAbility": "DBSubCounter"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {U}. Remove a time counter from CARDNAME.",
-            "SubAbility": "DBSubCounter"
-          }
+          "description": "Add {U}. Remove a time counter from CARDNAME.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "IsPresent": "Card.Self+counters_EQ0_TIME",
-              "Mode": "Transform",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only if it has no time counters on it and only as a sorcery.",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 U"
+                "cost": "2 U",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "IsPresent": "Card.Self+counters_EQ0_TIME",
-            "Mode": "Transform",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only if it has no time counters on it and only as a sorcery.",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME. Activate only if it has no time counters on it and only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if it has no time counters on it and only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

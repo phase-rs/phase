@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Gate"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap target Gate.",
+      "effect": {
+        "target": {
+          "card_type": "Gate",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "PoolExtraMana",
-        "TgtPrompt": "Select target Gate",
-        "SpellDescription": "Untap target Gate."
-      }
+      "target_prompt": "Select target Gate"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

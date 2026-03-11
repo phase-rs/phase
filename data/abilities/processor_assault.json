@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExiledMoveToGrave<1/Card.OppOwn/card an opponent owns>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 5 damage to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 5
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1 R"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExiledMoveToGrave<1/Card.OppOwn/card an opponent owns>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 5 damage to target creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 and is a Knight in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Knight",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+0 and is a Knight in addition to its other types.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "core_type": "Knight",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, equipped creature has flying.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, equipped creature has flying.",
-        "AddKeyword": "Flying",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

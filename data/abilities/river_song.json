@@ -1,48 +1,107 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Scry",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
-        "ValidPlayer": "Opponent"
-      }
-    },
-    {
-      "mode": "Surveil",
-      "params": {
-        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
-        "ValidPlayer": "Opponent",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True"
-      }
-    },
-    {
-      "mode": "SearchedLibrary",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
-        "TriggerZones": "Battlefield",
-        "SearchOwnLibrary": "True",
-        "Execute": "TrigPutCounter",
-        "Secondary": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "Meet in Reverse — You draw cards from the bottom of your library rather than the top.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Meet in Reverse — You draw cards from the bottom of your library rather than the top.",
-        "AddKeyword": "You draw cards from the bottom of your library instead of the top of your library.",
-        "Affected": "You"
-      }
+      "modifications": [
+        {
+          "keyword": "You",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "draw",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "cards",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "the",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "bottom",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "your",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "library",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "instead",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "the",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "top",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "your",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "library.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+      "mode": "Scry",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+      "mode": "Surveil",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+      "mode": "SearchedLibrary",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,27 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless you control more creatures than defending player.",
-        "UnlessDefender": "hasFewerCreaturesInPlayThanYou",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't attack unless you control more creatures than defending player.",
+      "mode": "CantAttack"
     },
     {
-      "mode": "CantBlock",
-      "params": {
-        "Condition": "NotPlayerTurn",
-        "CheckSVar": "Y",
-        "Description": "CARDNAME can't block unless you control more creatures than attacking player.",
-        "ValidCard": "Card.Self",
-        "SVarCompare": "GEX"
-      }
+      "condition": {
+        "compare": "GEX",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "CARDNAME can't block unless you control more creatures than attacking player.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

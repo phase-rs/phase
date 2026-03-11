@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Creature.OppCtrl",
-        "Description": "Creatures your opponents control attack each combat if able."
-      }
+      "description": "Creatures your opponents control attack each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

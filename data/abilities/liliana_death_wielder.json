@@ -2,75 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Put a -1/-1 counter on up to one target creature.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "M1M1",
         "count": 1,
+        "counter_type": "M1M1",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Put a -1/-1 counter on up to one target creature.",
-        "TargetMax": "1",
-        "TargetMin": "0",
-        "IsCurse": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.counters_GE1_M1M1"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
+      "description": "Destroy target creature with a -1/-1 counter on it.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with a -1/-1 counter on it",
-        "SpellDescription": "Destroy target creature with a -1/-1 counter on it.",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Select target creature with a -1/-1 counter on it"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -10,
+        "type": "Loyalty"
+      },
+      "description": "Return all creature cards from your graveyard to the battlefield.",
       "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -10
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Return all creature cards from your graveyard to the battlefield.",
-        "ChangeType": "Creature.YouCtrl",
-        "Ultimate": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

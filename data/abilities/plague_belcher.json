@@ -1,30 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put two -1/-1 counters on target creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, put two -1/-1 counters on target creature you control.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another Zombie you control dies, each opponent loses 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Zombie.YouCtrl+Other",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever another Zombie you control dies, each opponent loses 1 life."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Zombie",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

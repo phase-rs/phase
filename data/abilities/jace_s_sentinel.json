@@ -1,27 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Jace"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Jace planeswalker, CARDNAME gets +1/+0 and can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Planeswalker.Jace+YouCtrl",
-        "Description": "As long as you control a Jace planeswalker, CARDNAME gets +1/+0 and can't be blocked.",
-        "AddPower": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     },
     {
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Jace"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Card.Self",
-        "IsPresent": "Planeswalker.Jace+YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

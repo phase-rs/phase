@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, create a 1/1 green Saproling creature token for each +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, create a 1/1 green Saproling creature token for each +1/+1 counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "Execute": "TrigToken"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

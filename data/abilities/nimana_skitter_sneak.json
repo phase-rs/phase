@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE8",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as an opponent has eight or more cards in their graveyard, CARDNAME gets +1/+0 and has menace.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE8",
-        "CheckSVar": "X",
-        "AddKeyword": "Menace",
-        "Description": "As long as an opponent has eight or more cards in their graveyard, CARDNAME gets +1/+0 and has menace.",
-        "Affected": "Card.Self",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

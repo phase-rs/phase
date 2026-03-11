@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell, activated ability, or triggered ability. Its controller loses life equal to the number of creatures you control.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target spell, activated ability, or triggered ability. Its controller loses life equal to the number of creatures you control.",
-        "TargetType": "Spell,Activated,Triggered",
-        "TgtPrompt": "Select target spell, activated ability, or triggered ability",
-        "SubAbility": "DBDrain"
-      }
+      "target_prompt": "Select target spell, activated ability, or triggered ability"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature",
-        "Description": "Enchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.",
-        "Affected": "Artifact.EnchantedBy",
-        "SetToughness": "5",
-        "SetPower": "5"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

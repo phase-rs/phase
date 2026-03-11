@@ -2,38 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "ConditionPlayerDefined": "TargetedController",
-          "ConditionPlayerContains": "Player.Chosen",
-          "ValidTgts": "Card,Emblem",
-          "ConditionTargetValidTargeting": "Permanent.YouCtrl+inRealZoneBattlefield,You",
-          "TargetType": "Spell,Activated,Triggered",
-          "SpellDescription": "Choose new targets for target spell or ability if it's controlled by the chosen player and if it targets you or a permanent you control. Activate only once.",
-          "GameActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "RevealChosen<Player>"
+        "cost": "RevealChosen<Player>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPlayerDefined": "TargetedController",
-        "ConditionPlayerContains": "Player.Chosen",
-        "ValidTgts": "Card,Emblem",
-        "ConditionTargetValidTargeting": "Permanent.YouCtrl+inRealZoneBattlefield,You",
-        "TargetType": "Spell,Activated,Triggered",
-        "SpellDescription": "Choose new targets for target spell or ability if it's controlled by the chosen player and if it targets you or a permanent you control. Activate only once.",
-        "GameActivationLimit": "1"
-      }
+      "description": "Choose new targets for target spell or ability if it's controlled by the chosen player and if it targets you or a permanent you control. Activate only once.",
+      "effect": {
+        "description": "Choose new targets for target spell or ability if it's controlled by the chosen player and if it targets you or a permanent you control. Activate only once.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigTap",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's end step, tap all untapped Islands that player controls and CARDNAME deals X damage to the player, where X is the number of Islands tapped this way.",
-        "Phase": "End of Turn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AITap",
-        "Affected": "Island"
-      }
+      "affected": {
+        "card_type": "Island",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's end step, tap all untapped Islands that player controls and CARDNAME deals X damage to the player, where X is the number of Islands tapped this way.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

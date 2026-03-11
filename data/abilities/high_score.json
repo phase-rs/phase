@@ -1,32 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, draw a card if you control a creature with the greatest power among creatures on the battlefield."
+      "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+      "event": {
+        "Other": "AddCounter"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "AddCounter"
-      },
-      "params": {
-        "ReplaceWith": "AddOneMoreCounters",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield",
-        "ActiveZones": "Battlefield",
-        "ValidCounterType": "P1P1",
-        "Description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead."
-      }
+      "description": "At the beginning of your end step, draw a card if you control a creature with the greatest power among creatures on the battlefield.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

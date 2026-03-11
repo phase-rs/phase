@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Lands you control have \"{T}: Add one mana of any color.\"",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "AnyMana",
-        "Affected": "Land.YouCtrl",
-        "EffectZone": "Command",
-        "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create X 1/1 red Elemental Cat creature tokens with haste. Exile them at the beginning of the next end step.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_1_1_elemental_cat_haste",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AtEOT": "Exile",
-        "SpellDescription": "Create X 1/1 red Elemental Cat creature tokens with haste. Exile them at the beginning of the next end step.",
-        "TokenAmount": "X"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

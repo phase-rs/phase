@@ -1,30 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another nontoken enchantment you control enters, create a 1/1 white Soldier creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME or another nontoken enchantment you control enters, create a 1/1 white Soldier creature token.",
-        "Origin": "Any",
-        "Execute": "TrigSmallToken",
-        "ValidCard": "Card.Self,Enchantment.!token+Other+YouCtrl",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Enchantment.!token"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever the final chapter of a Saga you control triggers, create a 4/4 white Angel creature token with flying and vigilance.",
       "mode": "AbilityTriggered",
-      "params": {
-        "ValidMode": "CounterAdded",
-        "ValidSpellAbility": "Triggered.LastChapter",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBigToken",
-        "TriggerDescription": "Whenever the final chapter of a Saga you control triggers, create a 4/4 white Angel creature token with flying and vigilance.",
-        "ValidSource": "Saga.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

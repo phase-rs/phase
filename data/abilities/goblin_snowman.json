@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "CARDNAME deals 1 damage to target creature it's blocking.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.blockedBySource"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Tap"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature CARDNAME is blocking",
-        "SpellDescription": "CARDNAME deals 1 damage to target creature it's blocking."
-      }
+      "target_prompt": "Select target creature CARDNAME is blocking"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks, prevent all combat damage that would be dealt to and dealt by it this turn.",
       "mode": "Blocks",
-      "params": {
-        "Execute": "TrigPrevent",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks, prevent all combat damage that would be dealt to and dealt by it this turn.",
-        "ValidBlocked": "Creature"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

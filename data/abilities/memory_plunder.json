@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "SpellDescription": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost.",
-          "TgtZone": "Graveyard",
-          "ValidTgts": "Instant.OppOwn,Sorcery.OppOwn",
-          "ValidSA": "Spell",
-          "TgtPrompt": "Choose target instant or sorcery card from an opponent's graveyard",
-          "Optional": "True",
-          "WithoutManaCost": "True"
-        }
-      },
       "cost": null,
+      "description": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost.",
+      "effect": {
+        "description": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost.",
-        "TgtZone": "Graveyard",
-        "ValidTgts": "Instant.OppOwn,Sorcery.OppOwn",
-        "ValidSA": "Spell",
-        "TgtPrompt": "Choose target instant or sorcery card from an opponent's graveyard",
-        "Optional": "True",
-        "WithoutManaCost": "True"
-      }
+      "target_prompt": "Choose target instant or sorcery card from an opponent's graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

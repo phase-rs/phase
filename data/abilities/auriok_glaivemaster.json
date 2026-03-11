@@ -1,19 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is equipped, it gets +1/+1 and has first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "Description": "As long as CARDNAME is equipped, it gets +1/+1 and has first strike.",
-        "AddPower": "1",
-        "Affected": "Card.Self+equipped",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

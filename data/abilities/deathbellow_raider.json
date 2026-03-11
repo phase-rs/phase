@@ -2,34 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 B"
+        "cost": "2 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

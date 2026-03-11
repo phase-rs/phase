@@ -1,66 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, target creature an opponent controls gets -13/-13 until end of turn.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigPump",
-            "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -13/-13 until end of turn.",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 B"
+            "cost": "2 B",
+            "type": "Mana"
           },
+          "description": "Exile target card from a graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBToken",
-            "SpellDescription": "Exile target card from a graveyard.",
-            "TgtPrompt": "Choose target card in a graveyard"
-          }
+          "target_prompt": "Choose target card in a graveyard"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create two 2/2 black Zombie creature tokens.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, create two 2/2 black Zombie creature tokens.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

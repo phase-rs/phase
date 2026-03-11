@@ -2,73 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MustBlock",
-        "params": {
-          "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
-        "ValidTgts": "Creature"
-      }
+      "description": "Target creature blocks CARDNAME this turn if able.",
+      "effect": {
+        "description": "Target creature blocks CARDNAME this turn if able.",
+        "name": "MustBlock",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B G",
+        "type": "Mana"
+      },
+      "description": "Exile target creature blocking or blocked by CARDNAME.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.blockingSource,Creature.blockedBySource"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B G"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target creature blocking or blocked by CARDNAME.",
-        "TgtPrompt": "Select target creature blocking CARDNAME"
-      }
+      "target_prompt": "Select target creature blocking CARDNAME"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 B",
+        "type": "Mana"
+      },
+      "description": "Put a creature card exiled with CARDNAME onto the battlefield under your control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
         "destination": "Battlefield",
+        "origin": "Exile",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Hidden": "True",
-        "GainControl": "True",
-        "ChangeType": "Creature.ExiledWithSource",
-        "ChangeNum": "1",
-        "Mandatory": "True",
-        "SpellDescription": "Put a creature card exiled with CARDNAME onto the battlefield under your control."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

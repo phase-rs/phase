@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature attacks or blocks, CARDNAME deals 2 damage to it.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a creature attacks or blocks, CARDNAME deals 2 damage to it.",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature attacks or blocks, CARDNAME deals 2 damage to it.",
       "mode": "Blocks",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever a creature attacks or blocks, CARDNAME deals 2 damage to it.",
-        "Execute": "TrigDamage2",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

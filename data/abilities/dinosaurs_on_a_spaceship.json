@@ -1,30 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CounterRemoved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Exile",
-        "CounterType": "TIME",
-        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 2/2 red and white Dinosaur creature token with flying and haste.",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Dinosaur"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Dinosaurs you control get +1/+1 and have vigilance and trample.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddKeyword": "Vigilance & Trample",
-        "Description": "Other Dinosaurs you control get +1/+1 and have vigilance and trample.",
-        "AddToughness": "1",
-        "Affected": "Creature.Dinosaur+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 2/2 red and white Dinosaur creature token with flying and haste.",
+      "mode": "CounterRemoved",
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, you may sacrifice a nontoken creature. If you do, create X 2/2 green Wolf creature tokens, where X is the sacrificed creature's toughness.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your end step, you may sacrifice a nontoken creature. If you do, create X 2/2 green Wolf creature tokens, where X is the sacrificed creature's toughness."
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

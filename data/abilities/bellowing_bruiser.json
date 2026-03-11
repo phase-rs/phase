@@ -1,44 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
+          "description": "Up to two target creatures can't block this turn. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Up to two target creatures can't block this turn. (Then exile this card. You may cast the creature later from exile.)",
-            "TargetMin": "0",
-            "KW": "HIDDEN CARDNAME can't block.",
-            "TargetMax": "2",
-            "TgtPrompt": "Select up to two target creatures",
-            "IsCurse": "True"
-          }
+          "target_prompt": "Select up to two target creatures"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

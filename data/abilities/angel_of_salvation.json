@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.",
-        "Destination": "Battlefield",
-        "Execute": "AngelicSalvation"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

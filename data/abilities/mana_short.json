@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidTgts": "Player",
-          "ValidCards": "Land",
-          "SpellDescription": "Tap all lands target player controls and that player loses all unspent mana.",
-          "SubAbility": "DrainMana"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "ValidCards": "Land",
-        "SpellDescription": "Tap all lands target player controls and that player loses all unspent mana.",
-        "SubAbility": "DrainMana"
-      }
+      "description": "Tap all lands target player controls and that player loses all unspent mana.",
+      "effect": {
+        "description": "Tap all lands target player controls and that player loses all unspent mana.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

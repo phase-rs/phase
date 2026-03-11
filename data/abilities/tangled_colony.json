@@ -1,27 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME dies, create X 1/1 black Rat creature tokens with \"This creature can't block,\" where X is the amount of damage dealt to it this turn.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME dies, create X 1/1 black Rat creature tokens with \"This creature can't block,\" where X is the amount of damage dealt to it this turn.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

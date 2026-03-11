@@ -2,86 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 3 damage to each opponent.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 3 damage to each opponent.",
-        "Defined": "Player.Opponent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "ReplaceGraveyard": "Exile",
-          "AILogic": "ReplaySpell",
-          "TgtZone": "Graveyard",
-          "SpellDescription": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
-          "Planeswalker": "True",
-          "ValidTgts": "Instant.Red+YouOwn,Sorcery.Red+YouOwn",
-          "Optional": "True",
-          "TgtPrompt": "Select target red instant or sorcery card"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
+      "description": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
+      "effect": {
+        "description": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ReplaceGraveyard": "Exile",
-        "AILogic": "ReplaySpell",
-        "TgtZone": "Graveyard",
-        "SpellDescription": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
-        "Planeswalker": "True",
-        "ValidTgts": "Instant.Red+YouOwn,Sorcery.Red+YouOwn",
-        "Optional": "True",
-        "TgtPrompt": "Select target red instant or sorcery card"
-      }
+      "target_prompt": "Select target red instant or sorcery card"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -8,
+        "type": "Loyalty"
+      },
+      "description": "Discard your hand, then draw seven cards. Until end of turn, you may cast spells from your hand without paying their mana costs.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -8
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "Hand",
-        "SubAbility": "DBDraw",
-        "Planeswalker": "True",
-        "SpellDescription": "Discard your hand, then draw seven cards. Until end of turn, you may cast spells from your hand without paying their mana costs.",
-        "StackDescription": "SpellDescription",
-        "Ultimate": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

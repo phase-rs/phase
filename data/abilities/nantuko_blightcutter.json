@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "AddToughness": "X",
-        "Condition": "Threshold",
-        "Description": "Threshold — CARDNAME gets +1/+1 for each black permanent your opponents control as long as there are seven or more cards in your graveyard."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — CARDNAME gets +1/+1 for each black permanent your opponents control as long as there are seven or more cards in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

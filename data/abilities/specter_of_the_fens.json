@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 B"
+        "cost": "5 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Opponent",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Target opponent loses 2 life and you gain 2 life."
-      }
+      "description": "Target opponent loses 2 life and you gain 2 life.",
+      "effect": {
+        "amount": 2,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,31 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Card.Sphinx+Other+YouCtrl",
-        "Destination": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Sphinx you control enters, reveal the top four cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Sphinx",
-        "Activator": "You",
-        "Amount": "2",
-        "Description": "Sphinx spells you cast cost {2} less to cast."
-      }
+      "description": "Sphinx spells you cast cost {2} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another Sphinx you control enters, reveal the top four cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Card.Sphinx"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

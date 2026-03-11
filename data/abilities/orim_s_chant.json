@@ -2,36 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "IsCurse": "True",
-          "Name": "Orim's Chant's Effect — No Spells",
-          "StaticAbilities": "CantBeCast",
-          "SpellDescription": "Target player can't cast spells this turn.",
-          "ValidTgts": "Player",
-          "AILogic": "BeginningOfOppTurn",
-          "SubAbility": "CantAttackWhenKicked"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "IsCurse": "True",
-        "Name": "Orim's Chant's Effect — No Spells",
-        "StaticAbilities": "CantBeCast",
-        "SpellDescription": "Target player can't cast spells this turn.",
-        "ValidTgts": "Player",
-        "AILogic": "BeginningOfOppTurn",
-        "SubAbility": "CantAttackWhenKicked"
-      }
+      "description": "Target player can't cast spells this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

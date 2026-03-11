@@ -2,47 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 G"
+        "cost": "3 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets +2/+2 until end of turn."
-      }
+      "description": "Target creature gets +2/+2 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to green is less than 5, NICKNAME isn't a creature. (Each {G} in the mana costs of permanents you control counts towards your devotion to green.)",
       "mode": "Continuous",
-      "params": {
-        "RemoveType": "Creature",
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "SVarCompare": "LT5",
-        "Description": "As long as your devotion to green is less than 5, NICKNAME isn't a creature. (Each {G} in the mana costs of permanents you control counts towards your devotion to green.)"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have trample.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "Affected": "Creature.Other+YouCtrl",
-        "Description": "Other creatures you control have trample."
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

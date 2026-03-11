@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, tap all lands that player controls and untap all lands you control.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.YouCtrl",
-        "Execute": "DBTapAll",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, tap all lands that player controls and untap all lands you control.",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

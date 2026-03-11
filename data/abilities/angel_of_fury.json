@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may shuffle it into its owner's library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "Origin": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, you may shuffle it into its owner's library.",
-        "Destination": "Graveyard"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

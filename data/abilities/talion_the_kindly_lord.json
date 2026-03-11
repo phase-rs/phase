@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.cmcEQChosen,Card.powerEQChosen,Card.toughnessEQChosen",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
-        "Execute": "TrigDrain",
-        "ValidActivatingPlayer": "Opponent"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, create a 1/1 colorless Soldier artifact creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, create a 1/1 colorless Soldier artifact creature token."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

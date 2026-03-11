@@ -2,45 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ReverseTurnOrder",
-        "params": {
-          "SpellDescription": "Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)"
-      }
+      "description": "Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+      "effect": {
+        "description": "Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+        "name": "ReverseTurnOrder",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

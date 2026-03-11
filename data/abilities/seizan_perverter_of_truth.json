@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, that player loses 2 life and draws two cards.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's upkeep, that player loses 2 life and draws two cards.",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigDrain"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

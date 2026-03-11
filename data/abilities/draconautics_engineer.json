@@ -2,54 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Exhaust": "True",
-        "SpellDescription": "Other creatures you control gain haste until end of turn. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
-        "KW": "Haste",
-        "SubAbility": "DBPutCounter",
-        "ValidCards": "Creature.YouCtrl+StrictlyOther"
-      }
+      "description": "Other creatures you control gain haste until end of turn. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "Create a 4/4 red Dinosaur Dragon creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_4_4_dinosaur_dragon_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Exhaust": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 4/4 red Dinosaur Dragon creature token with flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

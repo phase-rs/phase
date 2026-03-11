@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME has hexproof as long as you haven't cast a spell this turn.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT1",
-        "Description": "CARDNAME has hexproof as long as you haven't cast a spell this turn.",
-        "Affected": "Card.Self",
-        "AddKeyword": "Hexproof",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

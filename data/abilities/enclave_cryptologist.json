@@ -1,27 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-2 {T}: Draw a card, then discard a card.",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Loot",
-        "Affected": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
-        "Description": "LEVEL 1-2 {T}: Draw a card, then discard a card."
-      }
+      "modifications": [
+        {
+          "ability": "Loot",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 3+ {T}: Draw a card.",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Draw",
-        "Affected": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE3_LEVEL",
-        "Description": "LEVEL 3+ {T}: Draw a card."
-      }
+      "modifications": [
+        {
+          "ability": "Draw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

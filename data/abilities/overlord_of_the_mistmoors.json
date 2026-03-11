@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, create two 2/1 white Insect creature tokens with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 2/1 white Insect creature tokens with flying.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, create two 2/1 white Insect creature tokens with flying.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 2/1 white Insect creature tokens with flying.",
-        "Secondary": "True",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

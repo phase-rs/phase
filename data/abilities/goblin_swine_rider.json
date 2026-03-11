@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, it deals 2 damage to each attacking creature and each blocking creature.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, it deals 2 damage to each attacking creature and each blocking creature.",
-        "Execute": "TrigDealDamage"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

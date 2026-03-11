@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more cards are put into exile from your graveyard, put that many +1/+1 counters on CARDNAME.",
+      "destination": "Exile",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Whenever one or more cards are put into exile from your graveyard, put that many +1/+1 counters on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "Origin": "Graveyard",
-        "ValidCards": "Card.YouOwn",
-        "Destination": "Exile",
-        "TriggerZones": "Battlefield"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

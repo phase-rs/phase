@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AbilityCast",
-      "params": {
-        "ValidCard": "Artifact.inZoneBattlefield",
-        "ValidSA": "Activated.OppCtrl",
-        "ValidSAonCard": "Activated.YouCtrl",
-        "Execute": "TrigDmg",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an opponent activates an ability of an artifact they control, CARDNAME deals 1 damage to that player."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "Description": "CARDNAME's power is equal to the number of artifacts your opponents control."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of artifacts your opponents control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever an opponent activates an ability of an artifact they control, CARDNAME deals 1 damage to that player.",
+      "mode": "AbilityCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
+      }
+    }
+  ]
 }

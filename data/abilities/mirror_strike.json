@@ -2,34 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature.attacking+unblocked",
-          "SpellDescription": "All combat damage that would be dealt to you this turn by target unblocked creature is dealt to its controller instead.",
-          "TgtPrompt": "Select target unblocked creature",
-          "RememberObjects": "Targeted",
-          "IsCurse": "True",
-          "ExileOnMoved": "Battlefield",
-          "ReplacementEffects": "DamageEvent"
-        }
-      },
       "cost": null,
+      "description": "All combat damage that would be dealt to you this turn by target unblocked creature is dealt to its controller instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.attacking+unblocked",
-        "SpellDescription": "All combat damage that would be dealt to you this turn by target unblocked creature is dealt to its controller instead.",
-        "TgtPrompt": "Select target unblocked creature",
-        "RememberObjects": "Targeted",
-        "IsCurse": "True",
-        "ExileOnMoved": "Battlefield",
-        "ReplacementEffects": "DamageEvent"
-      }
+      "target_prompt": "Select target unblocked creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Sanctified Rules of Combat — When CARDNAME enters, each opponent faces a villainous choice — That opponent discards all the cards in their hand, then draws that many cards minus one, or CARDNAME deals damage to that player equal to the number of cards in their hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Sanctified Rules of Combat — When CARDNAME enters, each opponent faces a villainous choice — That opponent discards all the cards in their hand, then draws that many cards minus one, or CARDNAME deals damage to that player equal to the number of cards in their hand.",
-        "Execute": "TrigChoice"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, create a 1/1 red Goblin creature token.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, create a 1/1 red Goblin creature token.",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,41 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Type": "Creature",
-          "SpellDescription": "Choose a creature type. All creatures of that type get -1/-1 until end of turn.",
-          "Defined": "You",
-          "SubAbility": "DBPumpAll"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Type": "Creature",
-        "SpellDescription": "Choose a creature type. All creatures of that type get -1/-1 until end of turn.",
-        "Defined": "You",
-        "SubAbility": "DBPumpAll"
-      }
+      "description": "Choose a creature type. All creatures of that type get -1/-1 until end of turn.",
+      "effect": {
+        "description": "Choose a creature type. All creatures of that type get -1/-1 until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may discard a Swamp card rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "Discard<1/Swamp/Swamp card>",
-        "Description": "You may discard a Swamp card rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

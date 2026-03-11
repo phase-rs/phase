@@ -2,39 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls or battle that player protects.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Opponent",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls or battle that player protects.",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

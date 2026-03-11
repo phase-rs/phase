@@ -2,83 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card.",
-        "Planeswalker": "True"
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 blue Spirit creature token with vigilance and \"Whenever you draw a card, put a +1/+1 counter on this creature.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_2_2_spirit_vigilance_drawcounter",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 blue Spirit creature token with vigilance and \"Whenever you draw a card, put a +1/+1 counter on this creature.\"",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -12
+        "amount": -12,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:Targeted} chooses a permanent they control and returns it to its owner's hand.",
-        "SpellDescription": "Target opponent chooses a permanent they control and returns it to its owner's hand.",
-        "Ultimate": "True",
-        "ChangeType": "Permanent.TargetedPlayerCtrl",
-        "Planeswalker": "True",
-        "Hidden": "True",
-        "Chooser": "Targeted",
-        "Mandatory": "True",
-        "SubAbility": "DBShuffleAll"
-      }
+      "description": "Target opponent chooses a permanent they control and returns it to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a card, put a loyalty counter on CARDNAME.",
       "mode": "Drawn",
-      "params": {
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw a card, put a loyalty counter on CARDNAME.",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

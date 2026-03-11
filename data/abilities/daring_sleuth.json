@@ -1,42 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you sacrifice a Clue, transform CARDNAME.",
           "mode": "Sacrificed",
-          "params": {
-            "ValidCard": "Clue.YouCtrl",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "When you sacrifice a Clue, transform CARDNAME."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Clue",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
           "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "Execute": "TrigInvestigate",
-            "ValidSource": "Card.Self",
-            "ValidTarget": "Player",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

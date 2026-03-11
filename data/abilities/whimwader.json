@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "controlsPermanent.Blue",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless defending player controls a blue permanent."
-      }
+      "description": "CARDNAME can't attack unless defending player controls a blue permanent.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

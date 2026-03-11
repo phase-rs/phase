@@ -1,27 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell.Sliver",
-        "ActiveZones": "Battlefield",
-        "Description": "Sliver spells can't be countered.",
-        "Layer": "CantHappen"
-      }
+      "description": "Sliver spells can't be countered.",
+      "event": "Counter"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

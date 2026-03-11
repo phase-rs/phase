@@ -1,20 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature you control enters, scry 1. If this is the second time this ability has resolved this turn, the Ring tempts you.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigScry",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, scry 1. If this is the second time this ability has resolved this turn, the Ring tempts you.",
-        "ValidCard": "Card.Self,Creature.YouCtrl+Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

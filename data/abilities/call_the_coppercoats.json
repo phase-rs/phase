@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_human_soldier",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "X",
-        "ValidTgts": "Opponent",
-        "SpellDescription": "Choose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
-        "TargetMax": "MaxTargets",
-        "TargetMin": "0",
-        "TgtPrompt": "Choose any number of target opponents",
-        "TokenOwner": "You"
-      }
+      "target_prompt": "Choose any number of target opponents"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

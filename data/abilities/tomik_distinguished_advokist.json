@@ -1,31 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected_zone": "Battlefield,Graveyard",
+      "description": "Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "Activator": "Opponent",
-        "Description": "Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.",
-        "AffectedZone": "Battlefield,Graveyard",
-        "ValidTarget": "Land"
       }
     },
     {
+      "description": "Your opponents can't play land cards from graveyards.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "ValidCard": "Land",
-        "Description": "Your opponents can't play land cards from graveyards.",
-        "Player": "Opponent",
-        "Origin": "Graveyard"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

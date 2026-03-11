@@ -1,26 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +2/+2.",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          },
+          {
+            "type": "Other",
+            "value": "EnchantedBy Aura.Other"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as another Aura is attached to enchanted creature, it has first strike and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as another Aura is attached to enchanted creature, it has first strike and lifelink.",
-        "AddKeyword": "First Strike & Lifelink",
-        "Affected": "Creature.EnchantedBy+EnchantedBy Aura.Other"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

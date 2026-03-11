@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Spells you cast from your graveyard this turn cost {2} less to cast. Activate only if there are seven or more cards in your graveyard.",
-          "StaticAbilities": "StaticReduce",
-          "Activation": "Threshold",
-          "PrecostDesc": "Threshold —"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Spells you cast from your graveyard this turn cost {2} less to cast. Activate only if there are seven or more cards in your graveyard.",
-        "StaticAbilities": "StaticReduce",
-        "Activation": "Threshold",
-        "PrecostDesc": "Threshold —"
-      }
+      "description": "Spells you cast from your graveyard this turn cost {2} less to cast. Activate only if there are seven or more cards in your graveyard.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Rat you control enters, conjure a card named Think Twice into your graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigConjure",
-        "TriggerDescription": "Whenever CARDNAME or another Rat you control enters, conjure a card named Think Twice into your graveyard.",
-        "ValidCard": "Card.Self,Rat.Other+YouCtrl",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Rat.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

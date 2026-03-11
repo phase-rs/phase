@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigInvestigate",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you sacrifice a Clue, target player mills three cards.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Clue.YouCtrl",
-        "Execute": "TrigMill",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you sacrifice a Clue, target player mills three cards."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Clue",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

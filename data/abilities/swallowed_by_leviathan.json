@@ -2,23 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:You} chooses {s:Targeted}. {p:You} surveils 2,",
-        "SpellDescription": "Choose target spell. Surveil 2,",
-        "Amount": "2",
-        "SubAbility": "DBCounter"
-      }
+      "description": "Choose target spell. Surveil 2,",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

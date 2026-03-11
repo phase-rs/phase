@@ -2,31 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "SubAbility": "Add0",
-          "ResultSubAbilities": "1:DBSac,2:AddW,3:AddU,4:AddB,5:AddR,6:AddG",
-          "InstantSpeed": "True",
-          "SpellDescription": "Roll a six-sided die. This ability has the indicated effect."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "Add0",
-        "ResultSubAbilities": "1:DBSac,2:AddW,3:AddU,4:AddB,5:AddR,6:AddG",
-        "InstantSpeed": "True",
-        "SpellDescription": "Roll a six-sided die. This ability has the indicated effect."
-      }
+      "description": "Roll a six-sided die. This ability has the indicated effect.",
+      "effect": {
+        "description": "Roll a six-sided die. This ability has the indicated effect.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

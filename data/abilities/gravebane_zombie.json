@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would die, put CARDNAME on top of its owner's library instead.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Description": "If CARDNAME would die, put CARDNAME on top of its owner's library instead.",
-        "ReplaceWith": "ToLibrary"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

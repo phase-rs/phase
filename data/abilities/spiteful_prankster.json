@@ -1,30 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.Other",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever another creature dies, CARDNAME deals 1 damage to target player or planeswalker.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, CARDNAME has first strike.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature dies, CARDNAME deals 1 damage to target player or planeswalker.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

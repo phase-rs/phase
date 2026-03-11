@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't block creatures with power greater than CARDNAME's power.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't block creatures with power greater than CARDNAME's power.",
-        "ValidBlocker": "Creature.Self",
-        "ValidAttacker": "Creature.powerGTX"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

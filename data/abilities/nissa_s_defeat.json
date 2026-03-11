@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Forest,Enchantment.Green,Planeswalker.Green"
-        }
-      },
       "cost": null,
+      "description": "Destroy target Forest, green enchantment, or green planeswalker. If that permanent was a Nissa planeswalker, draw a card.",
+      "effect": {
+        "target": {
+          "card_type": "Forest,Enchantment",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green,Planeswalker.Green"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target Forest, green enchantment, or green planeswalker. If that permanent was a Nissa planeswalker, draw a card.",
-        "SubAbility": "DBDraw",
-        "TgtPrompt": "Select target Forest, green enchantment, or green planeswalker"
-      }
+      "target_prompt": "Select target Forest, green enchantment, or green planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Toxic Spores — At the beginning of your end step, if a permanent you controlled left the battlefield this turn, each opponent loses 3 life.",
       "mode": "Phase",
-      "params": {
-        "Revolt": "True",
-        "Execute": "DBLose",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Toxic Spores — At the beginning of your end step, if a permanent you controlled left the battlefield this turn, each opponent loses 3 life."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

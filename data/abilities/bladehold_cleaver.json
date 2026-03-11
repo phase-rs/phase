@@ -1,29 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraft",
-        "TriggerDescription": "Whenever equipped creature dies, draft a card from CARDNAME's spellbook.",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.EquippedBy",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +2/+2.",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature dies, draft a card from CARDNAME's spellbook.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

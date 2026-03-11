@@ -2,40 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "5",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a tapped 3/2 red and white Spirit creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "rw_3_2_spirit",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "5"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a tapped 3/2 red and white Spirit creature token.",
-        "TokenTapped": "True",
-        "TokenOwner": "You",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

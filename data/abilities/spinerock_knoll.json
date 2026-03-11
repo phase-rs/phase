@@ -2,76 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}."
-      }
+      "description": "Add {R}.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Optional": "True",
-          "SpellDescription": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
-          "Controller": "You",
-          "ConditionCheckSVar": "X",
-          "ConditionSVarCompare": "GE7",
-          "WithoutManaCost": "True",
-          "Defined": "ExiledWith",
-          "Amount": "All"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "SpellDescription": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
-        "Controller": "You",
-        "ConditionCheckSVar": "X",
-        "ConditionSVarCompare": "GE7",
-        "WithoutManaCost": "True",
-        "Defined": "ExiledWith",
-        "Amount": "All"
-      }
+      "description": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
+      "effect": {
+        "description": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

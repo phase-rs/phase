@@ -1,30 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "Execute": "DBFight",
-        "ValidTarget": "Creature.inZoneBattlefield+YouCtrl",
-        "ValidSource": "Spell",
-        "TriggerDescription": "Whenever a creature you control becomes the target of a spell, CARDNAME fights up to one target creature you don't control.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Description": "Hydra spells you cast cost {4} less to cast.",
-        "ValidCard": "Card.Hydra",
-        "Type": "Spell",
-        "Amount": "4"
-      }
+      "description": "Hydra spells you cast cost {4} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control becomes the target of a spell, CARDNAME fights up to one target creature you don't control.",
+      "mode": "BecomesTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

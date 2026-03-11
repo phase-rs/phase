@@ -2,31 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/OIL/CARDNAME>"
+            "cost": "SubCounter<1/OIL/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)"
-      }
+      "description": "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Choose target creature you control and target creature you don't control. Put a +1/+1 counter on the creature you control if the gift was promised. Then those creatures fight each other.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target creature you control",
-        "ConditionZone": "Stack",
-        "ConditionPresent": "Card.Self+PromisedGift",
-        "ConditionCompare": "EQ1",
-        "SpellDescription": "Choose target creature you control and target creature you don't control. Put a +1/+1 counter on the creature you control if the gift was promised. Then those creatures fight each other.",
-        "SubAbility": "DBFight"
-      }
+      "target_prompt": "Choose target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

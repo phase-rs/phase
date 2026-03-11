@@ -1,18 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures of the chosen type get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.ChosenType",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Creatures of the chosen type get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

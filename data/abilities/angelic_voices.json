@@ -1,20 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Creatures you control get +1/+1 as long as you control no nonartifact, nonwhite creatures.",
       "mode": "Continuous",
-      "params": {
-        "PresentCompare": "EQ0",
-        "Description": "Creatures you control get +1/+1 as long as you control no nonartifact, nonwhite creatures.",
-        "AddToughness": "1",
-        "IsPresent": "Creature.nonWhite+nonArtifact+YouCtrl",
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

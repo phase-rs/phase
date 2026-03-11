@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "Defined": "Targeted",
-          "ValidTgts": "Opponent",
-          "SubAbility": "DBExile",
-          "StackDescription": "{p:Targeted} reveals their hand.",
-          "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If an instant card or a card with flash is exiled this way, they lose 1 life. Otherwise, you lose 1 life."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Targeted",
-        "ValidTgts": "Opponent",
-        "SubAbility": "DBExile",
-        "StackDescription": "{p:Targeted} reveals their hand.",
-        "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If an instant card or a card with flash is exiled this way, they lose 1 life. Otherwise, you lose 1 life."
-      }
+      "description": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If an instant card or a card with flash is exiled this way, they lose 1 life. Otherwise, you lose 1 life.",
+      "effect": {
+        "description": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If an instant card or a card with flash is exiled this way, they lose 1 life. Otherwise, you lose 1 life.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

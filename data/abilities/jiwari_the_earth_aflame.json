@@ -2,74 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Variable",
-          "value": "X"
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withoutFlying"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X R"
+            "cost": "X R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to target creature without flying.",
-        "TgtPrompt": "Select target creature without flying."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "CARDNAME deals X damage to target creature without flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
+      "kind": "Activated",
+      "sub_ability": null,
+      "target_prompt": "Select target creature without flying."
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X R R R"
+            "cost": "X R R R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/NICKNAME>"
+            "cost": "Discard<1/NICKNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Channel —",
-        "ValidCards": "Creature.withoutFlying",
-        "ValidDescription": "each creature without flying.",
-        "ActivationZone": "Hand",
-        "SpellDescription": "NICKNAME deals X damage to each creature without flying."
-      }
+      "description": "NICKNAME deals X damage to each creature without flying.",
+      "effect": {
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        },
+        "type": "DamageAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

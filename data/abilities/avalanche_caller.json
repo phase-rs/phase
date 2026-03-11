@@ -2,34 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Target land you control becomes a 4/4 Elemental creature with hexproof and haste until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Snow"
+            }
+          ],
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Elemental"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.Snow+YouCtrl"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Haste & Hexproof",
-        "SpellDescription": "Target land you control becomes a 4/4 Elemental creature with hexproof and haste until end of turn. It's still a land.",
-        "TgtPrompt": "Select target land you control"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

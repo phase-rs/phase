@@ -1,20 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Devourer of Souls — Whenever another creature dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.Other",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Devourer of Souls — Whenever another creature dies, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Graveyard",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

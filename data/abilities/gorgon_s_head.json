@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has deathtouch.",
-        "AddKeyword": "Deathtouch"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "ValidTgts": "Opponent",
-          "SpellDescription": "Target opponent reveals a card at random from their hand. You gain life equal to that card's mana value.",
-          "RememberRevealed": "True",
-          "SubAbility": "DBGain",
-          "Random": "True"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W"
+        "cost": "3 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Opponent",
-        "SpellDescription": "Target opponent reveals a card at random from their hand. You gain life equal to that card's mana value.",
-        "RememberRevealed": "True",
-        "SubAbility": "DBGain",
-        "Random": "True"
-      }
+      "description": "Target opponent reveals a card at random from their hand. You gain life equal to that card's mana value.",
+      "effect": {
+        "description": "Target opponent reveals a card at random from their hand. You gain life equal to that card's mana value.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

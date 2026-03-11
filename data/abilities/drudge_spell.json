@@ -2,50 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "B",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<2/Creature>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 1/1 black Skeleton creature token. It has \"{B}: Regenerate this creature.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_1_1_skeleton_regenerate",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "B"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<2/Creature>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{B}, Exile two creature cards from your graveyard:",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 black Skeleton creature token. It has \"{B}: Regenerate this creature.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME leaves the battlefield, destroy all Skeleton tokens. They can't be regenerated.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, destroy all Skeleton tokens. They can't be regenerated.",
-        "Execute": "TrigDestroyAll"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,23 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "XMin1 X B"
+        "cost": "XMin1 X B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken"
-      }
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

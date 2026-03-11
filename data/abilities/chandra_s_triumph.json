@@ -2,28 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to target creature or planeswalker an opponent controls. CARDNAME deals 5 damage instead if you control a Chandra planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl,Planeswalker.OppCtrl"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppCtrl,Planeswalker.OppCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker an opponent controls. CARDNAME deals 5 damage instead if you control a Chandra planeswalker.",
-        "TgtPrompt": "Select target creature or planeswalker an opponent controls"
-      }
+      "target_prompt": "Select target creature or planeswalker an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

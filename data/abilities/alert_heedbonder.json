@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, you gain 1 life for each creature you control with vigilance.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, you gain 1 life for each creature you control with vigilance.",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

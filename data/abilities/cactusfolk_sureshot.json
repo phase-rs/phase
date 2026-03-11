@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, other creatures you control with power 4 or greater gain trample and haste until end of turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, other creatures you control with power 4 or greater gain trample and haste until end of turn.",
-        "Execute": "TrigPumpAll",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

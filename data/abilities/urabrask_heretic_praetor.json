@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, exile the top card of your library. You may play it this turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. You may play it this turn.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of each opponent's upkeep, the next time they would draw a card this turn, instead they exile the top card of their library. They may play it this turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each opponent's upkeep, the next time they would draw a card this turn, instead they exile the top card of their library. They may play it this turn.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Opponent",
-        "Execute": "TrigEffect"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

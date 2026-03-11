@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may tap any number of untapped Humans you control. Draw a card for each Human tapped this way.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigTap"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power is equal to the number of cards in your hand.",
-        "CharacteristicDefining": "True",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of cards in your hand.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, you may tap any number of untapped Humans you control. Draw a card for each Human tapped this way.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

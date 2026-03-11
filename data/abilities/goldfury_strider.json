@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Artifact;Creature/artifacts and/or creatures>"
+        "cost": "tapXType<2/Artifact;Creature/artifacts and/or creatures>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Target creature gets +2/+0 until end of turn. Activate only as a sorcery."
-      }
+      "description": "Target creature gets +2/+0 until end of turn. Activate only as a sorcery.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

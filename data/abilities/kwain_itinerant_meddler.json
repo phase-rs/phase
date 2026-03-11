@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "OptionalDecider": "True",
-        "Defined": "Player",
-        "SubAbility": "DBGainLife",
-        "RememberDrawn": "AllReplaced",
-        "SpellDescription": "Each player may draw a card, then each player who drew a card this way gains 1 life."
-      }
+      "description": "Each player may draw a card, then each player who drew a card this way gains 1 life.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

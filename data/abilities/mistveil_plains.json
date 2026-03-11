@@ -2,51 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.YouOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put target card from your graveyard on the bottom of your library. Activate only if you control two or more white permanents.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Permanent.White+YouCtrl",
-        "LibraryPosition": "-1",
-        "SpellDescription": "Put target card from your graveyard on the bottom of your library. Activate only if you control two or more white permanents.",
-        "PresentCompare": "GE2",
-        "TgtPrompt": "Select target card in your graveyard"
-      }
+      "target_prompt": "Select target card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ReplaceWith": "DBDig",
-        "ValidCause": "Activated.Cycling+nonLand",
-        "ActiveZones": "Battlefield",
-        "Description": "If a cycling ability of another nonland card would cause you to draw a card, instead exile cards from the top of your library until you exile a card that shares a card type with the cycled card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of your library in a random order.",
-        "ValidPlayer": "You"
-      }
+      "description": "If a cycling ability of another nonland card would cause you to draw a card, instead exile cards from the top of your library until you exile a card that shares a card type with the cycled card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of your library in a random order.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

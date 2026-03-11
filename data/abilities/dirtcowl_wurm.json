@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent plays a land, put a +1/+1 counter on CARDNAME.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an opponent plays a land, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Land.OppCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

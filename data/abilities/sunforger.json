@@ -2,52 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Library",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R W"
+            "cost": "R W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Unattach<CARDNAME/CARDNAME>"
+            "cost": "Unattach<CARDNAME/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "0",
-        "RememberChanged": "True",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "1",
-        "ChangeType": "Instant.White+cmcLE4,Instant.Red+cmcLE4",
-        "SubAbility": "CastFound",
-        "Shuffle": "False",
-        "SpellDescription": "Search your library for a red or white instant card with mana value 4 or less and cast that card without paying its mana cost. Then shuffle."
-      }
+      "description": "Search your library for a red or white instant card with mana value 4 or less and cast that card without paying its mana cost. Then shuffle.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +4/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "4",
-        "Description": "Equipped creature gets +4/+0.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

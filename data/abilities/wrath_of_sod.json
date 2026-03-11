@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "SpellDescription": "Put a manabond counter on all creatures. (They lose all other abilities and become lands with \"{T}: Add one mana of this card's color.\")",
-          "ValidCards": "Creature",
-          "CounterType": "MANABOND",
-          "CounterNum": "1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a manabond counter on all creatures. (They lose all other abilities and become lands with \"{T}: Add one mana of this card's color.\")",
-        "ValidCards": "Creature",
-        "CounterType": "MANABOND",
-        "CounterNum": "1"
-      }
+      "description": "Put a manabond counter on all creatures. (They lose all other abilities and become lands with \"{T}: Add one mana of this card's color.\")",
+      "effect": {
+        "description": "Put a manabond counter on all creatures. (They lose all other abilities and become lands with \"{T}: Add one mana of this card's color.\")",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

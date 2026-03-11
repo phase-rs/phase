@@ -2,40 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<Any/Creature.Other+withTotalPowerGE10>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +20/+20 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 20,
-        "toughness": 20,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 20,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<Any/Creature.Other+withTotalPowerGE10>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +20/+20 until end of turn.",
-        "CostDesc": "Tap any number of untapped creatures you control other than CARDNAME with total power 10 or greater:",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would be destroyed, regenerate it.",
       "event": "Destroy",
-      "params": {
-        "Regeneration": "True",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "DBRegeneration",
-        "Description": "If CARDNAME would be destroyed, regenerate it.",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

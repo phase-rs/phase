@@ -2,51 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "4 G",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 2/2 green Wolf creature token. Activate only during your turn.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_2_2_wolf",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "4 G"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 green Wolf creature token. Activate only during your turn.",
-        "PlayerTurn": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
       "mode": "TapsForMana",
-      "params": {
-        "Static": "True",
-        "TriggerDescription": "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigMana"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

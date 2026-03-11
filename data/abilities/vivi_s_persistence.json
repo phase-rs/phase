@@ -2,48 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create a 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_0_1_wizard_snipe",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
-        "TokenOwner": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever your commander enters or attacks, you may pay {2}. If you do, return this card from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.IsCommander+YouOwn",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "Whenever your commander enters or attacks, you may pay {2}. If you do, return this card from your graveyard to your hand.",
-        "TriggerZones": "Graveyard",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever your commander enters or attacks, you may pay {2}. If you do, return this card from your graveyard to your hand.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "Secondary": "True",
-        "ValidCard": "Card.IsCommander+YouOwn",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "Whenever your commander enters or attacks, you may pay {2}. If you do, return this card from your graveyard to your hand."
+      "secondary": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

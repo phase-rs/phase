@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to each creature and each planeswalker.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "CARDNAME deals 4 damage to each creature and each planeswalker.",
-        "ValidCards": "Creature,Planeswalker"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,49 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "c_1_1_a_thopter_flying",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W"
+            "cost": "2 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 colorless Thopter artifact creature token with flying."
-      }
+      "description": "Create a 1/1 colorless Thopter artifact creature token with flying.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "c_1_1_a_thopter_flying",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more artifact creatures you control die, draw a card. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigDraw",
-        "ActivationLimit": "1",
-        "TriggerDescription": "Whenever one or more artifact creatures you control die, draw a card. This ability triggers only once each turn.",
-        "ValidCards": "Creature.Artifact+YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

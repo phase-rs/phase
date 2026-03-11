@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Artifact.cmcLE3,Creature.cmcLE3",
-        "SpellDescription": "Exile all artifacts and creatures with mana value 3 or less.",
-        "SubAbility": "DBAnimate",
-        "RememberChanged": "True"
-      }
+      "description": "Exile all artifacts and creatures with mana value 3 or less.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

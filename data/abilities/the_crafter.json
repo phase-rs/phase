@@ -2,49 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "bling",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create an equipment token named Bling with \"Equipped creature gets +1/+0\" and \"Equip {1}.\""
-      }
+      "description": "Create an equipment token named Bling with \"Equipped creature gets +1/+0\" and \"Equip {1}.\"",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "bling",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters the battlefield, create two colorless Scrap artifact tokens (They have no abilities.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters the battlefield, create two colorless Scrap artifact tokens (They have no abilities.)",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

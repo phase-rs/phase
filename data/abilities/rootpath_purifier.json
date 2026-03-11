@@ -1,18 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield,Library",
+      "description": "Lands you control and land cards in your library are basic.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield,Library",
-        "Description": "Lands you control and land cards in your library are basic.",
-        "AddType": "Basic",
-        "Affected": "Land.YouCtrl"
-      }
+      "modifications": [
+        {
+          "core_type": "Basic",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

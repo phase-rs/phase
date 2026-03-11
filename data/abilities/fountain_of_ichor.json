@@ -2,51 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 3/3 Dinosaur artifact creature until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Artifact",
           "Dinosaur"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME becomes a 3/3 Dinosaur artifact creature until end of turn.",
-        "RemoveCreatureTypes": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

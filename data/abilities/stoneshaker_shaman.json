@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each player's end step, that player sacrifices an untapped land."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Land",
-        "AddSVar": "AITap"
-      }
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's end step, that player sacrifices an untapped land.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

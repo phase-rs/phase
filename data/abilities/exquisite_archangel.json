@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would lose the game, instead exile CARDNAME and your life total becomes equal to your starting life total.",
       "event": {
         "Other": "GameLoss"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "ReplaceWith": "ExileSetLife",
-        "Description": "If you would lose the game, instead exile CARDNAME and your life total becomes equal to your starting life total."
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

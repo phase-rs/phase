@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidActivatingPlayer": "You",
-        "TargetsValid": "Card.Self",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a +1/+1 counter is put on CARDNAME, remove a +1/+1 counter from target creature an opponent controls.",
       "mode": "CounterAdded",
-      "params": {
-        "CounterType": "P1P1",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "FathomDraw",
-        "TriggerDescription": "Whenever a +1/+1 counter is put on CARDNAME, remove a +1/+1 counter from target creature an opponent controls."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

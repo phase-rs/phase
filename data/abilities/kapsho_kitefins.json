@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature you control enters, tap target creature an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self,Creature.YouCtrl+Other",
-        "Execute": "TrigTap",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, tap target creature an opponent controls."
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

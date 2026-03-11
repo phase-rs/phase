@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "LoseSubAbility": "DBDraw",
-          "WinSubAbility": "DBDamageAll",
-          "SpellDescription": "Flip a coin. If you win the flip, CARDNAME deals 1 damage to each creature and each player. If you lose the flip, each player draws a card."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "LoseSubAbility": "DBDraw",
-        "WinSubAbility": "DBDamageAll",
-        "SpellDescription": "Flip a coin. If you win the flip, CARDNAME deals 1 damage to each creature and each player. If you lose the flip, each player draws a card."
-      }
+      "description": "Flip a coin. If you win the flip, CARDNAME deals 1 damage to each creature and each player. If you lose the flip, each player draws a card.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, CARDNAME deals 1 damage to each creature and each player. If you lose the flip, each player draws a card.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

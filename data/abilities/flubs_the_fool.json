@@ -1,38 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
       "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBranch"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
       "mode": "SpellCast",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBranch",
-        "ValidActivatingPlayer": "You"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You may play an additional land on each of your turns.",
-        "AdjustLandPlays": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

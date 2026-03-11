@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, search your library for any number of creature cards with total mana value 6 or less, put them onto the battlefield, then shuffle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigChangeZone",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, search your library for any number of creature cards with total mana value 6 or less, put them onto the battlefield, then shuffle."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

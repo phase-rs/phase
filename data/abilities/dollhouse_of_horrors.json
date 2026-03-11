@@ -2,56 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "PumpDuration": "EOT",
-          "SetPower": "0",
-          "AddStaticAbilities": "ConstructBuff",
-          "AddTypes": "Construct & Artifact",
-          "SorcerySpeed": "True",
-          "StackDescription": "Create a token that's a copy of {c:Exiled}, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn.",
-          "PumpKeywords": "Haste",
-          "SpellDescription": "Create a token that's a copy of the exiled card, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn. Activate only as a sorcery.",
-          "Defined": "Exiled",
-          "SetToughness": "0"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Creature>"
+            "cost": "ExileFromGrave<1/Creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PumpDuration": "EOT",
-        "SetPower": "0",
-        "AddStaticAbilities": "ConstructBuff",
-        "AddTypes": "Construct & Artifact",
-        "SorcerySpeed": "True",
-        "StackDescription": "Create a token that's a copy of {c:Exiled}, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn.",
-        "PumpKeywords": "Haste",
-        "SpellDescription": "Create a token that's a copy of the exiled card, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn. Activate only as a sorcery.",
-        "Defined": "Exiled",
-        "SetToughness": "0"
-      }
+      "description": "Create a token that's a copy of the exiled card, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn. Activate only as a sorcery.",
+      "effect": {
+        "description": "Create a token that's a copy of the exiled card, except it's a 0/0 Construct artifact in addition to its other types and it has \"This creature gets +1/+1 for each Construct you control.\" That creature gains haste until end of turn. Activate only as a sorcery.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle or discard a card, target creature gains flying until end of turn.",
       "mode": "Discarded",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.YouOwn",
-        "TriggerDescription": "Whenever you cycle or discard a card, target creature gains flying until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

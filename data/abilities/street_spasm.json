@@ -2,28 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to target creature without flying you don't control.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.withoutFlying+YouDontCtrl"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature without flying you don't control.",
-        "SpellDescription": "CARDNAME deals X damage to target creature without flying you don't control."
-      }
+      "target_prompt": "Select target creature without flying you don't control."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

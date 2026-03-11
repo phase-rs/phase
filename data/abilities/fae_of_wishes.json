@@ -1,72 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Hand",
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 U"
+                "cost": "1 U",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<2/Card>"
+                "cost": "Discard<2/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Return CARDNAME to its owner's hand."
-          }
+          "description": "Return CARDNAME to its owner's hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Battlefield",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "You may reveal a noncreature card you own from outside the game and put it into your hand.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Sideboard",
             "destination": "Hand",
+            "origin": "Sideboard",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeType": "Card.nonCreature+YouOwn",
-            "Hidden": "True",
-            "ChangeNum": "1",
-            "SpellDescription": "You may reveal a noncreature card you own from outside the game and put it into your hand.",
-            "ChangeTypeDesc": "noncreature card they own",
-            "Reveal": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

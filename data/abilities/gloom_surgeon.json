@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "Exile",
-        "ValidTarget": "Card.Self",
-        "PreventionEffect": "True",
-        "IsCombat": "True",
-        "ActiveZones": "Battlefield",
-        "AlwaysReplace": "True",
-        "Description": "If combat damage would be dealt to CARDNAME, prevent that damage and exile that many cards from the top of your library."
-      }
+      "description": "If combat damage would be dealt to CARDNAME, prevent that damage and exile that many cards from the top of your library.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

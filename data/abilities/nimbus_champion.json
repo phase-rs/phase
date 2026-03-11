@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may return target creature to its owner's hand if that creature's power is less than or equal to the number of Warriors your team controls.",
       "mode": "Attacks",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBounce",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may return target creature to its owner's hand if that creature's power is less than or equal to the number of Warriors your team controls."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

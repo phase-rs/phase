@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "One or two target creatures each get +2/+1 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "1",
-        "SpellDescription": "One or two target creatures each get +2/+1 until end of turn.",
-        "TargetMax": "2",
-        "TgtPrompt": "Select one or two target creatures"
-      }
+      "target_prompt": "Select one or two target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

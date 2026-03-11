@@ -1,29 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, you may add {W}{U}{B}{R}{G}.",
-        "OptionalDecider": "You",
-        "Execute": "RolledChaos"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures get +2/+2.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Description": "All creatures get +2/+2.",
-        "Affected": "Creature",
-        "AddToughness": "2",
-        "EffectZone": "Command",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, you may add {W}{U}{B}{R}{G}.",
+      "mode": "ChaosEnsues",
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

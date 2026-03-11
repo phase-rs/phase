@@ -2,29 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Green"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
+      "description": "Target green creature gets +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target green creature",
-        "SpellDescription": "Target green creature gets +1/+1 until end of turn."
-      }
+      "target_prompt": "Select target green creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, each player discards a card.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "-X",
-        "Affected": "Card.Self",
-        "AddPower": "-X",
-        "Description": "CARDNAME gets -1/-1 for each card in your opponents' hands."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets -1/-1 for each card in your opponents' hands.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, each player discards a card.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

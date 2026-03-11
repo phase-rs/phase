@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Water Always Wins — Whenever CARDNAME attacks, put a flood counter on another target creature or land. If it's a creature, it becomes a copy of CARDNAME. If it's a land, it becomes an Island in addition to its other types.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Water Always Wins — Whenever CARDNAME attacks, put a flood counter on another target creature or land. If it's a creature, it becomes a copy of CARDNAME. If it's a land, it becomes an Island in addition to its other types.",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCounter",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

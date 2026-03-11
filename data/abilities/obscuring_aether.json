@@ -2,41 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "Mode": "TurnFaceDown",
-          "Defined": "Self",
-          "SpellDescription": "Turn CARDNAME face down. (It becomes a 2/2 creature.)"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "TurnFaceDown",
-        "Defined": "Self",
-        "SpellDescription": "Turn CARDNAME face down. (It becomes a 2/2 creature.)"
-      }
+      "description": "Turn CARDNAME face down. (It becomes a 2/2 creature.)",
+      "effect": {
+        "description": "Turn CARDNAME face down. (It becomes a 2/2 creature.)",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Creature",
-        "ValidSpell": "Spell.isCastFaceDown",
-        "Activator": "You",
-        "Description": "Face-down creature spells you cast cost {1} less to cast.",
-        "Amount": "1"
-      }
+      "description": "Face-down creature spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

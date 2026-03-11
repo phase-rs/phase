@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, exile X creature cards from your graveyard. If you can't, put CARDNAME into its owner's graveyard instead of onto the battlefield. For each creature card exiled this way, CARDNAME enters with a +2/+0, +1/+1, or +0/+2 counter on it.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ExileCreature",
-        "Destination": "Battlefield",
-        "Description": "As CARDNAME enters, exile X creature cards from your graveyard. If you can't, put CARDNAME into its owner's graveyard instead of onto the battlefield. For each creature card exiled this way, CARDNAME enters with a +2/+0, +1/+1, or +0/+2 counter on it."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

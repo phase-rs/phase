@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Choose up to one target creature, then airbend all other creatures. (Exile them. While each one is exiled, its owner may cast it for {2} rather than its mana cost.) Until your next turn, your opponents can't cast spells from anywhere other than their hands. Exile CARDNAME.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "SubAbility": "DBAirbend",
-        "TgtPrompt": "Select up to one target creature",
-        "SpellDescription": "Choose up to one target creature, then airbend all other creatures. (Exile them. While each one is exiled, its owner may cast it for {2} rather than its mana cost.) Until your next turn, your opponents can't cast spells from anywhere other than their hands. Exile CARDNAME."
-      }
+      "target_prompt": "Select up to one target creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

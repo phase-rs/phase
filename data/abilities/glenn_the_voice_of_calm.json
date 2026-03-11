@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, draw cards equal to his power.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, draw cards equal to his power.",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

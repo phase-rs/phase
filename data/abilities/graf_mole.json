@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice a Clue, you gain 3 life.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidPlayer": "You",
-        "ValidCard": "Clue",
-        "Execute": "TrigGainLife",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you sacrifice a Clue, you gain 3 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Clue",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

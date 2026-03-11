@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage divided as you choose among any number of target creatures, where X is the greatest power among creatures you control as you cast this spell.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "OrigPower"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of target creatures, where X is the greatest power among creatures you control as you cast this spell.",
-        "TargetMax": "OrigPower",
-        "TgtPrompt": "Select target creatures to distribute damage to",
-        "TargetMin": "0",
-        "DividedAsYouChoose": "OrigPower"
-      }
+      "target_prompt": "Select target creatures to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

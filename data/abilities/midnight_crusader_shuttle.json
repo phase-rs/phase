@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Midnight Entity — Whenever CARDNAME attacks, defending player faces a villainous choice — That player sacrifices a creature, or you gain control of a creature of your choice that player controls until end of turn. If you gain control of a creature this way, tap it, and it's attacking that player.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigVillainousChoice",
-        "TriggerDescription": "Midnight Entity — Whenever CARDNAME attacks, defending player faces a villainous choice — That player sacrifices a creature, or you gain control of a creature of your choice that player controls until end of turn. If you gain control of a creature this way, tap it, and it's attacking that player."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

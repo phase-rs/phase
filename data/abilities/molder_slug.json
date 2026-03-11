@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, that player sacrifices an artifact.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices an artifact.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

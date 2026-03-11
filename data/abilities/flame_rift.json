@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to each player.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 4 damage to each player.",
-        "ValidDescription": "each player.",
-        "ValidPlayers": "Player"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

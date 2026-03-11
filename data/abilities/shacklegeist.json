@@ -2,38 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouDontCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Spirit>"
+        "cost": "tapXType<2/Spirit>",
+        "type": "Mana"
       },
+      "description": "Tap target creature you don't control.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you don't control",
-        "SpellDescription": "Tap target creature you don't control."
-      }
+      "target_prompt": "Select target creature you don't control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can block only creatures with flying.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.withoutFlying",
-        "ValidBlocker": "Creature.Self",
-        "Description": "CARDNAME can block only creatures with flying."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

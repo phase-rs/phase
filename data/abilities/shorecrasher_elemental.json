@@ -2,49 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME, then return it to the battlefield face down under its owner's control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile CARDNAME, then return it to the battlefield face down under its owner's control.",
-        "SubAbility": "DBReturn",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "PumpAtt,PumpDef",
-          "SpellDescription": "CARDNAME gets +1/-1 or -1/+1 until end of turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "PumpAtt,PumpDef",
-        "SpellDescription": "CARDNAME gets +1/-1 or -1/+1 until end of turn."
-      }
+      "description": "CARDNAME gets +1/-1 or -1/+1 until end of turn.",
+      "effect": {
+        "description": "CARDNAME gets +1/-1 or -1/+1 until end of turn.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a player, that player loses 1 life at the beginning of their next draw step unless they pay {1} before that draw step.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "Execute": "NafsEffect",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player loses 1 life at the beginning of their next draw step unless they pay {1} before that draw step.",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

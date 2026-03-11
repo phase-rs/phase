@@ -1,28 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Golem"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Golems you control have first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "Affected": "Creature.Golem+YouCtrl",
-        "Description": "Golems you control have first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

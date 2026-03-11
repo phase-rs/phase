@@ -2,89 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Up to one target creature's base power perpetually becomes equal to its toughness. It perpetually gains \"This creature can attack as though it didn't have defender.\"",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [],
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "staticAbilities": "CanAttack",
-        "StackDescription": "REP Up to one target creature_{c:Targeted}",
-        "Duration": "Perpetual",
-        "TgtPrompt": "Select up to one target creature",
-        "TargetMax": "1",
-        "SpellDescription": "Up to one target creature's base power perpetually becomes equal to its toughness. It perpetually gains \"This creature can attack as though it didn't have defender.\""
-      }
+      "target_prompt": "Select up to one target creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "Name": "Lumbering Lightshield",
-          "Planeswalker": "True",
-          "Conjure": "True",
-          "Zone": "Battlefield",
-          "SpellDescription": "Conjure a Lumbering Lightshield card onto the battlefield."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Lumbering Lightshield",
-        "Planeswalker": "True",
-        "Conjure": "True",
-        "Zone": "Battlefield",
-        "SpellDescription": "Conjure a Lumbering Lightshield card onto the battlefield."
-      }
+      "description": "Conjure a Lumbering Lightshield card onto the battlefield.",
+      "effect": {
+        "description": "Conjure a Lumbering Lightshield card onto the battlefield.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "EndStepTrig",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "Ultimate": "True",
-          "Name": "Emblem — Teyo, Aegis Adept",
-          "SpellDescription": "You get an emblem with \"At the beginning of your end step, return target white creature card from your graveyard to the battlefield. You gain life equal to its toughness.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "EndStepTrig",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "Ultimate": "True",
-        "Name": "Emblem — Teyo, Aegis Adept",
-        "SpellDescription": "You get an emblem with \"At the beginning of your end step, return target white creature card from your graveyard to the battlefield. You gain life equal to its toughness.\""
-      }
+      "description": "You get an emblem with \"At the beginning of your end step, return target white creature card from your graveyard to the battlefield. You gain life equal to its toughness.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

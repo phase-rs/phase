@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Wolf or Werewolf you control becomes the target of an instant or sorcery spell, create a 2/2 green Wolf creature token.",
       "mode": "BecomesTarget",
-      "params": {
-        "TriggerDescription": "Whenever a Wolf or Werewolf you control becomes the target of an instant or sorcery spell, create a 2/2 green Wolf creature token.",
-        "Execute": "DBToken",
-        "ValidTarget": "Wolf.YouCtrl+inZoneBattlefield,Werewolf.YouCtrl+inZoneBattlefield",
-        "ValidSource": "Instant,Sorcery",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Wolf",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

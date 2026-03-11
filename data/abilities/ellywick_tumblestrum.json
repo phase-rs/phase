@@ -2,85 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Venture",
-        "params": {
-          "Defined": "You",
-          "Planeswalker": "True",
-          "SpellDescription": "Venture into the dungeon. (Enter the first room or advance to the next room.)"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "Planeswalker": "True",
-        "SpellDescription": "Venture into the dungeon. (Enter the first room or advance to the next room.)"
-      }
+      "description": "Venture into the dungeon. (Enter the first room or advance to the next room.)",
+      "effect": {
+        "description": "Venture into the dungeon. (Enter the first room or advance to the next room.)",
+        "name": "Venture",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top six cards of your library. You may reveal a creature card from among them and put it into your hand. If it's legendary, you gain 3 life. Put the rest on the bottom of your library in a random order.",
       "effect": {
-        "type": "Dig",
         "count": 6,
-        "destination": ""
+        "destination": "",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SpellDescription": "Look at the top six cards of your library. You may reveal a creature card from among them and put it into your hand. If it's legendary, you gain 3 life. Put the rest on the bottom of your library in a random order.",
-        "ForceRevealToController": "True",
-        "Optional": "True",
-        "RestRandomOrder": "True",
-        "Planeswalker": "True",
-        "ChangeNum": "1",
-        "ChangeValid": "Creature",
-        "SubAbility": "DBGainLife"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You get an emblem with \"Creatures you control have trample and haste and get +2/+2 for each differently named dungeon you've completed.\"",
-          "Duration": "Permanent",
-          "Ultimate": "True",
-          "StaticAbilities": "STOverrun",
-          "Planeswalker": "True",
-          "Image": "emblem_ellywick_tumblestrum",
-          "AILogic": "Always",
-          "Name": "Emblem — Ellywick Tumblestrum"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You get an emblem with \"Creatures you control have trample and haste and get +2/+2 for each differently named dungeon you've completed.\"",
-        "Duration": "Permanent",
-        "Ultimate": "True",
-        "StaticAbilities": "STOverrun",
-        "Planeswalker": "True",
-        "Image": "emblem_ellywick_tumblestrum",
-        "AILogic": "Always",
-        "Name": "Emblem — Ellywick Tumblestrum"
-      }
+      "description": "You get an emblem with \"Creatures you control have trample and haste and get +2/+2 for each differently named dungeon you've completed.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

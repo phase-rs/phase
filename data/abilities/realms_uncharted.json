@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for up to four land cards with different names and reveal them. An opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand. Then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Library",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DifferentNames": "True",
-        "Reveal": "True",
-        "ChangeNum": "4",
-        "ChangeType": "Land",
-        "RememberChanged": "True",
-        "Shuffle": "False",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBChangeZone1",
-        "SpellDescription": "Search your library for up to four land cards with different names and reveal them. An opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand. Then shuffle."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

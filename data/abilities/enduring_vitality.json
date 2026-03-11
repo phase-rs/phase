@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "DBReturn",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self+Creature",
-        "TriggerDescription": "When CARDNAME dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have \"{T}: Add one mana of any color.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "AnyMana",
-        "Description": "Creatures you control have \"{T}: Add one mana of any color.\"",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

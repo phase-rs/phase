@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of blue or black spells.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidSA": "Spell",
-        "ValidSource": "Card.Blue,Card.Black",
-        "ValidTarget": "Card.Self",
-        "Description": "CARDNAME can't be the target of blue or black spells."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

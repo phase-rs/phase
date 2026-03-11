@@ -2,72 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W B",
-        "params": {
-          "SpellDescription": "Add {W} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {B}."
-      }
+      "description": "Add {W} or {B}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 W B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 1/4 white and black Nightmare creature until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 1,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Nightmare"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 W B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "White,Black",
-        "OverwriteColors": "True",
-        "SpellDescription": "CARDNAME becomes a 1/4 white and black Nightmare creature until end of turn. It's still a land.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME attacks, defending player loses 2 life and you gain 2 life."
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped."
+      "description": "Whenever CARDNAME attacks, defending player loses 2 life and you gain 2 life.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

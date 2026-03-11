@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Mountain"
-        }
-      },
       "cost": null,
+      "description": "Destroy target Mountain. CARDNAME deals 3 damage to that land's controller.",
+      "effect": {
+        "target": {
+          "card_type": "Mountain",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDealDamage",
-        "SpellDescription": "Destroy target Mountain. CARDNAME deals 3 damage to that land's controller.",
-        "TgtPrompt": "Choose target Mountain"
-      }
+      "target_prompt": "Choose target Mountain"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

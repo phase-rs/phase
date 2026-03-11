@@ -1,59 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Dig",
-            "count": 5,
-            "destination": ""
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Optional": "True",
-            "RestRandomOrder": "True",
-            "ForceRevealToController": "True",
-            "SpellDescription": "Look at the top five cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-            "ChangeValid": "Card.Creature",
-            "ChangeNum": "1"
-          }
+          "description": "Look at the top five cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+          "effect": {
+            "count": 5,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Exile target creature. That creature's controller creates a 3/3 green Frog Lizard creature token.",
-            "SubAbility": "DBToken"
-          }
+          "description": "Exile target creature. That creature's controller creates a 3/3 green Frog Lizard creature token.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

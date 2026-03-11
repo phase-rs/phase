@@ -1,48 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, each player exiles the top three cards of their library.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigKnowledgeExile",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Imprint — When CARDNAME enters, each player exiles the top three cards of their library.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a player casts a spell from their hand, that player exiles it. If the player does, they may cast a spell from among other cards exiled with CARDNAME without paying its mana cost.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.wasCastFromTheirHand",
-        "Execute": "TrigKnowledgeExileSpell",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player casts a spell from their hand, that player exiles it. If the player does, they may cast a spell from among other cards exiled with CARDNAME without paying its mana cost."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "DBForget",
-        "Origin": "Exile",
-        "Static": "True",
-        "ValidCard": "Card.IsImprinted"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

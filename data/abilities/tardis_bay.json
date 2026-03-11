@@ -1,31 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigSteal",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When chaos ensues, gain control of target artifact. Then planeswalk."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "The first spell you cast during each of your turns with mana value 2 or greater has cascade. (When you cast that spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom in a random order.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "EQ0",
-        "AffectedZone": "Stack",
-        "Condition": "PlayerTurn",
-        "Description": "The first spell you cast during each of your turns with mana value 2 or greater has cascade. (When you cast that spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom in a random order.)",
-        "EffectZone": "Command",
-        "CheckSVar": "Y",
-        "Affected": "Card.YouCtrl+cmcGE2",
-        "AddKeyword": "Cascade"
-      }
+      "modifications": [
+        {
+          "keyword": "Cascade",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When chaos ensues, gain control of target artifact. Then planeswalk.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

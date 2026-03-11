@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 10,
-        "toughness": 10,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures you control get +10/+10 and gain vigilance until end of turn.",
-        "ValidCards": "Creature.YouCtrl",
-        "KW": "Vigilance"
-      }
+      "description": "Creatures you control get +10/+10 and gain vigilance until end of turn.",
+      "effect": {
+        "power": 10,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 10,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

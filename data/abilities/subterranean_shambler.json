@@ -1,30 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or leaves the battlefield, it deals 1 damage to each creature without flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTremor",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, it deals 1 damage to each creature without flying.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or leaves the battlefield, it deals 1 damage to each creature without flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigTremor",
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, it deals 1 damage to each creature without flying."
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

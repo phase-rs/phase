@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, create X tapped 1/1 green Squirrel creature tokens, where X is CARDNAME's power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME dies, create X tapped 1/1 green Squirrel creature tokens, where X is CARDNAME's power."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

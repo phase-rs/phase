@@ -1,44 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this enchantment enters, draw three cards, then discard two cards.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDraw",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When this enchantment enters, draw three cards, then discard two cards.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your end step, if eight or more cards are in your graveyard, transform this enchantment.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "SVarCompare": "GE8",
-            "TriggerDescription": "At the beginning of your end step, if eight or more cards are in your graveyard, transform this enchantment.",
-            "Phase": "End of Turn",
-            "CheckSVar": "X"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

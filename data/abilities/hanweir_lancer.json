@@ -1,17 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Creature.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, both creature have first strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.PairedWith,Creature.Self+Paired",
-        "AddKeyword": "First Strike",
-        "Description": "As long as CARDNAME is paired with another creature, both creature have first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

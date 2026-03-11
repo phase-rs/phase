@@ -1,30 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigGainLife",
-        "AttackingPlayer": "You",
-        "TriggerDescription": "Whenever one or more creatures you control attack, you gain life equal to the number of attacking creatures.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "GEY",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your life total is greater than or equal to your starting life total, creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "As long as your life total is greater than or equal to your starting life total, creatures you control get +1/+1.",
-        "Affected": "Creature.YouCtrl",
-        "AddToughness": "1",
-        "CheckSVar": "X",
-        "SVarCompare": "GEY"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more creatures you control attack, you gain life equal to the number of attacking creatures.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

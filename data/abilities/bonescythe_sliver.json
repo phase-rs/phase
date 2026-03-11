@@ -1,17 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Sliver creatures you control have double strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Description": "Sliver creatures you control have double strike.",
-        "Affected": "Creature.Sliver+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

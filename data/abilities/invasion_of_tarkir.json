@@ -1,42 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, reveal any number of Dragon cards from your hand. When you do, CARDNAME deals X plus 2 damage to any other target, where X is the number of cards revealed this way. (X can be 0.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigReveal",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, reveal any number of Dragon cards from your hand. When you do, CARDNAME deals X plus 2 damage to any other target, where X is the number of cards revealed this way. (X can be 0.)",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a Dragon you control attacks, it deals 2 damage to any target.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever a Dragon you control attacks, it deals 2 damage to any target.",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Dragon.YouCtrl",
-            "Execute": "TrigDamage"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Dragon",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

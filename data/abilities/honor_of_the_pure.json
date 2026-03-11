@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "White creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "White creatures you control get +1/+1.",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Creature.White+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

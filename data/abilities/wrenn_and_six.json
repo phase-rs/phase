@@ -2,88 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouOwn"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Return up to one target land card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "BestCard",
-        "TgtPrompt": "Select target land card in your graveyard",
-        "SpellDescription": "Return up to one target land card from your graveyard to your hand.",
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "TargetMax": "1"
-      }
+      "target_prompt": "Select target land card in your graveyard"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 1 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Always",
-          "Name": "Emblem — Wrenn and Six",
-          "Stackable": "False",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "Image": "emblem_wrenn_and_six",
-          "StaticAbilities": "STWrenn",
-          "SpellDescription": "You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Always",
-        "Name": "Emblem — Wrenn and Six",
-        "Stackable": "False",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "Image": "emblem_wrenn_and_six",
-        "StaticAbilities": "STWrenn",
-        "SpellDescription": "You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)"
-      }
+      "description": "You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

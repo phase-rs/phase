@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each opponent sacrifices a creature. If you have the city's blessing, instead each opponent sacrifices half the creatures they control, rounded up.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionCheckSVar": "X",
-        "SubAbility": "DBRepeatEach",
-        "SpellDescription": "Each opponent sacrifices a creature. If you have the city's blessing, instead each opponent sacrifices half the creatures they control, rounded up.",
-        "Defined": "Player.Opponent",
-        "SacValid": "Creature",
-        "ConditionSVarCompare": "EQ0"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

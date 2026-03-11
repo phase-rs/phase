@@ -1,29 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "At the beginning of your end step, exile any number of nontoken artifacts and/or creatures you control. Return those cards to the battlefield under their owner's control at the beginning of your next upkeep."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+0 and have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control get +1/+0 and have haste.",
-        "AddPower": "1",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, exile any number of nontoken artifacts and/or creatures you control. Return those cards to the battlefield under their owner's control at the beginning of your next upkeep.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

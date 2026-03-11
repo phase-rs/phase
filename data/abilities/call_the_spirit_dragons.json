@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "PutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, for each color, put a +1/+1 counter on a Dragon you control of that color. If you put +1/+1 counters on five Dragons this way, you win the game.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Dragon",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Dragons you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Dragons you control have indestructible.",
-        "Affected": "Dragon.YouCtrl",
-        "AddKeyword": "Indestructible"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, for each color, put a +1/+1 counter on a Dragon you control of that color. If you put +1/+1 counters on five Dragons this way, you win the game.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

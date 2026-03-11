@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "Lure the Unwary — At the beginning of combat on your turn, choose an opponent.",
-        "Execute": "TrigChoose",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures attacking the last chosen player get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.attacking ChosenPlayer",
-        "AddPower": "1",
-        "Description": "Creatures attacking the last chosen player get +1/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Lure the Unwary — At the beginning of combat on your turn, choose an opponent.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

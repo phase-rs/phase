@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "Description": "You may play an additional land on each of your turns.",
-        "AdjustLandPlays": "1",
-        "Affected": "You"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "effect_zone": "Command",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

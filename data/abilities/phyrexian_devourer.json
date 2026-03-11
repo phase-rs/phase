@@ -2,38 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "ExileFromTop<1/Card>",
+        "type": "Mana"
+      },
+      "description": "Put X +1/+1 counters on CARDNAME, where X is the exiled card's mana value.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "ExileFromTop<1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Put X +1/+1 counters on CARDNAME, where X is the exiled card's mana value."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME's power is 7 or greater, sacrifice it.",
       "mode": "Always",
-      "params": {
-        "TriggerDescription": "When CARDNAME's power is 7 or greater, sacrifice it.",
-        "IsPresent": "Creature.Self+powerGE7",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

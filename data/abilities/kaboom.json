@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "TargetMax": "MaxTgt",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Player,Planeswalker",
-          "TargetMin": "0",
-          "SpellDescription": "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, CARDNAME deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.",
-          "RepeatSubAbility": "DBDigUntil",
-          "RepeatTargeted": "Targeted"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "MaxTgt",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Player,Planeswalker",
-        "TargetMin": "0",
-        "SpellDescription": "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, CARDNAME deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.",
-        "RepeatSubAbility": "DBDigUntil",
-        "RepeatTargeted": "Targeted"
-      }
+      "description": "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, CARDNAME deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.",
+      "effect": {
+        "description": "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, CARDNAME deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

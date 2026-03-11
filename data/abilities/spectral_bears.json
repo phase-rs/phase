@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if defending player controls no black nontoken permanents, it doesn't untap during your next untap step.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "StayTapped",
-        "IsPresent": "Permanent.Black+!token+DefenderCtrl",
-        "PresentCompare": "EQ0",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, if defending player controls no black nontoken permanents, it doesn't untap during your next untap step.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

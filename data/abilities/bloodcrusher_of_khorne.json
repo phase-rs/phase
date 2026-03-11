@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Devastating Charge — Other creatures you control have trample.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "Description": "Devastating Charge — Other creatures you control have trample.",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

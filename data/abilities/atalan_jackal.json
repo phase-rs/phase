@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Skilled Outrider — Whenever CARDNAME deals combat damage to a player, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
       "mode": "DamageDone",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "Execute": "TrigSearch",
-        "TriggerDescription": "Skilled Outrider — Whenever CARDNAME deals combat damage to a player, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
-        "CombatDamage": "True"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

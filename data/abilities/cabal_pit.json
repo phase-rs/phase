@@ -2,64 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SubAbility": "DBPain",
-          "SpellDescription": "Add {B}. CARDNAME deals 1 damage to you."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPain",
-        "SpellDescription": "Add {B}. CARDNAME deals 1 damage to you."
-      }
+      "description": "Add {B}. CARDNAME deals 1 damage to you.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -2,
-        "toughness": -2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Threshold —",
-        "SpellDescription": "Target creature gets -2/-2 until end of turn. Activate only if there are seven or more cards in your graveyard.",
-        "IsCurse": "True",
-        "Activation": "Threshold"
-      }
+      "description": "Target creature gets -2/-2 until end of turn. Activate only if there are seven or more cards in your graveyard.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

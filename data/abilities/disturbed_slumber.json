@@ -2,32 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target land you control becomes a 4/4 Dinosaur creature with reach and haste. It's still a land. It must be blocked this turn if able.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Dinosaur"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
+        ]
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target land you control",
-        "HiddenKeywords": "CARDNAME must be blocked if able.",
-        "SpellDescription": "Until end of turn, target land you control becomes a 4/4 Dinosaur creature with reach and haste. It's still a land. It must be blocked this turn if able.",
-        "Keywords": "Reach & Haste"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

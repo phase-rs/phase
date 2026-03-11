@@ -1,39 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, seek a nonland card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSeek",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, seek a nonland card."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, seek a nonland card.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigSeek",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, seek a nonland card.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you seek one or more cards during your turn, conjure a duplicate of each of those cards into your hand, then manifest those duplicates.",
       "mode": "SeekAll",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you seek one or more cards during your turn, conjure a duplicate of each of those cards into your hand, then manifest those duplicates.",
-        "Execute": "TrigConjure",
-        "PlayerTurn": "True"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

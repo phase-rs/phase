@@ -2,38 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo R G",
-        "params": {
-          "Amount": "3",
-          "SpellDescription": "Add three mana in any combination of {R} and/or {G}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "3",
-        "SpellDescription": "Add three mana in any combination of {R} and/or {G}."
-      }
+      "description": "Add three mana in any combination of {R} and/or {G}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

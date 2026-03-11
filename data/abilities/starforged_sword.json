@@ -1,30 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigAttach",
-        "ValidCard": "Card.Self+PromisedGift",
-        "TriggerDescription": "When CARDNAME enters, if the gift was promised, attach CARDNAME to target creature you control.",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+3 and loses flying.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "3",
-        "RemoveKeyword": "Flying",
-        "Description": "Equipped creature gets +3/+3 and loses flying."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if the gift was promised, attach CARDNAME to target creature you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "PromisedGift"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

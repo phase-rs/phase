@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, destroy all nonland permanents target opponent controls.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerZones": "Command",
-        "ValidCard": "Card.Self",
-        "Execute": "DarkEffect",
-        "TriggerDescription": "When you set this scheme in motion, destroy all nonland permanents target opponent controls."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

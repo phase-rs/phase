@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, seek that many nonland cards. At the beginning of your next end step, discard those cards.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigSeek",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, seek that many nonland cards. At the beginning of your next end step, discard those cards.",
-        "ValidTarget": "Card.Self"
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

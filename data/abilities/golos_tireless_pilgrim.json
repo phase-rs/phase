@@ -2,40 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W U B R G"
+        "cost": "2 W U B R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "Exile the top three cards of your library. You may play them this turn without paying their mana costs.",
-        "SubAbility": "DBEffect",
-        "RememberChanged": "True",
-        "ChangeNum": "All"
-      }
+      "description": "Exile the top three cards of your library. You may play them this turn without paying their mana costs.",
+      "effect": {
+        "count": 3,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for a land card, put that card onto the battlefield tapped, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for a land card, put that card onto the battlefield tapped, then shuffle.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

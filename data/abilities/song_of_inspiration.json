@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Graveyard",
-        "TargetMin": "0",
-        "SpellDescription": "Choose up to two target permanent cards in your graveyard. Roll a d20 and add the total mana value of those cards.",
-        "StackDescription": "SpellDescription",
-        "TargetMax": "2",
-        "SubAbility": "DBRollDice"
-      }
+      "description": "Choose up to two target permanent cards in your graveyard. Roll a d20 and add the total mana value of those cards.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

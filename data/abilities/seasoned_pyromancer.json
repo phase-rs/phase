@@ -2,51 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3 R R",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create two 1/1 red Elemental creature tokens.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_1_1_elemental",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3 R R"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "2",
-        "TokenOwner": "You",
-        "SpellDescription": "Create two 1/1 red Elemental creature tokens.",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, discard two cards, then draw two cards. For each nonland card discarded this way, create a 1/1 red Elemental creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, discard two cards, then draw two cards. For each nonland card discarded this way, create a 1/1 red Elemental creature token.",
-        "Destination": "Battlefield",
-        "Execute": "TrigDiscard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

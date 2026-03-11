@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures your opponents control with counters on them can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "Creatures your opponents control with counters on them can't attack or block.",
-        "ValidCard": "Creature.OppCtrl+HasCounters"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

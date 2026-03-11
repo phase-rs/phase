@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "ValidActivatingPlayer": "You",
-          "SpellDescription": "When you cast your next instant or sorcery spell this turn, conjure a duplicate of that spell into your hand. If this spell wasn't kicked, discard the duplicate at the beginning of your next end step.",
-          "ValidCard": "Instant,Sorcery",
-          "Execute": "TrigConjure",
-          "Mode": "SpellCast",
-          "ThisTurn": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidActivatingPlayer": "You",
-        "SpellDescription": "When you cast your next instant or sorcery spell this turn, conjure a duplicate of that spell into your hand. If this spell wasn't kicked, discard the duplicate at the beginning of your next end step.",
-        "ValidCard": "Instant,Sorcery",
-        "Execute": "TrigConjure",
-        "Mode": "SpellCast",
-        "ThisTurn": "True"
-      }
+      "description": "When you cast your next instant or sorcery spell this turn, conjure a duplicate of that spell into your hand. If this spell wasn't kicked, discard the duplicate at the beginning of your next end step.",
+      "effect": {
+        "description": "When you cast your next instant or sorcery spell this turn, conjure a duplicate of that spell into your hand. If this spell wasn't kicked, discard the duplicate at the beginning of your next end step.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

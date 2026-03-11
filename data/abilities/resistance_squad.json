@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control another Human, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Human.Other+YouCtrl",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME enters, if you control another Human, draw a card.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

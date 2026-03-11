@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, seek an artifact card from among the top ten cards of your library, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigSeek",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, seek an artifact card from among the top ten cards of your library, then shuffle.",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

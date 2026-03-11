@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Metalcraft — Artifacts you control have shroud as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Condition": "Metalcraft",
-        "Affected": "Artifact.YouCtrl",
-        "Description": "Metalcraft — Artifacts you control have shroud as long as you control three or more artifacts."
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

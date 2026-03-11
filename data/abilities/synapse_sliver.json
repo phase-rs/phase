@@ -1,21 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a Sliver deals combat damage to a player, its controller may draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "OptionalDecider": "TriggeredSourceController",
-        "ValidSource": "Sliver",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Sliver deals combat damage to a player, its controller may draw a card."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

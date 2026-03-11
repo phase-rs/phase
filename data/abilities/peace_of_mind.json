@@ -2,32 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 3 life."
-      }
+      "description": "You gain 3 life.",
+      "effect": {
+        "amount": 3,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

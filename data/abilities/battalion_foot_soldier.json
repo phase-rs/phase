@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for any number of cards named Battalion Foot Soldier, reveal them, put them into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for any number of cards named Battalion Foot Soldier, reveal them, put them into your hand, then shuffle.",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

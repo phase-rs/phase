@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your postcombat main phase, if you gained life this turn, seek a card with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigSeek",
-        "TriggerDescription": "At the beginning of your postcombat main phase, if you gained life this turn, seek a card with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn.",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Main2"
-      }
+      "phase": "PostCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

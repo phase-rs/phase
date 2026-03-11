@@ -1,18 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You,Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, you and CARDNAME have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, you and CARDNAME have hexproof.",
-        "Affected": "You,Card.Self",
-        "AddKeyword": "Hexproof"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card if a creature died this turn. Otherwise, each player sacrifices a creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, draw a card if a creature died this turn. Otherwise, each player sacrifices a creature.",
-        "Execute": "TrigBranch"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

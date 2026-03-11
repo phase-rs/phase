@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GainOwnership",
-        "params": {
-          "StackDescription": "You own target card ({c:Targeted}) in the ante. Exchange that card with the top card of your library.",
-          "SubAbility": "ExchangeAnte",
-          "SpellDescription": "You own target card in the ante. Exchange that card with the top card of your library.",
-          "ValidTgts": "Card",
-          "TgtZone": "Ante"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "You own target card ({c:Targeted}) in the ante. Exchange that card with the top card of your library.",
-        "SubAbility": "ExchangeAnte",
-        "SpellDescription": "You own target card in the ante. Exchange that card with the top card of your library.",
-        "ValidTgts": "Card",
-        "TgtZone": "Ante"
-      }
+      "description": "You own target card in the ante. Exchange that card with the top card of your library.",
+      "effect": {
+        "description": "You own target card in the ante. Exchange that card with the top card of your library.",
+        "name": "GainOwnership",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

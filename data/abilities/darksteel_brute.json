@@ -2,34 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 2/2 Beast artifact creature until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Creature",
           "Artifact",
           "Beast"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME becomes a 2/2 Beast artifact creature until end of turn.",
-        "Defined": "Self",
-        "RemoveCreatureTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

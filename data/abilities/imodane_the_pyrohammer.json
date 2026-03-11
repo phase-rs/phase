@@ -1,21 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an instant or sorcery spell you control that targets only a single creature deals damage to that creature, NICKNAME deals that much damage to each opponent.",
       "mode": "DamageDone",
-      "params": {
-        "TargetRelativeToCause": "Creature.targetedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "ValidCause": "Spell.numTargets EQ1",
-        "ValidSource": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "ValidTarget": "Creature",
-        "TriggerDescription": "Whenever an instant or sorcery spell you control that targets only a single creature deals damage to that creature, NICKNAME deals that much damage to each opponent."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, create a 1/1 white Human Warrior creature token.",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Other creatures you control get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Creature.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Landfall — Whenever a land you control enters, create a 1/1 white Human Warrior creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

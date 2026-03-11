@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, exile a non-Dalek creature you control. If you do, create a 3/3 black Dalek artifact creature token with menace. It gains haste until end of turn.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, exile a non-Dalek creature you control. If you do, create a 3/3 black Dalek artifact creature token with menace. It gains haste until end of turn.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, exile a non-Dalek creature you control. If you do, create a 3/3 black Dalek artifact creature token with menace. It gains haste until end of turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Command",
-        "ValidPlayer": "You",
-        "Execute": "TrigExile",
-        "Phase": "Upkeep",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, exile a non-Dalek creature you control. If you do, create a 3/3 black Dalek artifact creature token with menace. It gains haste until end of turn.",
-        "Secondary": "True"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, target Dalek you control deals damage equal to its power to target creature you don't control.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, target Dalek you control deals damage equal to its power to target creature you don't control.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

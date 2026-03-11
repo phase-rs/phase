@@ -1,65 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Exile",
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4 R R"
+                "cost": "4 R R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "RememberChanged": "True",
-            "SpellDescription": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
-            "SubAbility": "DBReturn",
-            "StackDescription": "SpellDescription"
-          }
+          "description": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Battlefield",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When NICKNAME enters, you may discard your hand, then draw cards equal to your devotion to red. (Each {R} in the mana costs of permanents you control counts toward your devotion to red.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigDiscard",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "OptionalDecider": "You",
-            "TriggerDescription": "When NICKNAME enters, you may discard your hand, then draw cards equal to your devotion to red. (Each {R} in the mana costs of permanents you control counts toward your devotion to red.)"
+          "optional": true,
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

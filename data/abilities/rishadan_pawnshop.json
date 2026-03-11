@@ -2,38 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.!token+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Shuffle target nontoken permanent you control into its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Shuffle target nontoken permanent you control into its owner's library.",
-        "Shuffle": "True",
-        "TgtPrompt": "Select target nontoken permanent you control"
-      }
+      "target_prompt": "Select target nontoken permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

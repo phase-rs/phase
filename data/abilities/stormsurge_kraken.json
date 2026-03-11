@@ -1,21 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and has \"Whenever CARDNAME becomes blocked, you may draw two cards.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and has \"Whenever CARDNAME becomes blocked, you may draw two cards.\"",
-        "AddPower": "2",
-        "Affected": "Card.Self",
-        "AddSVar": "StormsurgeKrakenDraw",
-        "AddToughness": "2",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
-        "AddTrigger": "TrigBlocked"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

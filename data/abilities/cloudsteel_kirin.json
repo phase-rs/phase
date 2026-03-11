@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has flying and \"You can't lose the game and your opponents can't win the game.\"",
       "mode": "Continuous",
-      "params": {
-        "AddReplacementEffect": "YouCantLose & OppCantWin",
-        "AddKeyword": "Flying",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has flying and \"You can't lose the game and your opponents can't win the game.\""
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

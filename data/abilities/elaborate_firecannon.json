@@ -2,60 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "4",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "This artifact deals 2 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "4"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This artifact deals 2 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "At the beginning of your upkeep, you may discard a card. If you do, untap this artifact."
+      "description": "This artifact doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This artifact doesn't untap during your untap step.",
-        "Layer": "CantHappen",
-        "ValidStepTurnToController": "You"
-      }
+      "description": "At the beginning of your upkeep, you may discard a card. If you do, untap this artifact.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

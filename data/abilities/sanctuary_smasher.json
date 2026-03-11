@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, put a first strike counter on target creature you control.",
       "mode": "Cycled",
-      "params": {
-        "TriggerDescription": "When you cycle CARDNAME, put a first strike counter on target creature you control.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

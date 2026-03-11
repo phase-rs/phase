@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage to target creature equal to the number of creatures you control in excess of the number of creatures target opponent controls.",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBDealDamage"
-      }
+      "description": "CARDNAME deals damage to target creature equal to the number of creatures you control in excess of the number of creatures target opponent controls.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Player"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "You may reveal an artifact or enchantment card you own from outside the game and put it into your hand. Exile CARDNAME.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Sideboard",
         "destination": "Hand",
+        "origin": "Sideboard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Artifact.YouOwn,Enchantment.YouOwn",
-        "SpellDescription": "You may reveal an artifact or enchantment card you own from outside the game and put it into your hand. Exile CARDNAME.",
-        "Hidden": "True",
-        "ChangeTypeDesc": "artifact or enchantment they own",
-        "Reveal": "True",
-        "ChangeNum": "1",
-        "SubAbility": "DBChange"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

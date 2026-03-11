@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Dragon.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Artifact creatures and Dragons you control have protection from the chosen color.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Artifact+YouCtrl,Dragon.YouCtrl",
-        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
-        "Description": "Artifact creatures and Dragons you control have protection from the chosen color."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.ChosenColor:chosenColor",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

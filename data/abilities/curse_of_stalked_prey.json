@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature deals combat damage to enchanted player, put a +1/+1 counter on that creature.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature",
-        "ValidTarget": "Player.EnchantedBy",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature deals combat damage to enchanted player, put a +1/+1 counter on that creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

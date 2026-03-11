@@ -2,84 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Each player discards a card.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Mode": "TgtChoose",
-        "Defined": "Player",
-        "SpellDescription": "Each player discards a card."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Target player sacrifices a creature.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player sacrifices a creature.",
-        "Planeswalker": "True",
-        "SacValid": "Creature"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TwoPiles",
-        "params": {
-          "ValidTgts": "Player",
-          "ChosenPile": "DBSacAll",
-          "ValidCards": "Permanent",
-          "AILogic": "Worst",
-          "SpellDescription": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "Separator": "You",
-          "StackDescription": "REP target player_{p:Targeted}",
-          "Zone": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "ChosenPile": "DBSacAll",
-        "ValidCards": "Permanent",
-        "AILogic": "Worst",
-        "SpellDescription": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "Separator": "You",
-        "StackDescription": "REP target player_{p:Targeted}",
-        "Zone": "Battlefield"
-      }
+      "description": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+      "effect": {
+        "description": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+        "name": "TwoPiles",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

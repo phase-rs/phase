@@ -2,48 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "Valid": "Land",
-          "RevealedDestination": "Library",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a land card. CARDNAME deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, CARDNAME deals double that damage instead. Put the revealed cards on the bottom of your library in any order.",
-          "ValidDescription": "land",
-          "RememberRevealed": "True",
-          "SubAbility": "DBBelch",
-          "StackDescription": "SpellDescription",
-          "RevealedLibraryPosition": "-1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Land",
-        "RevealedDestination": "Library",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a land card. CARDNAME deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, CARDNAME deals double that damage instead. Put the revealed cards on the bottom of your library in any order.",
-        "ValidDescription": "land",
-        "RememberRevealed": "True",
-        "SubAbility": "DBBelch",
-        "StackDescription": "SpellDescription",
-        "RevealedLibraryPosition": "-1"
-      }
+      "description": "Reveal cards from the top of your library until you reveal a land card. CARDNAME deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, CARDNAME deals double that damage instead. Put the revealed cards on the bottom of your library in any order.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a land card. CARDNAME deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, CARDNAME deals double that damage instead. Put the revealed cards on the bottom of your library in any order.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

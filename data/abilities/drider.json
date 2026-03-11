@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, create a 2/1 black Spider creature token with menace and reach.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a 2/1 black Spider creature token with menace and reach.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigToken",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

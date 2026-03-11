@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Each land card in your hand has cycling {R}.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Cycling:R",
-        "Description": "Each land card in your hand has cycling {R}.",
-        "Affected": "Land.YouOwn",
-        "AffectedZone": "Hand"
-      }
+      "modifications": [
+        {
+          "keyword": "Cycling:R",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

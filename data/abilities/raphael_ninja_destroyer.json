@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever NICKNAME is dealt damage, add that much {R}. Until end of turn, you don't lose this mana as steps and phases end.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigMana",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Enrage — Whenever NICKNAME is dealt damage, add that much {R}. Until end of turn, you don't lose this mana as steps and phases end."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDread",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you turn a permanent face up, put a +1/+1 counter on it.",
       "mode": "TurnFaceUp",
-      "params": {
-        "ValidCard": "Permanent",
-        "TriggerDescription": "Whenever you turn a permanent face up, put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidCause": "SpellAbility.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

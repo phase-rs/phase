@@ -1,30 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+counters_EQ0_DEATH",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
-        "Execute": "DBReturn",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Secondary": "True",
-        "Destination": "Graveyard",
-        "Execute": "DBExile",
-        "TriggerDescription": "When CARDNAME dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
-        "ValidCard": "Card.Self+counters_GE1_DEATH"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

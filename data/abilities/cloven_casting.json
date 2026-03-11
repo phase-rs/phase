@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored instant or sorcery spell, you may pay {1}. If you do, copy that spell. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a multicolored instant or sorcery spell, you may pay {1}. If you do, copy that spell. You may choose new targets for the copy.",
-        "ValidCard": "Instant.MultiColor,Sorcery.MultiColor",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCopy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor,Sorcery.MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

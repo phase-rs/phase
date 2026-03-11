@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library and graveyard for five cards and exile the rest. Put the chosen cards on top of your library in any order. You lose half your life, rounded up.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard,Library",
         "destination": "Library",
+        "origin": "Graveyard,Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Shuffle": "False",
-        "Mandatory": "True",
-        "ChangeType": "Card",
-        "SpellDescription": "Search your library and graveyard for five cards and exile the rest. Put the chosen cards on top of your library in any order. You lose half your life, rounded up.",
-        "SubAbility": "DBChangeZone",
-        "RememberChanged": "True",
-        "ChangeNum": "5"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

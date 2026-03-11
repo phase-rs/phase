@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "SpellDescription": "Each opponent reveals cards from the top of their library until they reveal X land cards, then puts all cards revealed this way into their graveyard. X can't be 0.",
-          "RevealedDestination": "Graveyard",
-          "Amount": "X",
-          "ValidDescription": "land",
-          "Valid": "Land",
-          "Defined": "Player.Opponent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "XMin1 X U B"
+        "cost": "XMin1 X U B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent reveals cards from the top of their library until they reveal X land cards, then puts all cards revealed this way into their graveyard. X can't be 0.",
-        "RevealedDestination": "Graveyard",
-        "Amount": "X",
-        "ValidDescription": "land",
-        "Valid": "Land",
-        "Defined": "Player.Opponent"
-      }
+      "description": "Each opponent reveals cards from the top of their library until they reveal X land cards, then puts all cards revealed this way into their graveyard. X can't be 0.",
+      "effect": {
+        "description": "Each opponent reveals cards from the top of their library until they reveal X land cards, then puts all cards revealed this way into their graveyard. X can't be 0.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,69 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Put a charge counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "CHARGE",
         "count": 1,
+        "counter_type": "CHARGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Never",
-        "SpellDescription": "Put a charge counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Remove a charge counter from CARDNAME.",
       "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "CHARGE",
         "count": 1,
+        "counter_type": "CHARGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "RemoveCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "AtOppEOT",
-        "SpellDescription": "Remove a charge counter from CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, target opponent gains control of CARDNAME and puts a charge counter on it.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "ChangeControl",
-        "TriggerDescription": "At the beginning of your end step, target opponent gains control of CARDNAME and puts a charge counter on it.",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, CARDNAME deals damage to you equal to the number of charge counters on it.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals damage to you equal to the number of charge counters on it."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

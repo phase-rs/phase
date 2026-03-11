@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "SpellDescription": "Roll a d20. Activate only if CARDNAME is in your graveyard.",
-          "Sides": "20",
-          "ResultSubAbilities": "1-9:ToLib,10-19:ToHand,20:ToField",
-          "ActivationZone": "Graveyard"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 G"
+        "cost": "3 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Roll a d20. Activate only if CARDNAME is in your graveyard.",
-        "Sides": "20",
-        "ResultSubAbilities": "1-9:ToLib,10-19:ToHand,20:ToField",
-        "ActivationZone": "Graveyard"
-      }
+      "description": "Roll a d20. Activate only if CARDNAME is in your graveyard.",
+      "effect": {
+        "description": "Roll a d20. Activate only if CARDNAME is in your graveyard.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

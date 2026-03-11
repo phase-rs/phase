@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Science Teacher — Each Saga spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast that Saga, copy it for each time you paid its replicate cost. Copies of permanents enter as tokens.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Saga.YouCtrl+wasCast",
-        "AddKeyword": "Replicate:CardManaCost",
-        "Description": "Science Teacher — Each Saga spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast that Saga, copy it for each time you paid its replicate cost. Copies of permanents enter as tokens.)",
-        "AffectedZone": "Stack",
-        "EffectZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "keyword": "Replicate:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

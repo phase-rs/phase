@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "RPrevent",
-          "SpellDescription": "Prevent all combat damage blue creatures and black creatures would deal this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R G W"
+        "cost": "R G W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "RPrevent",
-        "SpellDescription": "Prevent all combat damage blue creatures and black creatures would deal this turn."
-      }
+      "description": "Prevent all combat damage blue creatures and black creatures would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

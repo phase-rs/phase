@@ -2,53 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "SpellDescription": "Return up to X target permanents to their owners' hands, where X is the number of verse counters on CARDNAME.",
-        "TargetMax": "X"
-      }
+      "description": "Return up to X target permanents to their owners' hands, where X is the number of verse counters on CARDNAME.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

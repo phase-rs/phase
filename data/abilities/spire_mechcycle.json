@@ -2,35 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Mount.Other;Vehicle.Other/another Mount or Vehicle>",
+        "type": "Mana"
+      },
+      "description": "This Vehicle becomes an artifact creature. Put a +1/+1 counter on it for each Mount and/or Vehicle you control other than this Vehicle. (Activate each exhaust ability only once.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Mount.Other;Vehicle.Other/another Mount or Vehicle>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SubAbility": "DBPutCounter",
-        "Exhaust": "True",
-        "Defined": "Self",
-        "SpellDescription": "This Vehicle becomes an artifact creature. Put a +1/+1 counter on it for each Mount and/or Vehicle you control other than this Vehicle. (Activate each exhaust ability only once.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

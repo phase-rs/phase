@@ -2,97 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "Name": "Phyrexian Scrapyard",
-          "SpellDescription": "Conjure a card named Phyrexian Scrapyard into your hand.",
-          "Zone": "Hand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Phyrexian Scrapyard",
-        "SpellDescription": "Conjure a card named Phyrexian Scrapyard into your hand.",
-        "Zone": "Hand"
-      }
+      "description": "Conjure a card named Phyrexian Scrapyard into your hand.",
+      "effect": {
+        "description": "Conjure a card named Phyrexian Scrapyard into your hand.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "Name": "Soul of New Phyrexia",
-          "SorcerySpeed": "True",
-          "SpellDescription": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
-          "Zone": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Soul of New Phyrexia",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
-        "Zone": "Battlefield"
-      }
+      "description": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "description": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

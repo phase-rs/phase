@@ -2,49 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "ValidTgts": "Artifact,Creature",
-          "TgtPrompt": "Select target artifact or creature",
-          "SpellDescription": "You may tap or untap target artifact or creature."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayEnergy<2>"
+            "cost": "PayEnergy<2>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "You may tap or untap target artifact or creature.",
+      "effect": {
+        "description": "You may tap or untap target artifact or creature.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Artifact,Creature",
-        "TgtPrompt": "Select target artifact or creature",
-        "SpellDescription": "You may tap or untap target artifact or creature."
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigEnergy",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters).",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

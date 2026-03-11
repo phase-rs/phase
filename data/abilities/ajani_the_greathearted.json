@@ -2,65 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 3 life.",
-        "Planeswalker": "True"
-      }
+      "description": "You gain 3 life.",
+      "effect": {
+        "amount": 3,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "Planeswalker": "True",
-          "ValidCards": "Creature.YouCtrl",
-          "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
-          "SpellDescription": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
-          "CounterType": "P1P1",
-          "CounterNum": "1",
-          "CounterType2": "LOYALTY",
-          "AILogic": "OwnCreatsAndOtherPWs"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ValidCards": "Creature.YouCtrl",
-        "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
-        "SpellDescription": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
-        "CounterType": "P1P1",
-        "CounterNum": "1",
-        "CounterType2": "LOYALTY",
-        "AILogic": "OwnCreatsAndOtherPWs"
-      }
+      "description": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Vigilance",
-        "Description": "Creatures you control have vigilance."
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

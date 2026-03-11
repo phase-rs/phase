@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, until end of turn, target creature gains \"Whenever this creature deals combat damage to a player, destroy target creature that player controls.\"",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever you crank CARDNAME, until end of turn, target creature gains \"Whenever this creature deals combat damage to a player, destroy target creature that player controls.\"",
-        "Execute": "TrigCrank"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

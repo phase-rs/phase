@@ -1,18 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle another card, CARDNAME deals 1 damage to each opponent.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card.Other+YouOwn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cycle another card, CARDNAME deals 1 damage to each opponent.",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

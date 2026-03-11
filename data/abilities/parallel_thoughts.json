@@ -1,51 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigSearch",
-        "TriggerDescription": "When CARDNAME enters, search your library for seven cards, exile them in a face-down pile, and shuffle that pile. Then shuffle your library.",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.IsRemembered",
-        "Static": "True",
-        "Destination": "Any",
-        "Origin": "Exile",
-        "Execute": "TrigForget"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReset",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Static": "True"
-      }
+      "description": "If you would draw a card, you may instead put the top card of the pile you exiled into your hand.",
+      "event": "Draw"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "RepParallelThoughts",
-        "Optional": "True",
-        "OptionalDecider": "You",
-        "Description": "If you would draw a card, you may instead put the top card of the pile you exiled into your hand.",
-        "ValidPlayer": "You"
+      "description": "When CARDNAME enters, search your library for seven cards, exile them in a face-down pile, and shuffle that pile. Then shuffle your library.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "AILogic": "PhaseOut",
-          "LoseSubAbility": "DBSacrifice",
-          "SpellDescription": "Flip a coin. If you win the flip, CARDNAME phases out. If you lose the flip, sacrifice CARDNAME. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",
-          "WinSubAbility": "DBPhase"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "PhaseOut",
-        "LoseSubAbility": "DBSacrifice",
-        "SpellDescription": "Flip a coin. If you win the flip, CARDNAME phases out. If you lose the flip, sacrifice CARDNAME. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",
-        "WinSubAbility": "DBPhase"
-      }
+      "description": "Flip a coin. If you win the flip, CARDNAME phases out. If you lose the flip, sacrifice CARDNAME. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, CARDNAME phases out. If you lose the flip, sacrifice CARDNAME. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

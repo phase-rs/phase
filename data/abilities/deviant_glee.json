@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+1 and has \"{R}: This creature gains trample until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Card.EnchantedBy",
-        "AddToughness": "1",
-        "AddAbility": "DeviantGleeTrample",
-        "Description": "Enchanted creature gets +2/+1 and has \"{R}: This creature gains trample until end of turn.\""
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "ability": "DeviantGleeTrample",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

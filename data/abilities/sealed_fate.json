@@ -2,24 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "LibraryPosition2": "0",
-        "SpellDescription": "Look at the top X cards of target opponent's library. Exile one of those cards and put the rest back on top of that player's library in any order.",
-        "ValidTgts": "Opponent"
-      }
+      "description": "Look at the top X cards of target opponent's library. Exile one of those cards and put the rest back on top of that player's library in any order.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

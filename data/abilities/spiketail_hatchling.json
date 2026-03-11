@@ -2,31 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Counter target spell unless its controller pays {1}.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "1",
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target spell unless its controller pays {1}."
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

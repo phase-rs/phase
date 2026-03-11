@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast for each creature card in your graveyard.",
-        "Type": "Spell",
-        "Amount": "X"
-      }
+      "description": "This spell costs {1} less to cast for each creature card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player gains control of target artifact, creature, or land you control.",
-        "SubAbility": "DBGainControl",
-        "StackDescription": "None"
-      }
+      "description": "Target player gains control of target artifact, creature, or land you control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Player"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

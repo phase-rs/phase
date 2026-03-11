@@ -2,46 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "AILogic": "AtOppEOT",
-          "SpellDescription": "Create two tokens that are copies of the sacrificed creature.",
-          "Defined": "Sacrificed",
-          "NumCopies": "2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "AtOppEOT",
-        "SpellDescription": "Create two tokens that are copies of the sacrificed creature.",
-        "Defined": "Sacrificed",
-        "NumCopies": "2"
-      }
+      "description": "Create two tokens that are copies of the sacrificed creature.",
+      "effect": {
+        "description": "Create two tokens that are copies of the sacrificed creature.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

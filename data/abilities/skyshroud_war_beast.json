@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of nonbasic lands the chosen player controls.",
-        "EffectZone": "Battlefield",
-        "SetToughness": "X",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of nonbasic lands the chosen player controls.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

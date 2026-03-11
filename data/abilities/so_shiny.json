@@ -1,33 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, if you control a token, tap enchanted creature, then scry 2.",
-        "IsPresent": "Card.YouCtrl+token",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "Destination": "Battlefield"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.AttachedBy",
-        "Layer": "CantHappen",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidStepTurnToController": "You"
+      "description": "When CARDNAME enters, if you control a token, tap enchanted creature, then scry 2.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

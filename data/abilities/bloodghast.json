@@ -1,39 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerZones": "Graveyard",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, you may return CARDNAME from your graveyard to the battlefield.",
-        "OptionalDecider": "You",
-        "Execute": "TrigChange"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LE10",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME has haste as long as an opponent has 10 or less life.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has haste as long as an opponent has 10 or less life.",
-        "CheckSVar": "X",
-        "SVarCompare": "LE10",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Landfall — Whenever a land you control enters, you may return CARDNAME from your graveyard to the battlefield.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw three cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw three cards.",
-        "Execute": "TrigDraw",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, you lose 2 life for each card in your hand.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "At the beginning of your end step, you lose 2 life for each card in your hand."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

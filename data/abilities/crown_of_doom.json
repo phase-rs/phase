@@ -2,40 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Player.!CardOwner"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Target player other than CARDNAME's owner gains control of it. Activate only during your turn.",
+      "effect": {
+        "target": {
+          "card_type": "Player",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "PlayerTurn": "True",
-        "SpellDescription": "Target player other than CARDNAME's owner gains control of it. Activate only during your turn.",
-        "Defined": "Self",
-        "TgtPrompt": "Select target player other than the owner"
-      }
+      "target_prompt": "Select target player other than the owner"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature attacks you or a planeswalker you control, it gets +2/+0 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, it gets +2/+0 until end of turn.",
-        "ValidCard": "Creature",
-        "Attacked": "You,Planeswalker.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

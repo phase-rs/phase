@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/-2 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": -2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/-2 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card, then discard a card.",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "X",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card, then discard a card.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "SVarCompare": "LT1"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

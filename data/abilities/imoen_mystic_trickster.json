@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you have the initiative, draw a card. Draw another card if you've completed a dungeon.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "CheckDefinedPlayer": "You.hasInitiative",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you have the initiative, draw a card. Draw another card if you've completed a dungeon.",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

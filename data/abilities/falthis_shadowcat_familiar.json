@@ -1,17 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Commanders you control have menace and deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Commanders you control have menace and deathtouch.",
-        "Affected": "Card.YouCtrl+IsCommander",
-        "AddKeyword": "Menace & Deathtouch"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

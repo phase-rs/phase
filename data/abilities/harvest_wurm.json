@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, sacrifice it unless you return a basic land card from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, sacrifice it unless you return a basic land card from your graveyard to your hand.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

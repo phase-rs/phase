@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted player's upkeep, that player mills two cards.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.EnchantedBy",
-        "TriggerDescription": "At the beginning of enchanted player's upkeep, that player mills two cards.",
-        "Execute": "TrigMill",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

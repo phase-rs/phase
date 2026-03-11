@@ -2,46 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C U",
-        "params": {
-          "RestrictValid": "CumulativeUpkeep",
-          "SpellDescription": "Add {C}{U}. Spend this mana only to pay cumulative upkeep costs."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "CumulativeUpkeep",
-        "SpellDescription": "Add {C}{U}. Spend this mana only to pay cumulative upkeep costs."
-      }
+      "description": "Add {C}{U}. Spend this mana only to pay cumulative upkeep costs.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "RestrictValid": "CumulativeUpkeep",
-          "SpellDescription": "Add {U}. Spend this mana only to pay cumulative upkeep costs."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "CumulativeUpkeep",
-        "SpellDescription": "Add {U}. Spend this mana only to pay cumulative upkeep costs."
-      }
+      "description": "Add {U}. Spend this mana only to pay cumulative upkeep costs.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

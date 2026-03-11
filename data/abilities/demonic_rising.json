@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control exactly one creature, create a 5/5 black Demon creature token with flying.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, if you control exactly one creature, create a 5/5 black Demon creature token with flying.",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "EQ1",
-        "Execute": "TrigToken",
-        "IsPresent": "Creature.YouCtrl",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

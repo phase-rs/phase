@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+enchanted"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "X",
-        "TargetMin": "0",
-        "RememberObjects": "ThisTargetedCard",
-        "SubAbility": "DBPumpBis",
-        "AILogic": "PowerDmg",
-        "SpellDescription": "Any number of target enchanted creatures you control and up to one other target creature you control each deal damage equal to their power to target creature you don't control."
-      }
+      "description": "Any number of target enchanted creatures you control and up to one other target creature you control each deal damage equal to their power to target creature you don't control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

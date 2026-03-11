@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME blocks, it loses defender.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDebuff",
-        "TriggerDescription": "When CARDNAME blocks, it loses defender."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

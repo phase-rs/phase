@@ -2,40 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/P1P1>"
+        "cost": "SubCounter<1/P1P1>",
+        "type": "Mana"
       },
+      "description": "Put a +1/+1 counter on target creature you control. Activate only as a sorcery and only once each turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "ActivationLimit": "1",
-        "SpellDescription": "Put a +1/+1 counter on target creature you control. Activate only as a sorcery and only once each turn.",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Modified creatures you control have haste. (Equipment, Auras you control, and counters are modifications.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.modified+YouCtrl",
-        "AddKeyword": "Haste",
-        "Description": "Modified creatures you control have haste. (Equipment, Auras you control, and counters are modifications.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

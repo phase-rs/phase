@@ -1,41 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "characteristic_defining": true,
+      "description": "NICKNAME's toughness is equal to your devotion to white.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever another creature you control enters or dies, you gain 1 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever another creature you control enters or dies, you gain 1 life.",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever another creature you control enters or dies, you gain 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "Destination": "Graveyard",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever another creature you control enters or dies, you gain 1 life.",
-        "Secondary": "True",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetToughness": "X",
-        "Description": "NICKNAME's toughness is equal to your devotion to white."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

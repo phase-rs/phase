@@ -1,20 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a basic land you control is tapped for mana, it produces mana of a color of your choice instead of any other type.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "ValidCard": "Land.Basic+YouCtrl",
-        "ActiveZones": "Command",
-        "Description": "If a basic land you control is tapped for mana, it produces mana of a color of your choice instead of any other type.",
-        "ReplaceWith": "ProduceAny"
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Basic"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

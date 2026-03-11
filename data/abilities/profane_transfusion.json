@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ExchangeLife",
-        "params": {
-          "SpellDescription": "Two target players exchange life totals. You create an X/X colorless Horror artifact creature token, where X is the difference between those players' life totals.",
-          "RememberDifference": "True",
-          "ValidTgts": "Player",
-          "SubAbility": "DBToken",
-          "TargetMax": "2",
-          "TargetMin": "2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Two target players exchange life totals. You create an X/X colorless Horror artifact creature token, where X is the difference between those players' life totals.",
-        "RememberDifference": "True",
-        "ValidTgts": "Player",
-        "SubAbility": "DBToken",
-        "TargetMax": "2",
-        "TargetMin": "2"
-      }
+      "description": "Two target players exchange life totals. You create an X/X colorless Horror artifact creature token, where X is the difference between those players' life totals.",
+      "effect": {
+        "description": "Two target players exchange life totals. You create an X/X colorless Horror artifact creature token, where X is the difference between those players' life totals.",
+        "name": "ExchangeLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

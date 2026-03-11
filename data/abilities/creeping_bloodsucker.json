@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME deals 1 damage to each opponent. You gain life equal to the damage dealt this way.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 1 damage to each opponent. You gain life equal to the damage dealt this way.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigDamage"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

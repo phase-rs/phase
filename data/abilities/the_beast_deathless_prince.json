@@ -1,40 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, gain control of target creature until end of turn. Untap it. It gains menace and haste until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigGainControl"
-      }
-    },
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever a creature deals combat damage to its owner, untap NICKNAME and draw a card.",
-        "CombatDamage": "True",
-        "Execute": "TrigUntap",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature",
-        "ValidTarget": "Player",
-        "TargetRelativeToSource": "Player.CardOwner"
+      "description": "NICKNAME enters tapped with six stun counters on it. (If it would become untapped, remove a stun counter from it instead.)",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "NICKNAME enters tapped with six stun counters on it. (If it would become untapped, remove a stun counter from it instead.)",
-        "ReplaceWith": "ETBTapped",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield"
+      "description": "When you cast this spell, gain control of target creature until end of turn. Untap it. It gains menace and haste until end of turn.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "combat_damage": true,
+      "description": "Whenever a creature deals combat damage to its owner, untap NICKNAME and draw a card.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "faces": []
+  ]
 }

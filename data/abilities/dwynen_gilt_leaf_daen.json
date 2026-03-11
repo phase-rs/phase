@@ -1,27 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you gain 1 life for each attacking Elf you control.",
-        "Execute": "TrigGainLife"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Elf"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Elf creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Other Elf creatures you control get +1/+1.",
-        "Affected": "Creature.Elf+Other+YouCtrl",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, you gain 1 life for each attacking Elf you control.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

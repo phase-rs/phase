@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "For each opponent who controls a creature, create a token that's a copy of a card named Arrest and attach it to a creature that player controls chosen at random.",
-          "StackDescription": "SpellDescription",
-          "RepeatPlayers": "Player.Opponent",
-          "RepeatSubAbility": "ArrestEach",
-          "ActivationZone": "Command"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each opponent who controls a creature, create a token that's a copy of a card named Arrest and attach it to a creature that player controls chosen at random.",
-        "StackDescription": "SpellDescription",
-        "RepeatPlayers": "Player.Opponent",
-        "RepeatSubAbility": "ArrestEach",
-        "ActivationZone": "Command"
-      }
+      "description": "For each opponent who controls a creature, create a token that's a copy of a card named Arrest and attach it to a creature that player controls chosen at random.",
+      "effect": {
+        "description": "For each opponent who controls a creature, create a token that's a copy of a card named Arrest and attach it to a creature that player controls chosen at random.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

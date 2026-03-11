@@ -2,34 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "CARDNAME deals 1 damage to each creature with flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.withFlying",
-        "ValidDescription": "each creature and with flying.",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature with flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

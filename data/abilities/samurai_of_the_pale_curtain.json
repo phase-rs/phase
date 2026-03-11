@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a permanent would be put into a graveyard, exile it instead.",
       "event": "Moved",
-      "params": {
-        "Description": "If a permanent would be put into a graveyard, exile it instead.",
-        "ReplaceWith": "Exile",
-        "ValidCard": "Permanent",
-        "ActiveZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

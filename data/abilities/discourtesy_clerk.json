@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters the battlefield, open an Attraction.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters the battlefield, open an Attraction.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigOpenAttraction"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, if you control three or more Attractions, you draw a card and you lose 1 life.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "TriggerDescription": "At the beginning of your end step, if you control three or more Attractions, you draw a card and you lose 1 life.",
-        "TriggerZones": "Battlefield",
-        "SVarCompare": "GE3",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

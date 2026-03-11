@@ -2,45 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Reveal<X/Card.Blue/blue>"
+            "cost": "Reveal<X/Card.Blue/blue>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Counter target spell unless its controller pays {X}.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{2}, Reveal X blue cards from your hand, Sacrifice CARDNAME:",
-        "SpellDescription": "Counter target spell unless its controller pays {X}.",
-        "UnlessCost": "X",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

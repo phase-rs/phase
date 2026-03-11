@@ -1,27 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE3_CHARGE",
-        "Description": "STATION 3+ Whenever you cast an artifact spell, draw a card. Put a charge counter on this Spacecraft.",
-        "AddTrigger": "CastTrig"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 3+ Whenever you cast an artifact spell, draw a card. Put a charge counter on this Spacecraft.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 12+ Flying,,,This Spacecraft gets +1/+0 for each artifact you control.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "AddStaticAbility": "CraftStatic",
-        "Description": "STATION 12+ Flying,,,This Spacecraft gets +1/+0 for each artifact you control.",
-        "AddType": "Creature",
-        "Affected": "Card.Self+counters_GE12_CHARGE"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

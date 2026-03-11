@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "TrigSac"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

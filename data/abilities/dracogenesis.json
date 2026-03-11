@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayDontGrantZonePermissions": "True",
-        "AffectedZone": "Hand,Graveyard,Library,Exile,Command",
-        "Description": "You may cast Dragon spells without paying their mana costs.",
-        "MayPlay": "True",
-        "MayPlayWithoutManaCost": "True",
-        "Affected": "Dragon"
-      }
+      "affected": {
+        "card_type": "Dragon",
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Library,Exile,Command",
+      "description": "You may cast Dragon spells without paying their mana costs.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

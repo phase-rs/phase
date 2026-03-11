@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Discard your hand, then draw four cards. For each card discarded this way, creatures you control get +1/+0 until end of turn.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberDiscarded": "True",
-        "SpellDescription": "Discard your hand, then draw four cards. For each card discarded this way, creatures you control get +1/+0 until end of turn.",
-        "SubAbility": "BetThat",
-        "Mode": "Hand",
-        "Defined": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

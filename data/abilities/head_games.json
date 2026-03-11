@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Hand",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "HeadChange",
-        "RememberChanged": "True",
-        "IsCurse": "True",
-        "SpellDescription": "Target opponent puts the cards from their hand on top of their library. Search that player's library for that many cards. The player puts those cards into their hand, then shuffles.",
-        "ChangeType": "Card"
-      }
+      "description": "Target opponent puts the cards from their hand on top of their library. Search that player's library for that many cards. The player puts those cards into their hand, then shuffles.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

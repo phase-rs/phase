@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control a red or green permanent, draw a card, then discard a card. If you control a red permanent and a green permanent, instead draw two cards, then discard a card.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "IsPresent": "Permanent.YouCtrl+Red,Permanent.YouCtrl+Green",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, if you control a red or green permanent, draw a card, then discard a card. If you control a red permanent and a green permanent, instead draw two cards, then discard a card.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

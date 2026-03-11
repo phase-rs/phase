@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, that player mills X cards, where X is the number of cards in their hand.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's upkeep, that player mills X cards, where X is the number of cards in their hand.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMillYou"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

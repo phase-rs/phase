@@ -1,19 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "AddPower": "X",
-        "Affected": "Creature.Zombie+YouCtrl+Other,Creature.Mutant+YouCtrl+Other",
-        "AddToughness": "X",
-        "Description": "Each other creature you control that's a Zombie or Mutant gets +X/+X, where X is the number of counters on CARDNAME."
-      }
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Zombie"
+              },
+              {
+                "type": "Other",
+                "value": "Other,Creature.Mutant"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other creature you control that's a Zombie or Mutant gets +X/+X, where X is the number of counters on CARDNAME.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

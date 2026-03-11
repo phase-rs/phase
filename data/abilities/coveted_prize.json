@@ -2,40 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for a card, put it into your hand, then shuffle. If you have a full party, you may cast a spell with mana value 4 or less from your hand without paying its mana cost.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card",
-        "SpellDescription": "Search your library for a card, put it into your hand, then shuffle. If you have a full party, you may cast a spell with mana value 4 or less from your hand without paying its mana cost.",
-        "ChangeNum": "1",
-        "SubAbility": "DBPlay",
-        "StackDescription": "SpellDescription",
-        "Mandatory": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Amount": "X",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "Description": "This spell costs {1} less to cast for each creature in your party."
-      }
+      "description": "This spell costs {1} less to cast for each creature in your party.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Raid — At the beginning of your end step, if you attacked this turn, create a 1/1 red Goblin creature token.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "CheckSVar": "RaidTest",
-        "TriggerDescription": "Raid — At the beginning of your end step, if you attacked this turn, create a 1/1 red Goblin creature token.",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

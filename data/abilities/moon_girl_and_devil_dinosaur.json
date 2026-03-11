@@ -1,31 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, until end of turn, CARDNAME's base power and toughness become 6/6 and they gain trample.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate",
-        "TriggerDescription": "Whenever you draw your second card each turn, until end of turn, CARDNAME's base power and toughness become 6/6 and they gain trample.",
-        "ValidCard": "Card.YouCtrl",
-        "Number": "2"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an artifact you control enters, draw a card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever an artifact you control enters, draw a card. This ability triggers only once each turn.",
-        "Execute": "TrigDraw",
-        "ValidCard": "Artifact.YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ActivationLimit": "1",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

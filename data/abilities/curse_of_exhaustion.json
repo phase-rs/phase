@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Enchanted player can't cast more than one spell each turn.",
-        "Caster": "Player.EnchantedBy",
-        "ValidCard": "Card",
-        "NumLimitEachTurn": "1"
-      }
+      "description": "Enchanted player can't cast more than one spell each turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

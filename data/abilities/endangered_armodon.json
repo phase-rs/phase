@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you control a creature with toughness 2 or less, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "IsPresent": "Creature.toughnessLE2+YouCtrl",
-        "TriggerDescription": "When you control a creature with toughness 2 or less, sacrifice CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

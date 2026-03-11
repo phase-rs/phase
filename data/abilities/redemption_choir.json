@@ -1,33 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Coven — Whenever CARDNAME enters or attacks, if you control three or more creatures with different powers, return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "CheckSVar": "X",
-        "SVarCompare": "GE3",
-        "TriggerDescription": "Coven — Whenever CARDNAME enters or attacks, if you control three or more creatures with different powers, return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Coven — Whenever CARDNAME enters or attacks, if you control three or more creatures with different powers, return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "GE3",
-        "Execute": "TrigChange",
-        "TriggerDescription": "Coven — Whenever CARDNAME enters or attacks, if you control three or more creatures with different powers, return target permanent card with mana value 3 or less from your graveyard to the battlefield."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

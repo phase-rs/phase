@@ -1,42 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, mill a card, then draw a card. (To mill a card, put the top card of your library into your graveyard.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigMill",
-            "TriggerDescription": "When CARDNAME enters, mill a card, then draw a card. (To mill a card, put the top card of your library into your graveyard.)",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, you may tap or untap target artifact or creature.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigTapOrUntap",
-            "TriggerDescription": "Whenever CARDNAME attacks, you may tap or untap target artifact or creature.",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.Self"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

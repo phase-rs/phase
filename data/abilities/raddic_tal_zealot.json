@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more Knights you control attack, draft a card from CARDNAME's spellbook.",
       "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackers": "Knight.YouCtrl",
-        "Execute": "TrigDraft",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more Knights you control attack, draft a card from CARDNAME's spellbook."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,38 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack+nonArtifact"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B B"
+            "cost": "2 B B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Gain control of target nonblack, nonartifact creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target nonblack, nonartifact creature.",
-        "TgtPrompt": "Select target nonartifact, nonblack creature"
-      }
+      "target_prompt": "Select target nonartifact, nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

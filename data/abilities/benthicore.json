@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<2/Merfolk>",
+        "type": "Mana"
+      },
+      "description": "Untap CARDNAME.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Merfolk>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "GainShroud",
-        "SpellDescription": "Untap CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create two 1/1 blue Merfolk Wizard creature tokens.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, create two 1/1 blue Merfolk Wizard creature tokens.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

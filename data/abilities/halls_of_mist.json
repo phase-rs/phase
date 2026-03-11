@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.attackedLastTurn",
-        "Description": "Creatures that attacked during their controller's last turn can't attack."
-      }
+      "description": "Creatures that attacked during their controller's last turn can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

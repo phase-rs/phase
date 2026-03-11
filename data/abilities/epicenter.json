@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Branch",
-        "params": {
-          "FalseSubAbility": "WasteLand",
-          "SpellDescription": "Target player sacrifices a land. Threshold — Each player sacrifices all lands they control instead if there are seven or more cards in your graveyard.",
-          "BranchConditionSVar": "X",
-          "TrueSubAbility": "ThreshWaste",
-          "BranchConditionSVarCompare": "GE7",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "FalseSubAbility": "WasteLand",
-        "SpellDescription": "Target player sacrifices a land. Threshold — Each player sacrifices all lands they control instead if there are seven or more cards in your graveyard.",
-        "BranchConditionSVar": "X",
-        "TrueSubAbility": "ThreshWaste",
-        "BranchConditionSVarCompare": "GE7",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player sacrifices a land. Threshold — Each player sacrifices all lands they control instead if there are seven or more cards in your graveyard.",
+      "effect": {
+        "description": "Target player sacrifices a land. Threshold — Each player sacrifices all lands they control instead if there are seven or more cards in your graveyard.",
+        "name": "Branch",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

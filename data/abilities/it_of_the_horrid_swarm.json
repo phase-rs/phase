@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, create two 1/1 green Insect creature tokens.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, create two 1/1 green Insect creature tokens."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

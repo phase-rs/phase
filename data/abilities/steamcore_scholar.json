@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw two cards. Then discard two cards unless you discard an instant or sorcery card or a creature card with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, draw two cards. Then discard two cards unless you discard an instant or sorcery card or a creature card with flying.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

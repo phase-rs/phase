@@ -2,53 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "AILogic": "NeedsPrevention",
-          "SubAbility": "DBEffect",
-          "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "AILogic": "NeedsPrevention",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead."
-      }
+      "description": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Amount": "1",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
-          "Defined": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
-        "Defined": "Self"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

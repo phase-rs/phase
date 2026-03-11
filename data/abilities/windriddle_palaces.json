@@ -1,38 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, each player mills a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "Affected": "Card.TopLibrary",
-        "MayLookAt": "Player",
-        "AffectedZone": "Library",
-        "Description": "Players play with the top card of their libraries revealed."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Players play with the top card of their libraries revealed.",
+      "effect_zone": "Command",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Library",
-        "MayPlay": "You",
-        "Description": "You may play lands and cast spells from the top of any player's library.",
-        "EffectZone": "Command",
-        "Affected": "Card.TopLibrary"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may play lands and cast spells from the top of any player's library.",
+      "effect_zone": "Command",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, each player mills a card.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

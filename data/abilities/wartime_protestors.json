@@ -1,20 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another Ally you control enters, put a +1/+1 counter on that creature and it gains haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Ally.YouCtrl+Other",
-        "Execute": "TrigPutCounter",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another Ally you control enters, put a +1/+1 counter on that creature and it gains haste until end of turn."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Ally",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

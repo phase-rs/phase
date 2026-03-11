@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, draw a card.",
       "mode": "Mutates",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever this creature mutates, draw a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

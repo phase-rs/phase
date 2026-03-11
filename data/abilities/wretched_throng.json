@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may search your library for a card named Wretched Throng, reveal it, put it into your hand, then shuffle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME dies, you may search your library for a card named Wretched Throng, reveal it, put it into your hand, then shuffle.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

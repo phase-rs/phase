@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, surveil 1.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Instant,Sorcery",
-        "Execute": "TrigSurveil",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, surveil 1.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, each opponent may sacrifice a nontoken creature of their choice. Each opponent who doesn't loses 2 life for each instant and sorcery card in your graveyard.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of your end step, each opponent may sacrifice a nontoken creature of their choice. Each opponent who doesn't loses 2 life for each instant and sorcery card in your graveyard.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

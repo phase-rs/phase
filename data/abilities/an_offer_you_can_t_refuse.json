@@ -2,26 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonCreature"
-        }
-      },
       "cost": null,
+      "description": "Counter target noncreature spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target noncreature spell",
-        "SubAbility": "DBToken",
-        "SpellDescription": "Counter target noncreature spell."
-      }
+      "target_prompt": "Select target noncreature spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,31 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
+      "description": "Exile target creature card from a graveyard. When you do, put X +1/+1 counters on target Symbiote, where X is the exiled card's toughness.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target creature card from a graveyard. When you do, put X +1/+1 counters on target Symbiote, where X is the exiled card's toughness.",
-        "SubAbility": "DBImmediateTrigger",
-        "TgtPrompt": "Select target creature card in a graveyard",
-        "RememberChanged": "True"
-      }
+      "target_prompt": "Select target creature card in a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

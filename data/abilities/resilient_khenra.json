@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may have target creature get +X/+X until end of turn, where X is CARDNAME's power.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, you may have target creature get +X/+X until end of turn, where X is CARDNAME's power."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

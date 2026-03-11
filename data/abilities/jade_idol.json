@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Spirit or Arcane spell, CARDNAME becomes a 4/4 Spirit artifact creature until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, CARDNAME becomes a 4/4 Spirit artifact creature until end of turn.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Spirit,Arcane",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spirit,Arcane",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

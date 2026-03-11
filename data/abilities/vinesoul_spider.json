@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, put a random land card from your library into your graveyard.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, put a random land card from your library into your graveyard.",
-        "Execute": "TrigChange",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

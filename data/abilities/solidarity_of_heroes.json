@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose any number of target creatures. Double the number of +1/+1 counters on each of them.",
       "effect": {
-        "type": "MultiplyCounter",
         "counter_type": "P1P1",
         "multiplier": 2,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "MultiplyCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose any number of target creatures. Double the number of +1/+1 counters on each of them.",
-        "TargetMax": "MaxTargets",
-        "TargetMin": "0"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

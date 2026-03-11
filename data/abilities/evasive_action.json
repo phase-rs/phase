@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Domain — Counter target spell unless its controller pays {1} for each basic land type among lands you control.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Domain — Counter target spell unless its controller pays {1} for each basic land type among lands you control.",
-        "TgtPrompt": "Select target spell",
-        "UnlessCost": "Y",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

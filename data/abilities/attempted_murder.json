@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "Amount": "X",
-          "Sides": "6",
-          "EvenOddResults": "True",
-          "SubAbility": "DBPutCounter",
-          "SpellDescription": "Choose target creature. Roll X six-sided dice."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "X",
-        "Sides": "6",
-        "EvenOddResults": "True",
-        "SubAbility": "DBPutCounter",
-        "SpellDescription": "Choose target creature. Roll X six-sided dice."
-      }
+      "description": "Choose target creature. Roll X six-sided dice.",
+      "effect": {
+        "description": "Choose target creature. Roll X six-sided dice.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

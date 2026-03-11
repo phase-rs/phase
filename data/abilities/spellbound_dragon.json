@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, draw a card, then discard a card. CARDNAME gets +X/+0 until end of turn, where X is the discarded card's mana value.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, draw a card, then discard a card. CARDNAME gets +X/+0 until end of turn, where X is the discarded card's mana value.",
-        "Execute": "TrigDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

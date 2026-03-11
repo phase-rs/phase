@@ -2,35 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "6"
+        "cost": "6",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCounter",
-        "SpellDescription": "Draw a card and put a +1/+1 counter on CARDNAME."
-      }
+      "description": "Draw a card and put a +1/+1 counter on CARDNAME.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, create a tapped Powerstone token. (It's an artifact with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\")",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, create a tapped Powerstone token. (It's an artifact with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\")"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

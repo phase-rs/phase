@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "Keywords": "Flying",
-          "SubAbility": "DBDamage",
-          "ValidTgts": "Creature.withFlying",
-          "TgtPrompt": "Select target creature with flying",
-          "SpellDescription": "Target creature with flying loses flying until end of turn. CARDNAME deals damage to that creature equal to the number of Forests you control."
-        }
-      },
       "cost": null,
+      "description": "Target creature with flying loses flying until end of turn. CARDNAME deals damage to that creature equal to the number of Forests you control.",
+      "effect": {
+        "description": "Target creature with flying loses flying until end of turn. CARDNAME deals damage to that creature equal to the number of Forests you control.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "SubAbility": "DBDamage",
-        "ValidTgts": "Creature.withFlying",
-        "TgtPrompt": "Select target creature with flying",
-        "SpellDescription": "Target creature with flying loses flying until end of turn. CARDNAME deals damage to that creature equal to the number of Forests you control."
-      }
+      "target_prompt": "Select target creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

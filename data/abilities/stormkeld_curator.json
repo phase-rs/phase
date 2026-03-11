@@ -1,58 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you may put any number of Aura cards from your graveyard and/or hand onto the battlefield attached to it.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, you may put any number of Aura cards from your graveyard and/or hand onto the battlefield attached to it.",
-            "Execute": "TrigAurify"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "MakeCard",
-            "params": {
-              "AtRandom": "True",
-              "Conjure": "True",
-              "Spellbook": "Aether Tunnel,All That Glitters,Celestial Mantle,Curator's Ward,Curiosity,Ethereal Armor,Face of Divinity,Knightly Valor,Metamorphic Alteration,On Serra's Wings,Rousing Read,Staggering Insight,Take Flight",
-              "Zone": "Hand",
-              "SpellDescription": "Conjure X random cards from CARDNAME's spellbook into your hand.",
-              "SpellbookAmount": "X"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "AtRandom": "True",
-            "Conjure": "True",
-            "Spellbook": "Aether Tunnel,All That Glitters,Celestial Mantle,Curator's Ward,Curiosity,Ethereal Armor,Face of Divinity,Knightly Valor,Metamorphic Alteration,On Serra's Wings,Rousing Read,Staggering Insight,Take Flight",
-            "Zone": "Hand",
-            "SpellDescription": "Conjure X random cards from CARDNAME's spellbook into your hand.",
-            "SpellbookAmount": "X"
-          }
+          "description": "Conjure X random cards from CARDNAME's spellbook into your hand.",
+          "effect": {
+            "description": "Conjure X random cards from CARDNAME's spellbook into your hand.",
+            "name": "MakeCard",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

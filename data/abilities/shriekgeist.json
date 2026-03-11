@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player mills two cards.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigMill",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player mills two cards.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

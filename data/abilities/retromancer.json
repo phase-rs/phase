@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes the target of a spell or ability, CARDNAME deals 3 damage to that spell or ability's controller.",
       "mode": "BecomesTarget",
-      "params": {
-        "Execute": "TrigDamage",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability, CARDNAME deals 3 damage to that spell or ability's controller."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

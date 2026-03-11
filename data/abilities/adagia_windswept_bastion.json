@@ -2,45 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W",
-        "params": {
-          "SpellDescription": "Add {W}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W}."
-      }
+      "description": "Add {W}.",
+      "effect": {
+        "produced": [
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddAbility": "AdagioCopy",
-        "Affected": "Card.Self+counters_GE12_CHARGE",
-        "Description": "STATION 12+ {3}{W}, {T}: Create a token that's a copy of target artifact or enchantment you control, except it's legendary. Activate only as a sorcery."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This land enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "This land enters tapped.",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 12+ {3}{W}, {T}: Create a token that's a copy of target artifact or enchantment you control, except it's legendary. Activate only as a sorcery.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "AdagioCopy",
+          "type": "AddAbility"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

@@ -2,58 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "Target creature deals 6 damage to itself.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 6
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "DamageSource": "Targeted",
-        "SpellDescription": "Target creature deals 6 damage to itself."
+      "description": "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell.",
+      "effect_zone": "Battlefield",
+      "mode": {
+        "Other": "AlternativeCost"
       }
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for a card named The Underworld Cookbook, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you may search your library for a card named The Underworld Cookbook, reveal it, put it into your hand, then shuffle.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Execute": "TrigChange"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "Description": "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell.",
-        "Cost": "BR"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,75 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may discard a card. If you do, draw a card.",
-        "UnlessPayer": "You",
-        "UnlessCost": "Discard<1/Card>",
-        "Planeswalker": "True",
-        "UnlessSwitched": "True",
-        "Defined": "You"
-      }
+      "description": "You may discard a card. If you do, draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo Any",
-        "params": {
-          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Dragon spells.",
-          "Planeswalker": "True",
-          "Amount": "2",
-          "RestrictValid": "Spell.Dragon"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Dragon spells.",
-        "Planeswalker": "True",
-        "Amount": "2",
-        "RestrictValid": "Spell.Dragon"
-      }
+      "description": "Add two mana in any combination of colors. Spend this mana only to cast Dragon spells.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -7,
+        "type": "Loyalty"
+      },
+      "description": "Create four 5/5 red Dragon creature tokens with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_5_5_dragon_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -7
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "4",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Create four 5/5 red Dragon creature tokens with flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

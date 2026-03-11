@@ -2,62 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains deathtouch until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains deathtouch until end of turn.",
-        "KW": "Deathtouch",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains hexproof until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains hexproof until end of turn.",
-        "KW": "Hexproof",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature dies, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever another creature dies, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
-        "ValidCard": "Creature.Other",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigScry"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

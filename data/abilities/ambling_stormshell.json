@@ -1,27 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks, put three stun counters on it and draw three cards. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever this creature attacks, put three stun counters on it and draw three cards. (If a permanent with a stun counter would become untapped, remove one from it instead.)"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you cast a Turtle spell, untap this creature.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Turtle",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever you cast a Turtle spell, untap this creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Turtle",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

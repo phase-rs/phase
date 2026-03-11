@@ -1,61 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
-            "Origin": "Any",
-            "Execute": "TrigSurveil",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
           "mode": "Attacks",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigSurveil",
-            "Secondary": "True",
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
-            "ValidCard": "Card.Self"
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your end step, you may pay {4}{U}{U}{B}{B} and exile eight cards from your graveyard. If you do, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, you may pay {4}{U}{U}{B}{B} and exile eight cards from your graveyard. If you do, transform NICKNAME.",
-            "ValidPlayer": "You",
-            "Phase": "End of Turn"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Time Compression — When this creature transforms into CARDNAME, take an extra turn after this one.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "Time Compression — When this creature transforms into CARDNAME, take an extra turn after this one.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigAddTurn"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

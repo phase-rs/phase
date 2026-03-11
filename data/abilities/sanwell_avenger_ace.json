@@ -1,27 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DBExileTopCard",
-        "TriggerDescription": "Whenever NICKNAME becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order."
-      }
+      "description": "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to CARDNAME.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "Description": "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to CARDNAME.",
-        "ValidTarget": "Creature.Self",
-        "IsPresent": "Artifact.Creature+YouCtrl+attacking"
+      "description": "Whenever NICKNAME becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+      "mode": "Taps",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

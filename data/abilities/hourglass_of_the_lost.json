@@ -2,62 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W",
-        "params": {
-          "SubAbility": "DBPutCounter",
-          "SpellDescription": "Add {W}. Put a time counter on CARDNAME."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPutCounter",
-        "SpellDescription": "Add {W}. Put a time counter on CARDNAME."
-      }
+      "description": "Add {W}. Put a time counter on CARDNAME.",
+      "effect": {
+        "produced": [
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<X/TIME>"
+            "cost": "SubCounter<X/TIME>",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return each nonland permanent card with mana value X from your graveyard to the battlefield. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "CostDesc": "{T}, Remove X time counters from CARDNAME and exile it:",
-        "ChangeType": "Permanent.YouOwn+nonLand+cmcEQX"
-      }
+      "description": "Return each nonland permanent card with mana value X from your graveyard to the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

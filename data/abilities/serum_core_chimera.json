@@ -2,36 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/OIL>"
+        "cost": "SubCounter<3/OIL>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDiscard",
-        "SpellDescription": "Draw a card. Then you may discard a nonland card. When you discard a card this way, CARDNAME deals 3 damage to target creature or planeswalker. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "description": "Draw a card. Then you may discard a nonland card. When you discard a card this way, CARDNAME deals 3 damage to target creature or planeswalker. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounter",
-        "TriggerDescription": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
-        "ValidCard": "Card.nonCreature",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

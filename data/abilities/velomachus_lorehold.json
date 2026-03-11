@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, look at the top seven cards of your library. You may cast an instant or sorcery spell with mana value less than or equal to CARDNAME's power from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, look at the top seven cards of your library. You may cast an instant or sorcery spell with mana value less than or equal to CARDNAME's power from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.",
-        "Execute": "TrigLook"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

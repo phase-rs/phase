@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Ally you control enters, you may have Allies you control gain lifelink until end of turn, and you may put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may have Allies you control gain lifelink until end of turn, and you may put a +1/+1 counter on CARDNAME."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Ally.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

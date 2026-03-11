@@ -1,31 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a nonred spell, untap this creature.",
-        "ValidCard": "Card.nonRed"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "Description": "This creature doesn't untap during your untap step."
+      "description": "Whenever you cast a nonred spell, untap this creature.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

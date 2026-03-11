@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell with mana value equal to the number of doom counters on CARDNAME, CARDNAME deals that much damage to any target. Then put a doom counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a spell with mana value equal to the number of doom counters on CARDNAME, CARDNAME deals that much damage to any target. Then put a doom counter on CARDNAME.",
-        "ValidCard": "Card.cmcEQX",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDealDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

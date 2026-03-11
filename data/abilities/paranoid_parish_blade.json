@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Delirium — CARDNAME gets +1/+0 and has first strike as long as there are four or more card types among cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Delirium",
-        "Description": "Delirium — CARDNAME gets +1/+0 and has first strike as long as there are four or more card types among cards in your graveyard.",
-        "AddKeyword": "First Strike",
-        "Affected": "Card.Self",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

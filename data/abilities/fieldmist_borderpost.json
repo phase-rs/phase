@@ -2,48 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W U",
-        "params": {
-          "SpellDescription": "Add {W} or {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {U}."
-      }
-    }
-  ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "AlternativeCost"
+      "description": "Add {W} or {U}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue"
+        ],
+        "type": "Mana"
       },
-      "params": {
-        "EffectZone": "All",
-        "Cost": "1 Return<1/Land.Basic>",
-        "Description": "You may pay {1} and return a basic land you control to its owner's hand rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "You may pay {1} and return a basic land you control to its owner's hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
+      "mode": {
+        "Other": "AlternativeCost"
+      }
+    }
+  ],
+  "triggers": []
 }

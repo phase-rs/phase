@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Creature",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Exile all creature cards from target player's graveyard. You gain 3 life for each card exiled this way.",
-        "RememberChanged": "True"
-      }
+      "description": "Exile all creature cards from target player's graveyard. You gain 3 life for each card exiled this way.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

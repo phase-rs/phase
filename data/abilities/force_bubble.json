@@ -1,37 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When there are four or more depletion counters on CARDNAME, sacrifice it.",
-        "Execute": "TrigSac",
-        "IsPresent": "Card.Self+counters_GE4_DEPLETION"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "At the beginning of each end step, remove all depletion counters from CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "description": "If damage would be dealt to you, put that many depletion counters on CARDNAME instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "You",
-        "Description": "If damage would be dealt to you, put that many depletion counters on CARDNAME instead.",
-        "ReplaceWith": "Counters"
-      }
+      "description": "When there are four or more depletion counters on CARDNAME, sacrifice it.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "At the beginning of each end step, remove all depletion counters from CARDNAME.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

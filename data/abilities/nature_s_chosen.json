@@ -2,49 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "0",
+        "type": "Mana"
+      },
+      "description": "Untap enchanted creature. Activate only during your turn and only once each turn.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "0"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "Untap enchanted creature. Activate only during your turn and only once each turn.",
-        "Defined": "Enchanted",
-        "PlayerTurn": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Land"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Creature.AttachedBy+White>"
+        "cost": "tapXType<1/Creature.AttachedBy+White>",
+        "type": "Mana"
       },
+      "description": "Untap target artifact, creature, or land. Activate only if enchanted creature is white and untapped and only once each turn.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature,Land",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact, creature, or land",
-        "ActivationLimit": "1",
-        "CostDesc": "Tap enchanted creature:",
-        "SpellDescription": "Untap target artifact, creature, or land. Activate only if enchanted creature is white and untapped and only once each turn."
-      }
+      "target_prompt": "Select target artifact, creature, or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Discover",
-        "params": {
-          "Num": "10",
-          "RememberDiscovered": "True",
-          "SpellDescription": "Discover 10.",
-          "SubAbility": "DBTreasure"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Num": "10",
-        "RememberDiscovered": "True",
-        "SpellDescription": "Discover 10.",
-        "SubAbility": "DBTreasure"
-      }
+      "description": "Discover 10.",
+      "effect": {
+        "description": "Discover 10.",
+        "name": "Discover",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

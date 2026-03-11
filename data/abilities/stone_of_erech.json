@@ -2,56 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Exile target player's graveyard. Draw a card.",
-        "ChangeType": "Card"
-      }
+      "description": "Exile target player's graveyard. Draw a card.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "Origin": "Battlefield",
-        "Description": "If a creature an opponent controls would die, exile it instead.",
-        "Destination": "Graveyard",
-        "ActiveZones": "Battlefield",
-        "ValidLKI": "Creature.OppCtrl",
-        "ReplaceWith": "Exile"
-      }
+      "description": "If a creature an opponent controls would die, exile it instead.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

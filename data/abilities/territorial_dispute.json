@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land.",
-        "Execute": "TrigUpkeep",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Players can't play lands.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "Description": "Players can't play lands."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,19 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Merfolk"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Merfolk you control get +1/+1 and have islandwalk.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Merfolk you control get +1/+1 and have islandwalk.",
-        "Affected": "Creature.Merfolk+Other+YouCtrl",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "AddKeyword": "Landwalk:Island"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Landwalk:Island",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

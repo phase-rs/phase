@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME or another legendary creature you control crews a Vehicle, that Vehicle perpetually gets +1/+0.",
       "mode": "Crewed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigEffect",
-        "ValidCrew": "Card.Self,Creature.Legendary+Other+YouCtrl",
-        "TriggerDescription": "When CARDNAME or another legendary creature you control crews a Vehicle, that Vehicle perpetually gets +1/+0."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

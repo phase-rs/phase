@@ -2,38 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Return target creature card and up to one target Cleric, Rogue, Warrior, or Wizard card from your graveyard to the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target creature card in your graveyard",
-        "SubAbility": "DBPartyReturn",
-        "SpellDescription": "Return target creature card and up to one target Cleric, Rogue, Warrior, or Wizard card from your graveyard to the battlefield."
-      }
+      "target_prompt": "Choose target creature card in your graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "X"
-      }
+      "description": "This spell costs {1} less to cast for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

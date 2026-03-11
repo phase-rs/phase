@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, it deals damage equal to the number of Swamps you control to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "When this creature enters, it deals damage equal to the number of Swamps you control to any target.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

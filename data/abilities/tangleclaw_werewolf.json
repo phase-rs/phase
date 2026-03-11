@@ -1,62 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME.",
-              "Defined": "Self",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "6 G"
+            "cost": "6 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME.",
-            "Defined": "Self",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "CanBlockAmount": "1",
-            "Description": "CARDNAME can block an additional creature each combat.",
-            "Affected": "Card.Self"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "CARDNAME can block an additional creature each combat.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "CARDNAME can block an additional creature each combat.",
-            "CanBlockAmount": "1",
-            "Affected": "Card.Self"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "CARDNAME can block an additional creature each combat.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

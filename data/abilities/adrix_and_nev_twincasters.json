@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "ReplaceWith": "DoubleToken",
-        "Description": "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
-        "ActiveZones": "Battlefield",
-        "ValidToken": "Card.YouCtrl"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,32 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target creature you control becomes a green Wurm with base power and toughness 6/4.",
       "effect": {
-        "type": "Animate",
         "power": 6,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Wurm"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+        ]
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Green",
-        "TgtPrompt": "Select target creature you control",
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "Until end of turn, target creature you control becomes a green Wurm with base power and toughness 6/4.",
-        "OverwriteColors": "True"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

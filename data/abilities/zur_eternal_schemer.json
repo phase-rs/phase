@@ -2,43 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 W",
+        "type": "Mana"
+      },
+      "description": "Target non-Aura enchantment you control becomes a creature in addition to its other types and has base power and toughness each equal to its mana value.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Enchantment",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment.nonAura+YouCtrl"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 W"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target non-Aura enchantment you control becomes a creature in addition to its other types and has base power and toughness each equal to its mana value.",
-        "TgtPrompt": "Select target non-Aura enchantment you control",
-        "Duration": "Permanent",
-        "StackDescription": "{c:Targeted} becomes a creature in addition to its other types and has base power and toughness each equal to its mana value."
-      }
+      "target_prompt": "Select target non-Aura enchantment you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Enchantment"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchantment creatures you control have deathtouch, lifelink, and hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch & Lifelink & Hexproof",
-        "Description": "Enchantment creatures you control have deathtouch, lifelink, and hexproof.",
-        "Affected": "Creature.Enchantment+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

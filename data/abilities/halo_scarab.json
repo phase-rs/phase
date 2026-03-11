@@ -2,38 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_a_treasure_sac",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

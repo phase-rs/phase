@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.cmcEQ2"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell with mana value 2.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target spell with mana value 2.",
-        "TgtPrompt": "Select target spell with mana value 2"
-      }
+      "target_prompt": "Select target spell with mana value 2"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

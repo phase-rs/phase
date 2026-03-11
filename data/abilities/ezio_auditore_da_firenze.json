@@ -1,29 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may pay {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that player loses the game.",
-        "Execute": "TrigImmediateTrig",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Assassin"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Assassin spells you cast have freerunning {B}{B}. (You may cast a spell for its freerunning cost if you dealt combat damage to a player this turn with an Assassin or commander.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Assassin+YouCtrl+wasCast",
-        "AffectedZone": "Stack",
-        "AddKeyword": "Freerunning:B B",
-        "Description": "Assassin spells you cast have freerunning {B}{B}. (You may cast a spell for its freerunning cost if you dealt combat damage to a player this turn with an Assassin or commander.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Freerunning:B",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "B",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, you may pay {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that player loses the game.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

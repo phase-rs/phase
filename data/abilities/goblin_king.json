@@ -1,19 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Goblin"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Goblin creatures get +1/+1 and have mountainwalk.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Goblin creatures get +1/+1 and have mountainwalk.",
-        "AddPower": "1",
-        "AddKeyword": "Landwalk:Mountain",
-        "AddToughness": "1",
-        "Affected": "Creature.Goblin+Other"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Landwalk:Mountain",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

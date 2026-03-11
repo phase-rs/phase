@@ -2,55 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Exile",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<0/Hand>"
+            "cost": "Discard<0/Hand>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card.ExiledWithSource",
-        "AILogic": "DiscardAllAndRetExiled.minAdv2",
-        "SpellDescription": "Put all cards exiled with CARDNAME into their owners' hands."
-      }
+      "description": "Put all cards exiled with CARDNAME into their owners' hands.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Exile",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control attacks, exile the top card of your library face down. (You can't look at it.)",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control attacks, exile the top card of your library face down. (You can't look at it.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

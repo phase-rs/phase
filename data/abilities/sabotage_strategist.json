@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 U U",
+        "type": "Mana"
+      },
+      "description": "Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 3,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Exhaust": "True",
-        "SpellDescription": "Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creatures attack you, those creatures get -1/-0 until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPumpAll",
-        "AttackedTarget": "You",
-        "TriggerDescription": "Whenever one or more creatures attack you, those creatures get -1/-0 until end of turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

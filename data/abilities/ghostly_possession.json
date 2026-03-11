@@ -1,17 +1,84 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has flying. Prevent all combat damage that would be dealt to and dealt by enchanted creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Flying & Prevent all combat damage that would be dealt to and dealt by CARDNAME.",
-        "Description": "Enchanted creature has flying. Prevent all combat damage that would be dealt to and dealt by enchanted creature."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Prevent",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "all",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "combat",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "damage",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "that",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "would",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "be",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "dealt",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "to",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "and",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "dealt",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "by",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "CARDNAME.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

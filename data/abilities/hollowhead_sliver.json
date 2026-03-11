@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Sliver creatures you control have \"{T}, Discard a card: Draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Rummage",
-        "Affected": "Creature.Sliver+YouCtrl",
-        "Description": "Sliver creatures you control have \"{T}, Discard a card: Draw a card.\""
-      }
+      "modifications": [
+        {
+          "ability": "Rummage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

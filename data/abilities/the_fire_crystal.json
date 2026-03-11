@@ -2,59 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "TgtPrompt": "Select target creature you control",
-          "ValidTgts": "Creature.YouCtrl",
-          "SpellDescription": "Create a token that's a copy of target creature you control. Sacrifice it at the beginning of the next end step.",
-          "AtEOT": "Sacrifice"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 R R"
+            "cost": "4 R R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Create a token that's a copy of target creature you control. Sacrifice it at the beginning of the next end step.",
+      "effect": {
+        "description": "Create a token that's a copy of target creature you control. Sacrifice it at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "ValidTgts": "Creature.YouCtrl",
-        "SpellDescription": "Create a token that's a copy of target creature you control. Sacrifice it at the beginning of the next end step.",
-        "AtEOT": "Sacrifice"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Activator": "You",
-        "Description": "Red spells you cast cost {1} less to cast.",
-        "Type": "Spell",
-        "ValidCard": "Card.Red"
-      }
+      "description": "Red spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

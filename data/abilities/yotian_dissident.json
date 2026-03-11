@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact you control enters, put a +1/+1 counter on target creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Artifact.YouCtrl",
-        "TriggerDescription": "Whenever an artifact you control enters, put a +1/+1 counter on target creature you control.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigCounter"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

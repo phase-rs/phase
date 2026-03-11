@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, draw a card. Each player may put a land card from their hand onto the battlefield, then each opponent who didn't draws a card.",
       "mode": "SpellCast",
-      "params": {
-        "TargetsValid": "Card.Self",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, draw a card. Each player may put a land card from their hand onto the battlefield, then each opponent who didn't draws a card.",
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

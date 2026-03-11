@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 B",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield tapped with two +1/+1 counters on it.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "WithCountersAmount": "2",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield tapped with two +1/+1 counters on it.",
-        "WithCountersType": "P1P1",
-        "ActivationZone": "Graveyard",
-        "Tapped": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

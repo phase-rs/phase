@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 2,
-        "destination": ""
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "All",
-        "ChangeValid": "Creature,Land",
-        "DestinationZone2": "Library",
-        "Reveal": "True",
-        "SpellDescription": "Reveal the top two cards of your library. Put all creature and land cards revealed this way into your hand and the rest on the bottom of your library in any order."
-      }
+      "description": "Reveal the top two cards of your library. Put all creature and land cards revealed this way into your hand and the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 2,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

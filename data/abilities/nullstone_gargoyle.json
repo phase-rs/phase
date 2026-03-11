@@ -1,20 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever the first noncreature spell of a turn is cast, counter that spell.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounter",
-        "CheckSVar": "X",
-        "TriggerDescription": "Whenever the first noncreature spell of a turn is cast, counter that spell.",
-        "SVarCompare": "EQ1",
-        "ValidCard": "Card.nonCreature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,74 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
+      "description": "Target creature gains deathtouch until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature to gain deathtouch",
-        "KW": "Deathtouch",
-        "SpellDescription": "Target creature gains deathtouch until end of turn."
-      }
+      "target_prompt": "Select target creature to gain deathtouch"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "GW"
+        "cost": "GW",
+        "type": "Mana"
       },
+      "description": "Target creature gains vigilance until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature to gain vigilance",
-        "KW": "Vigilance",
-        "SpellDescription": "Target creature gains vigilance until end of turn."
-      }
+      "target_prompt": "Select target creature to gain vigilance"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
+      "description": "Target creature gains double strike until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Double Strike",
-        "TgtPrompt": "Select target creature to gain double strike",
-        "SpellDescription": "Target creature gains double strike until end of turn."
-      }
+      "target_prompt": "Select target creature to gain double strike"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

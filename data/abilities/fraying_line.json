@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put a rope counter on target creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, put a rope counter on target creature you control.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each player's upkeep, that player may pay {2}. If they do, they put a rope counter on a creature they control. Otherwise, exile CARDNAME and each creature without a rope counter on it, then remove all rope counters from all creatures.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigRope",
-        "ValidPlayer": "Player",
-        "TriggerDescription": "At the beginning of each player's upkeep, that player may pay {2}. If they do, they put a rope counter on a creature they control. Otherwise, exile CARDNAME and each creature without a rope counter on it, then remove all rope counters from all creatures."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

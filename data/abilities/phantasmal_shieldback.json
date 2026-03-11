@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes the target of a spell or ability, sacrifice it.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability, sacrifice it.",
-        "Execute": "TrigSac"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, draw a card.",
-        "Destination": "Graveyard",
-        "Execute": "TrigDraw",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

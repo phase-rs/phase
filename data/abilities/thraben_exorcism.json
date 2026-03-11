@@ -2,26 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Spirit,Creature.withDisturb,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Exile target Spirit, creature with disturb, or enchantment.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Spirit,Creature.withDisturb,Enchantment"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target Spirit, creature with disturb, or enchantment.",
-        "TgtPrompt": "Select target Spirit, creature with disturb, or enchantment."
-      }
+      "target_prompt": "Select target Spirit, creature with disturb, or enchantment."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,49 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "Indestructible",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 UP UP"
+            "cost": "1 UP UP",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "RemoveAnyCounter<3/Any/Artifact.Other;Creature.Other;Planeswalker.Other/other artifacts, creatures, and planeswalkers>"
+            "cost": "RemoveAnyCounter<3/Any/Artifact.Other;Creature.Other;Planeswalker.Other/other artifacts, creatures, and planeswalkers>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an indestructible counter on CARDNAME. ({U/P} can be paid with either {U} or 2 life.)"
-      }
+      "description": "Put an indestructible counter on CARDNAME. ({U/P} can be paid with either {U} or 2 life.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "Indestructible",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would proliferate, proliferate twice instead.",
       "event": {
         "Other": "Proliferate"
-      },
-      "params": {
-        "ReplaceWith": "ProlifTwice",
-        "Description": "If you would proliferate, proliferate twice instead.",
-        "AILogic": "DoubleLife",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

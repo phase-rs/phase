@@ -1,20 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature enters, CARDNAME becomes a copy of that creature, except it has this ability.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.Other",
-        "TriggerDescription": "Whenever another creature enters, CARDNAME becomes a copy of that creature, except it has this ability.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "USCopy"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

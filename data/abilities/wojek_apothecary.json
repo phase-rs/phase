@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "PrecostDesc": "Radiance —",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
-          "Amount": "1",
-          "Radiance": "True",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Radiance —",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
-        "Amount": "1",
-        "Radiance": "True",
-        "ValidTgts": "Creature"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

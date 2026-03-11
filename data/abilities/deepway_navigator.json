@@ -1,29 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigUntapAll",
-        "TriggerDescription": "When CARDNAME enters, untap each other Merfolk you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Merfolk"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "RaidTest"
+      },
+      "description": "As long as you attacked with three or more Merfolk this turn, Merfolk you control get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "RaidTest",
-        "AddPower": "1",
-        "SVarCompare": "GE3",
-        "Affected": "Creature.Merfolk+YouCtrl",
-        "Description": "As long as you attacked with three or more Merfolk this turn, Merfolk you control get +1/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, untap each other Merfolk you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

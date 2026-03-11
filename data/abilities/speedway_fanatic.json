@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME crews a Vehicle, that Vehicle gains haste until end of turn.",
       "mode": "Crewed",
-      "params": {
-        "ValidCrew": "Card.Self",
-        "Execute": "TrigSpeedway",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME crews a Vehicle, that Vehicle gains haste until end of turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

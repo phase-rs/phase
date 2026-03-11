@@ -1,42 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
-        "IsPresent": "Card.StrictlySelf",
-        "ValidCard": "Card.Vampire+Other",
-        "Execute": "TrigToken",
-        "PresentZone": "Command",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Vampire"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
       "mode": "SpellCast",
-      "params": {
-        "IsPresent": "Card.StrictlySelf",
-        "ValidCard": "Card.Vampire+Other",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
-        "PresentZone": "Battlefield",
-        "Secondary": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Vampire"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, put a +1/+1 counter on each Vampire you control.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on each Vampire you control.",
-        "Execute": "TrigPutCounterAll",
-        "ValidCard": "Creature.Self"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

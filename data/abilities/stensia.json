@@ -1,36 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature deals damage to one or more players for the first time each turn, put a +1/+1 counter on it.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever a creature deals damage to one or more players for the first time each turn, put a +1/+1 counter on it.",
-        "ValidSource": "Creature.!IsRemembered"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
       "mode": "Phase",
-      "params": {
-        "Static": "True",
-        "TriggerZones": "Command",
-        "Phase": "End of Turn",
-        "Execute": "DBCleanup"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, each creature you control gains \"{T}: This creature deals 1 damage to target player or planeswalker\" until end of turn.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, each creature you control gains \"{T}: This creature deals 1 damage to target player or planeswalker\" until end of turn.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Kavu.Other",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever another Kavu enters, put a +1/+1 counter on CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Kavu"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Kavu creatures have trample.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Kavu creatures have trample.",
-        "Affected": "Creature.Kavu",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another Kavu enters, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Kavu",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

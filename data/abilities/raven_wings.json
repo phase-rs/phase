@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0, has flying, and is a Bird in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "AddType": "Bird",
-        "Description": "Equipped creature gets +1/+0, has flying, and is a Bird in addition to its other types.",
-        "AddPower": "1",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Bird",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

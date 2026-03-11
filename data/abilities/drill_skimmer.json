@@ -1,18 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Artifact"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has shroud as long as you control another artifact creature. (It can't be the target of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has shroud as long as you control another artifact creature. (It can't be the target of spells or abilities.)",
-        "IsPresent": "Creature.Artifact+Other+YouCtrl",
-        "Affected": "Card.Self",
-        "AddKeyword": "Shroud"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

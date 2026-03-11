@@ -2,33 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
+      "description": "You may return another creature you control to its owner's hand. If you do, CARDNAME gains indestructible until end of turn.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may return another creature you control to its owner's hand. If you do, CARDNAME gains indestructible until end of turn.",
-        "ChangeNum": "1",
-        "RememberChanged": "True",
-        "Hidden": "True",
-        "SubAbility": "DBPump",
-        "StackDescription": "SpellDescription",
-        "ChangeType": "Creature.YouCtrl+Other"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

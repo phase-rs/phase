@@ -2,34 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You gain life equal to the greatest toughness among creatures you control."
-      }
+      "description": "You gain life equal to the greatest toughness among creatures you control.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
-        "ValidCard": "Creature.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

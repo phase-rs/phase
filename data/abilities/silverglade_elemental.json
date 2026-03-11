@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for a Forest card, put that card onto the battlefield, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for a Forest card, put that card onto the battlefield, then shuffle.",
-        "Execute": "TrigChange",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

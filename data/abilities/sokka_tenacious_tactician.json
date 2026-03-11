@@ -1,28 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.nonCreature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you cast a noncreature spell, create a 1/1 white Ally creature token."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Ally",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Allies you control have menace and prowess.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Allies you control have menace and prowess.",
-        "AddKeyword": "Menace & Prowess",
-        "Affected": "Ally.YouCtrl+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Prowess",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a noncreature spell, create a 1/1 white Ally creature token.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

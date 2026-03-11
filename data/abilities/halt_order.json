@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": null,
+      "description": "Counter target artifact spell. Draw a card.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target artifact spell. Draw a card.",
-        "SubAbility": "DBDraw",
-        "TgtPrompt": "Select target artifact spell"
-      }
+      "target_prompt": "Select target artifact spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

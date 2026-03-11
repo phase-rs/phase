@@ -2,42 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X 2 R",
+        "type": "Mana"
+      },
+      "description": "This Vehicle deals X damage to any target. Put a +1/+1 counter on this Vehicle. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X 2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This Vehicle deals X damage to any target. Put a +1/+1 counter on this Vehicle. (Activate each exhaust ability only once.)",
-        "Exhaust": "True",
-        "SubAbility": "DBPutCounter"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this Vehicle enters, add four mana of any one color. Spend this mana only to activate abilities.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigMana",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this Vehicle enters, add four mana of any one color. Spend this mana only to activate abilities."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

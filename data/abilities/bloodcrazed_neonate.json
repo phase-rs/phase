@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Card.Self",
-        "Description": "CARDNAME attacks each combat if able."
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

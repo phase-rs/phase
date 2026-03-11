@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature of an opponent's choice instead.",
-          "Choices": "Card,Emblem",
-          "SubAbility": "DBEffect",
-          "AILogic": "NeedsPrevention"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature of an opponent's choice instead.",
-        "Choices": "Card,Emblem",
-        "SubAbility": "DBEffect",
-        "AILogic": "NeedsPrevention"
-      }
+      "description": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature of an opponent's choice instead.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature of an opponent's choice instead.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

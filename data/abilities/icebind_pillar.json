@@ -2,35 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "S"
+            "cost": "S",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Tap target artifact or creature.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target artifact or creature.",
-        "TgtPrompt": "Select target artifact or creature."
-      }
+      "target_prompt": "Select target artifact or creature."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

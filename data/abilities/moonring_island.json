@@ -2,47 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Library"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "0",
-        "PresentCompare": "GE2",
-        "ValidTgts": "Player",
-        "IsPresent": "Permanent.Blue+YouCtrl",
-        "SpellDescription": "Look at the top card of target player's library. Activate only if you control two or more blue permanents."
-      }
+      "description": "Look at the top card of target player's library. Activate only if you control two or more blue permanents.",
+      "effect": {
+        "count": 1,
+        "destination": "Library",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

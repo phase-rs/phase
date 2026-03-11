@@ -1,38 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigEnergy",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters)."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, you may pay {E}{E}. If you do, it gains first strike until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {E}{E}. If you do, it gains first strike until end of turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
-        "ValidSource": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

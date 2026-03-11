@@ -1,17 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has first strike. (It deals combat damage before creatures without first strike.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "Description": "Enchanted creature has first strike. (It deals combat damage before creatures without first strike.)",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, creatures you control get +1/+0 and gain first strike until end of turn.",
-        "TriggerZones": "Command"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures are black and have deathtouch.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Description": "All creatures are black and have deathtouch.",
-        "Affected": "Creature",
-        "SetColor": "Black",
-        "EffectZone": "Command",
-        "AddKeyword": "Deathtouch"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "colors": [
+            "Black"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, creatures you control get +1/+0 and gain first strike until end of turn.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

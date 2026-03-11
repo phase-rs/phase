@@ -2,48 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "PayEnergy<5>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 3 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "PayEnergy<5>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 3 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, you get {E}{E} (two energy counters).",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, you get {E}{E} (two energy counters).",
-        "Execute": "TrigEnergy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

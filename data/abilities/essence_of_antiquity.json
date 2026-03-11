@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, creatures you control gain hexproof until end of turn. Untap them.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "When CARDNAME is turned face up, creatures you control gain hexproof until end of turn. Untap them."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

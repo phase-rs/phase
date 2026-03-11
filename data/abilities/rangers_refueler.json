@@ -2,46 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4",
+        "type": "Mana"
+      },
+      "description": "This Vehicle becomes an artifact creature. Put a +1/+1 counter on it. (Activate each exhaust ability only once.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPutCounter",
-        "SpellDescription": "This Vehicle becomes an artifact creature. Put a +1/+1 counter on it. (Activate each exhaust ability only once.)",
-        "Duration": "Permanent",
-        "Exhaust": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you activate an exhaust ability, draw a card.",
       "mode": "AbilityCast",
-      "params": {
-        "ValidSA": "Activated.Exhaust",
-        "TriggerDescription": "Whenever you activate an exhaust ability, draw a card.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

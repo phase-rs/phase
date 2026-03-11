@@ -2,63 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -1,
-        "toughness": -1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SpellDescription": "Target creature gets -1/-1 until end of turn."
-      }
+      "description": "Target creature gets -1/-1 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -6,
-        "toughness": -6,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 B B"
+            "cost": "4 B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets -6/-6 until end of turn.",
-        "IsCurse": "True"
-      }
+      "description": "Target creature gets -6/-6 until end of turn.",
+      "effect": {
+        "power": -6,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -6,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

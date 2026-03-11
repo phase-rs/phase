@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control two or more tapped creatures, put a +1/+1 counter on each creature you control other than this creature.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounterAll",
-        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, put a +1/+1 counter on each creature you control other than this creature.",
-        "IsPresent": "Creature.YouCtrl+tapped",
-        "Phase": "End of Turn",
-        "PresentCompare": "GE2",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

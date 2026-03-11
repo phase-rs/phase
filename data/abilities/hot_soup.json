@@ -1,35 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature.EquippedBy",
-        "TriggerDescription": "When equipped creature is dealt damage, destroy it."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Equipped creature can't be blocked.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "Equipped creature can't be blocked.",
-        "ValidAttacker": "Creature.EquippedBy"
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "HotSoupDestroy",
-        "Affected": "Creature.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When equipped creature is dealt damage, destroy it.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

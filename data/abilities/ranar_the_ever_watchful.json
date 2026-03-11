@@ -1,44 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Hand",
-        "Execute": "TrigToken",
-        "ValidCards": "Card.YouOwn",
-        "TriggerZones": "Battlefield",
-        "Destination": "Exile",
-        "TriggerDescription": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, create a 1/1 white Spirit creature token with flying."
-      }
-    },
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Exile",
-        "TriggerDescription": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, create a 1/1 white Spirit creature token with flying.",
-        "ValidCause": "SpellAbility.YouCtrl",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "The first card you foretell each turn costs {0} to foretell.",
-        "Type": "Foretell",
-        "FirstForetell": "True",
-        "ValidCard": "Card",
-        "Amount": "2",
-        "Activator": "You"
-      }
+      "description": "The first card you foretell each turn costs {0} to foretell.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, create a 1/1 white Spirit creature token with flying.",
+      "destination": "Exile",
+      "mode": "ChangesZoneAll",
+      "origin": "Hand",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, create a 1/1 white Spirit creature token with flying.",
+      "destination": "Exile",
+      "mode": "ChangesZoneAll",
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

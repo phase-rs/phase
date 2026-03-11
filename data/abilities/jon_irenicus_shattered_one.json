@@ -1,28 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, target opponent gains control of up to one target creature you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, target opponent gains control of up to one target creature you control.",
-        "Execute": "DBSelectRecipient",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a creature you own but don't control attacks, you draw a card.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a creature you own but don't control attacks, you draw a card.",
-        "Execute": "DrawACard",
-        "ValidCard": "Creature.YouDontCtrl+YouOwn",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontCtrl"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

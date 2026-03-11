@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Land"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact, creature or land. CARDNAME deals 3 damage to you.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature,Land",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact, creature or land. CARDNAME deals 3 damage to you.",
-        "TgtPrompt": "Select target artifact, creature, or land",
-        "SubAbility": "DBPain"
-      }
+      "target_prompt": "Select target artifact, creature, or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

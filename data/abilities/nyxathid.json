@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "-X",
-        "AddToughness": "-X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets -1/-1 for each card in the chosen player's hand."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets -1/-1 for each card in the chosen player's hand.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

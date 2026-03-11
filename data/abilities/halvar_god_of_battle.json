@@ -1,62 +1,92 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "OptionalDecider": "You",
-            "TriggerDescription": "At the beginning of each combat, you may attach target Aura or Equipment attached to a creature you control to target creature you control.",
-            "Phase": "BeginCombat",
-            "Execute": "TrigTargetAuraEquip"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "description": "Creatures you control that are enchanted or equipped gain double strike.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Creatures you control that are enchanted or equipped gain double strike.",
-            "Affected": "Creature.YouCtrl+enchanted,Creature.YouCtrl+equipped",
-            "AddKeyword": "Double Strike"
-          }
+          "modifications": [
+            {
+              "keyword": "Double",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Strike",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each combat, you may attach target Aura or Equipment attached to a creature you control to target creature you control.",
+          "mode": "Phase",
+          "optional": true,
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.AttachedBy",
-            "Origin": "Battlefield",
-            "Execute": "TrigReturn",
-            "TriggerDescription": "Whenever equipped creature dies, return it to its owner's hand.",
-            "Destination": "Graveyard"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +2/+0 and has vigilance.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.EquippedBy",
-            "Description": "Equipped creature gets +2/+0 and has vigilance.",
-            "AddKeyword": "Vigilance",
-            "AddPower": "2"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            },
+            {
+              "keyword": "Vigilance",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever equipped creature dies, return it to its owner's hand.",
+          "destination": "Graveyard",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "AttachedBy"
+              }
+            ],
+            "type": "Typed"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

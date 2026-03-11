@@ -1,32 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, you may exile an artifact or creature card from your hand or graveyard and put a cage counter on it.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOfZones": "Exile",
-        "GainsAbilitiesOf": "Card.YouOwn+counters_GE1_CAGE",
-        "GainsAbilitiesLimitPerTurn": "1",
-        "Description": "CARDNAME has all activated abilities of all cards you own in exile with cage counters on them. You may activate each of those abilities only once each turn.",
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of all cards you own in exile with cage counters on them. You may activate each of those abilities only once each turn.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you may exile an artifact or creature card from your hand or graveyard and put a cage counter on it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AssignGroup",
-        "params": {
-          "SpellDescription": "For each player, choose friend or foe. Each friend discards all cards from their hand, then draws that many cards plus one. CARDNAME deals damage to each foe equal to the number of cards in their hand.",
-          "AILogic": "FriendOrFoe",
-          "Choices": "FriendRepeat,FoeRepeat",
-          "Defined": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each player, choose friend or foe. Each friend discards all cards from their hand, then draws that many cards plus one. CARDNAME deals damage to each foe equal to the number of cards in their hand.",
-        "AILogic": "FriendOrFoe",
-        "Choices": "FriendRepeat,FoeRepeat",
-        "Defined": "Player"
-      }
+      "description": "For each player, choose friend or foe. Each friend discards all cards from their hand, then draws that many cards plus one. CARDNAME deals damage to each foe equal to the number of cards in their hand.",
+      "effect": {
+        "description": "For each player, choose friend or foe. Each friend discards all cards from their hand, then draws that many cards plus one. CARDNAME deals damage to each foe equal to the number of cards in their hand.",
+        "name": "AssignGroup",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

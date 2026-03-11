@@ -2,57 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "TriggerDescription": "Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep.",
-          "SubAbility": "DBExile",
-          "RememberObjects": "Targeted & SacrificedCards",
-          "ValidTgts": "Creature.YouOwn",
-          "Execute": "MoveToPlay",
-          "SpellDescription": "Choose target creature card in your graveyard. Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep. Exile CARDNAME.",
-          "ValidPlayer": "You",
-          "TgtPrompt": "Choose target creature card in your graveyard",
-          "TgtZone": "Graveyard",
-          "Phase": "Upkeep",
-          "Mode": "Phase"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 B"
+            "cost": "4 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Choose target creature card in your graveyard. Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep. Exile CARDNAME.",
+      "effect": {
+        "description": "Choose target creature card in your graveyard. Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep. Exile CARDNAME.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TriggerDescription": "Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep.",
-        "SubAbility": "DBExile",
-        "RememberObjects": "Targeted & SacrificedCards",
-        "ValidTgts": "Creature.YouOwn",
-        "Execute": "MoveToPlay",
-        "SpellDescription": "Choose target creature card in your graveyard. Return that card and the sacrificed card to the battlefield under your control at the beginning of your next upkeep. Exile CARDNAME.",
-        "ValidPlayer": "You",
-        "TgtPrompt": "Choose target creature card in your graveyard",
-        "TgtZone": "Graveyard",
-        "Phase": "Upkeep",
-        "Mode": "Phase"
-      }
+      "target_prompt": "Choose target creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

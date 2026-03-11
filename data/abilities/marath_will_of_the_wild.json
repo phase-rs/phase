@@ -2,41 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Defined": "You",
-          "MinCharmNum": "1",
-          "AdditionalDescription": ". X can't be 0.",
-          "Choices": "MarathCounters,MarathDmg,MarathToken"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "XMin1 X"
+            "cost": "XMin1 X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<X/P1P1/NICKNAME>"
+            "cost": "SubCounter<X/P1P1/NICKNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "MinCharmNum": "1",
-        "AdditionalDescription": ". X can't be 0.",
-        "Choices": "MarathCounters,MarathDmg,MarathToken"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

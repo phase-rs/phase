@@ -1,22 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a colored artifact spell for the first time each turn, search your library for a colored artifact card chosen at random whose mana value is less than that spell's mana value. You may play that card without paying its mana cost. If you don't, put that card on the bottom of your library.",
       "mode": "SpellCast",
-      "params": {
-        "CheckSVar": "NumColoredCast",
-        "SVarCompare": "EQ1",
-        "NoResolvingCheck": "True",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a colored artifact spell for the first time each turn, search your library for a colored artifact card chosen at random whose mana value is less than that spell's mana value. You may play that card without paying its mana cost. If you don't, put that card on the bottom of your library.",
-        "ValidCard": "Artifact.nonColorless",
-        "TriggerZones": "Command",
-        "Execute": "TrigSearch"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

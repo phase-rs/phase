@@ -1,25 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustBlock",
-      "params": {
-        "Description": "CARDNAME blocks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME blocks each combat if able.",
+      "mode": "MustBlock"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is untapped, all creatures attacking you get -1/-0.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+untapped",
-        "AddPower": "-1",
-        "Description": "As long as CARDNAME is untapped, all creatures attacking you get -1/-0.",
-        "Affected": "Creature.attackingYou"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

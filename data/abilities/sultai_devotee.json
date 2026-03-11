@@ -2,28 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo B G U",
-        "params": {
-          "ActivationLimit": "1",
-          "SpellDescription": "Add {B}, {G}, or {U}. Activate only once each turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "Add {B}, {G}, or {U}. Activate only once each turn."
-      }
+      "description": "Add {B}, {G}, or {U}. Activate only once each turn.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Green",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

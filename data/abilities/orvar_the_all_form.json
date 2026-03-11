@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, if it targets one or more other permanents you control, create a token that's a copy of one of those permanents.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TargetsValid": "Permanent.YouCtrl+Other+inZoneBattlefield",
-        "Execute": "TrigCopyTarget",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, if it targets one or more other permanents you control, create a token that's a copy of one of those permanents."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     },
     {
+      "description": "When a spell or ability an opponent controls causes you to discard this card, create a token that's a copy of target permanent.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidCause": "SpellAbility.OppCtrl",
-        "Execute": "TrigTokenCopy",
-        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard this card, create a token that's a copy of target permanent."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

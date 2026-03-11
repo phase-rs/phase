@@ -2,48 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "CHARGE",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X 1"
+            "cost": "X 1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put X charge counters on CARDNAME. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "description": "Put X charge counters on CARDNAME. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "CHARGE",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first main phase, if CARDNAME has a charge counter on it, tap it and remove all charge counters from it. Add {C} for each charge counter removed this way.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your first main phase, if CARDNAME has a charge counter on it, tap it and remove all charge counters from it. Add {C} for each charge counter removed this way.",
-        "Execute": "TrigGetMana",
-        "ValidPlayer": "You",
-        "CheckSVar": "Y"
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "LosesGame",
-        "params": {
-          "Defined": "You",
-          "SpellDescription": "You lose the game."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "You lose the game."
-      }
+      "description": "You lose the game.",
+      "effect": {
+        "description": "You lose the game.",
+        "name": "LosesGame",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

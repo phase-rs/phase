@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"{T}, Regenerate target Sliver.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver",
-        "Description": "All Slivers have \"{T}, Regenerate target Sliver.\"",
-        "AddAbility": "Regen"
-      }
+      "modifications": [
+        {
+          "ability": "Regen",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

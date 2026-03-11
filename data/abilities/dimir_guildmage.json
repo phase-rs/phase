@@ -2,45 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Target player draws a card. Activate only as a sorcery."
-      }
+      "description": "Target player draws a card. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 B",
+        "type": "Mana"
+      },
+      "description": "Target player discards a card. Activate only as a sorcery.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "TgtChoose",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Target player discards a card. Activate only as a sorcery."
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

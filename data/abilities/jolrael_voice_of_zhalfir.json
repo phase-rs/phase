@@ -1,30 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, up to one target land you control becomes an X/X green and blue Bird creature with flying and haste until end of turn, where X is the number of cards in your hand. It's still a land.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate",
-        "TriggerDescription": "At the beginning of combat on your turn, up to one target land you control becomes an X/X green and blue Bird creature with flying and haste until end of turn, where X is the number of cards in your hand. It's still a land.",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "combat_damage": true,
+      "description": "Whenever a land creature you control deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever a land creature you control deals combat damage to a player, draw a card.",
-        "ValidSource": "Creature.YouCtrl+Land",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

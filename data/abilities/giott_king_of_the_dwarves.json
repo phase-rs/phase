@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME or another Dwarf you control enters and whenever an Equipment you control enters, you may discard a card. If you do, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever NICKNAME or another Dwarf you control enters and whenever an Equipment you control enters, you may discard a card. If you do, draw a card.",
-        "ValidCard": "Card.Self,Dwarf.Other+YouCtrl,Equipment.YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Dwarf.Other"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Equipment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,39 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCopy",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Instant.wasCastFromYourLibrary,Sorcery.wasCastFromYourLibrary",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell from your library, copy it. You may choose new targets for this copy."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Library",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "MayLookAt": "Player",
-        "Description": "Play with the top card of your library revealed."
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may cast instant and sorcery spells from the top of your library.",
-        "EffectZone": "Battlefield",
-        "Affected": "Instant.TopLibrary+YouCtrl,Sorcery.TopLibrary+YouCtrl",
-        "AffectedZone": "Library",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "card_type": "Instant",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may cast instant and sorcery spells from the top of your library.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast an instant or sorcery spell from your library, copy it. You may choose new targets for this copy.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
+      }
+    }
+  ]
 }

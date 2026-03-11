@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an Aura, Equipment, or Vehicle spell, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast an Aura, Equipment, or Vehicle spell, draw a card.",
-        "ValidCard": "Aura,Equipment,Vehicle",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Aura,Equipment,Vehicle",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

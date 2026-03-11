@@ -1,27 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Commander spells you cast have demonstrate. (When you cast a commander spell, you may copy it. If you do, choose an opponent to also copy it. The copies become tokens.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Demonstrate",
-        "Description": "Commander spells you cast have demonstrate. (When you cast a commander spell, you may copy it. If you do, choose an opponent to also copy it. The copies become tokens.)",
-        "AffectedZone": "Stack",
-        "Affected": "Card.IsCommander+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Demonstrate",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "The \"legend rule\" doesn't apply to commanders you control.",
       "mode": {
         "Other": "IgnoreLegendRule"
-      },
-      "params": {
-        "ValidCard": "Card.IsCommander+YouCtrl",
-        "Description": "The \"legend rule\" doesn't apply to commanders you control."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

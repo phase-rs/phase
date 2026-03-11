@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may discard your hand. If you do, draw a card for each artifact you control.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may discard your hand. If you do, draw a card for each artifact you control.",
-        "Execute": "TrigDiscard",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would die, return CARDNAME to its owner's hand instead. Until that player's next turn, that player plays with that card revealed in their hand and can't play it.",
       "event": "Moved",
-      "params": {
-        "Origin": "Battlefield",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ToHand",
-        "Destination": "Graveyard",
-        "Description": "If CARDNAME would die, return CARDNAME to its owner's hand instead. Until that player's next turn, that player plays with that card revealed in their hand and can't play it."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your first enchantment spell each turn, create a 2/2 white Nymph enchantment creature token.",
       "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "EQ1",
-        "TriggerDescription": "Whenever you cast your first enchantment spell each turn, create a 2/2 white Nymph enchantment creature token.",
-        "ValidCard": "Enchantment",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of each combat, if you control five or more enchantments, CARDNAME gets +4/+4 and gains lifelink until end of turn. (Damage dealt by this creature also causes you to gain that much life.)",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPump",
-        "Phase": "BeginCombat",
-        "IsPresent": "Enchantment.YouCtrl",
-        "PresentCompare": "GE5",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each combat, if you control five or more enchantments, CARDNAME gets +4/+4 and gains lifelink until end of turn. (Damage dealt by this creature also causes you to gain that much life.)"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

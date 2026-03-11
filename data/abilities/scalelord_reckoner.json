@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Dragon you control becomes the target of a spell or ability an opponent controls, destroy target nonland permanent that player controls.",
       "mode": "BecomesTarget",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Dragon.inZoneBattlefield+YouCtrl",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "TriggerDescription": "Whenever a Dragon you control becomes the target of a spell or ability an opponent controls, destroy target nonland permanent that player controls.",
-        "Execute": "TrigDestroy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Dragon",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

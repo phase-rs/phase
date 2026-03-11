@@ -2,32 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "ExileFromGrave<1/Creature;Artifact/artifact or creature>",
+        "type": "Mana"
+      },
+      "description": "This Vehicle becomes an artifact creature until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "ExileFromGrave<1/Creature;Artifact/artifact or creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "This Vehicle becomes an artifact creature until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

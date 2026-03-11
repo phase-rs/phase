@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounters",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Description": "Planeswalker spells you cast cost {1} less to cast.",
-        "Type": "Spell",
-        "ValidCard": "Planeswalker",
-        "Activator": "You"
-      }
+      "description": "Planeswalker spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

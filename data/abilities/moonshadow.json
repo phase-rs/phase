@@ -1,22 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more permanent cards are put into your graveyard from anywhere while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Whenever one or more permanent cards are put into your graveyard from anywhere while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.",
-        "Origin": "Any",
-        "IsPresent": "Card.Self+counters_GE1_M1M1",
-        "Execute": "TrigRemoveCounter",
-        "NoResolvingCheck": "True",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Permanent.YouOwn+!token"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

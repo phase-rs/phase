@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target player mills two cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, target player mills two cards.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMill",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, target creature you don't control gets -1/-1 until end of turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDebuff",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, target creature you don't control gets -1/-1 until end of turn.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

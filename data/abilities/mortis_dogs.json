@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it gets +2/+0 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +2/+0 until end of turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, target player loses life equal to its power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, target player loses life equal to its power."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

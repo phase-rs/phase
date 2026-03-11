@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "StaticAbilities": "MustAttack",
-          "SpellDescription": "Target creature attacks this turn if able.",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R"
+        "cost": "1 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "StaticAbilities": "MustAttack",
-        "SpellDescription": "Target creature attacks this turn if able.",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted"
-      }
+      "description": "Target creature attacks this turn if able.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

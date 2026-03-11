@@ -2,42 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 R",
+        "type": "Mana"
+      },
+      "description": "Create a 5/5 red Dragon creature token with flying. (Activate only if this creature attacked this turn and only once each turn.)",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_5_5_dragon_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Boast": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 5/5 red Dragon creature token with flying. (Activate only if this creature attacked this turn and only once each turn.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "EffectZone": "Battlefield",
-        "ValidSpell": "Activated.Boast",
-        "Activator": "You",
-        "ValidCard": "Card",
-        "Description": "Boast abilities you activate cost {1} less to activate for each Dragon you control."
-      }
+      "description": "Boast abilities you activate cost {1} less to activate for each Dragon you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

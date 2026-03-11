@@ -2,41 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<2/Artifact>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to each opponent.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Artifact>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Rope Dart —",
-        "Defined": "Player.Opponent",
-        "SpellDescription": "CARDNAME deals 1 damage to each opponent."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Leap Strike — During your turn, CARDNAME has flying and first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying & First Strike",
-        "Affected": "Card.Self",
-        "Condition": "PlayerTurn",
-        "Description": "Leap Strike — During your turn, CARDNAME has flying and first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

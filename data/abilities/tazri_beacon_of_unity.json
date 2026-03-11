@@ -2,42 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 6,
-        "destination": ""
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2U 2B 2R 2G"
+        "cost": "2U 2B 2R 2G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "2",
-        "ChangeValid": "Card.Cleric,Card.Rogue,Card.Warrior,Card.Wizard,Card.Ally",
-        "Defined": "You",
-        "SpellDescription": "Look at the top six cards of your library. You may reveal up to two Cleric, Rogue, Warrior, and/or Ally cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
-        "RestRandomOrder": "True",
-        "StackDescription": "SpellDescription",
-        "ForceRevealToController": "True",
-        "Optional": "True"
-      }
+      "description": "Look at the top six cards of your library. You may reveal up to two Cleric, Rogue, Warrior, and/or Ally cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 6,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Amount": "X",
-        "Description": "This spell costs {1} less to cast for each creature in your party."
-      }
+      "description": "This spell costs {1} less to cast for each creature in your party.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

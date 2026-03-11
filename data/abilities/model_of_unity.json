@@ -2,35 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever players finish voting, you and each opponent who voted for a choice you voted for may scry 2.",
       "mode": "Vote",
-      "params": {
-        "List": "OppVotedSame",
-        "TriggerDescription": "Whenever players finish voting, you and each opponent who voted for a choice you voted for may scry 2.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigScry"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

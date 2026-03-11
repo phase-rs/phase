@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature",
-          "SubAbility": "DBPumpAll",
-          "ValidTgts": "Player",
-          "SpellDescription": "Tap all creatures target player controls. Those creatures don't untap during that player's next untap step."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "SubAbility": "DBPumpAll",
-        "ValidTgts": "Player",
-        "SpellDescription": "Tap all creatures target player controls. Those creatures don't untap during that player's next untap step."
-      }
+      "description": "Tap all creatures target player controls. Those creatures don't untap during that player's next untap step.",
+      "effect": {
+        "description": "Tap all creatures target player controls. Those creatures don't untap during that player's next untap step.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Battalion — Whenever CARDNAME and at least two other creatures attack, for each opponent, goad up to one target creature that player controls. Those creatures can't block this turn. (Until your next turn, they attack each combat if able and attack a player other than you if able.)",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Creature.attacking+Other",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGoad",
-        "PresentCompare": "GE2",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, for each opponent, goad up to one target creature that player controls. Those creatures can't block this turn. (Until your next turn, they attack each combat if able and attack a player other than you if able.)",
-        "NoResolvingCheck": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

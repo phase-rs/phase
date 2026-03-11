@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, put a +1/+1 counter on it.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter"
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

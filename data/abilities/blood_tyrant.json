@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, each player loses 1 life. Put a +1/+1 counter on CARDNAME for each 1 life lost this way.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, each player loses 1 life. Put a +1/+1 counter on CARDNAME for each 1 life lost this way.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player loses the game, put five +1/+1 counters on CARDNAME.",
       "mode": "LosesGame",
-      "params": {
-        "Execute": "TrigCounter",
-        "TriggerDescription": "Whenever a player loses the game, put five +1/+1 counters on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

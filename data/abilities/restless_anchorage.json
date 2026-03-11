@@ -2,73 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W U",
-        "params": {
-          "SpellDescription": "Add {W} or {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {U}."
-      }
+      "description": "Add {W} or {U}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 W U",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 2/3 white and blue Bird creature with flying. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Bird"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 W U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "Colors": "White,Blue",
-        "OverwriteColors": "True",
-        "Keywords": "Flying",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 2/3 white and blue Bird creature with flying. It's still a land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, create a Map token.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped."
+      "description": "Whenever CARDNAME attacks, create a Map token.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

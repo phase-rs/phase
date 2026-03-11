@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Human you control enters, creatures you control get +1/+1 and gain vigilance until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Human.Other+YouCtrl",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME or another Human you control enters, creatures you control get +1/+1 and gain vigilance until end of turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Human.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

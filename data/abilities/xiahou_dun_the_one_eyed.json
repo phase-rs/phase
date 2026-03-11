@@ -2,35 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Black+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Return target black card from your graveyard to your hand. Activate only during your turn, before attackers are declared.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target black card from your graveyard to your hand. Activate only during your turn, before attackers are declared.",
-        "ActivationFirstCombat": "True",
-        "PlayerTurn": "True",
-        "TgtPrompt": "Select a target black card from your graveyard",
-        "ChangeNum": "1",
-        "ActivationPhases": "Upkeep->BeginCombat"
-      }
+      "target_prompt": "Select a target black card from your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

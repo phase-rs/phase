@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PutCardToLibFromHand<1/0/Card>",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PutCardToLibFromHand<1/0/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return CARDNAME to its owner's hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

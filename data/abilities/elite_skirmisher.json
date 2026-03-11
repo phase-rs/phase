@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, you may tap target creature.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, you may tap target creature.",
-        "TargetsValid": "Card.Self",
-        "Execute": "TrigTap",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

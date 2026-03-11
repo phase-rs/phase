@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Creatures your opponents control have base toughness 1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures your opponents control have base toughness 1.",
-        "SetToughness": "1",
-        "Affected": "Creature.OppCtrl"
-      }
+      "modifications": [
+        {
+          "type": "SetToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

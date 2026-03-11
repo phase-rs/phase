@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Adapt": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on CARDNAME, you may create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
       "mode": "CounterAddedOnce",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, you may create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
-        "TriggerZones": "Battlefield",
-        "CounterType": "P1P1",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

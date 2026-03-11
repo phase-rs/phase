@@ -2,35 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature."
-      }
+      "description": "Destroy target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {3} less to cast if it targets a tapped creature.",
-        "ValidTarget": "Creature.tapped",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "3",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {3} less to cast if it targets a tapped creature.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

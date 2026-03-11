@@ -2,40 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "CARDNAME deals 1 damage to each opponent.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player.Opponent",
-        "SpellDescription": "CARDNAME deals 1 damage to each opponent."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a colorless spell, untap CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a colorless spell, untap CARDNAME.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Colorless",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

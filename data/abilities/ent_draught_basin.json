@@ -2,38 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerEQX"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put a +1/+1 counter on target creature with power X. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on target creature with power X. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Select target creature with power X"
-      }
+      "target_prompt": "Select target creature with power X"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

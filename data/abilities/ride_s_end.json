@@ -2,38 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Vehicle"
-        }
-      },
       "cost": null,
+      "description": "Exile target creature or Vehicle.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature,Vehicle",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target creature or Vehicle.",
-        "TgtPrompt": "Select target creature or enchantment"
-      }
+      "target_prompt": "Select target creature or enchantment"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {3} less to cast if it targets a tapped permanent.",
-        "Amount": "3",
-        "ValidTarget": "Permanent.tapped",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {3} less to cast if it targets a tapped permanent.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

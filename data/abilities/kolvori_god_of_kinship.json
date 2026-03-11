@@ -1,83 +1,95 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 6,
-            "destination": ""
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 G"
+                "cost": "1 G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Optional": "True",
-            "SpellDescription": "Look at the top six cards of your library. You may reveal a legendary creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-            "RestRandomOrder": "True",
-            "ChangeValid": "Creature.Legendary",
-            "ChangeNum": "1"
-          }
+          "description": "Look at the top six cards of your library. You may reveal a legendary creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+          "effect": {
+            "count": 6,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "type": "SelfRef"
+          },
+          "condition": {
+            "filter": {
+              "card_type": "Creature",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Legendary"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "IsPresent"
+          },
+          "description": "As long as you control three or more legendary creatures, NICKNAME gets +4/+2 and has vigilance.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Card.Self",
-            "AddToughness": "2",
-            "AddPower": "4",
-            "IsPresent": "Creature.Legendary+YouCtrl",
-            "PresentCompare": "GE3",
-            "AddKeyword": "Vigilance",
-            "Description": "As long as you control three or more legendary creatures, NICKNAME gets +4/+2 and has vigilance."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 4
+            },
+            {
+              "type": "AddToughness",
+              "value": 2
+            },
+            {
+              "keyword": "Vigilance",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "RestrictValid": "Spell.Creature+ChosenType,Spell.Creature+Legendary",
-              "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell of the chosen type or a legendary creature spell."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RestrictValid": "Spell.Creature+ChosenType,Spell.Creature+Legendary",
-            "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell of the chosen type or a legendary creature spell."
-          }
+          "description": "Add {G}. Spend this mana only to cast a creature spell of the chosen type or a legendary creature spell.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

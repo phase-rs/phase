@@ -1,29 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Cat.!token+Other+YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever NICKNAME or another nontoken Cat you control enters, create a 1/1 white Cat creature token.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Cat",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Cats you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Cats you control get +1/+1.",
-        "AddPower": "1",
-        "Affected": "Cat.Other+YouCtrl",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever NICKNAME or another nontoken Cat you control enters, create a 1/1 white Cat creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Cat.!token"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

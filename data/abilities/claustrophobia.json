@@ -1,32 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature."
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.AttachedBy",
-        "Layer": "CantHappen",
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step."
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

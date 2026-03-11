@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, gain control of target nonland permanent for as long as CARDNAME remains on the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, gain control of target nonland permanent for as long as CARDNAME remains on the battlefield."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

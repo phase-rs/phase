@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, flip a coin. If you lose the flip, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "Execute": "TrigFlipUpkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, flip a coin. If you lose the flip, sacrifice CARDNAME."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player casts a spell, that player flips a coin. If they lose the flip, counter that spell.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card",
-        "Execute": "TrigFlipYouCast",
-        "TriggerDescription": "Whenever a player casts a spell, that player flips a coin. If they lose the flip, counter that spell."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

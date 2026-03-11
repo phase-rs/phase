@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Put onto the battlefield under your control all creature cards in all graveyards that were put there from the battlefield this turn.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "GainControl": "True",
-        "SpellDescription": "Put onto the battlefield under your control all creature cards in all graveyards that were put there from the battlefield this turn.",
-        "Defined": "ValidGraveyard Creature.ThisTurnEnteredFrom_Battlefield"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You can't choose an untapped creature as this spell's target as you cast it.",
+      "effect_zone": "Stack",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Creature.untapped",
-        "EffectZone": "Stack",
-        "ValidSource": "Spell.Self",
-        "Description": "You can't choose an untapped creature as this spell's target as you cast it."
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You control enchanted creature.",
-        "GainControl": "You",
-        "Affected": "Card.EnchantedBy"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,42 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature and put X sleep counters on it.",
-        "Execute": "TrigTap",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, remove a sleep counter from that creature.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.EnchantedController",
-        "Execute": "TrigRemoveCounter"
+      "description": "Enchanted creature doesn't untap during its controller's untap step if it has a sleep counter on it.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.AttachedBy+counters_GE1_SLEEP",
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step if it has a sleep counter on it."
+      "description": "When CARDNAME enters, tap enchanted creature and put X sleep counters on it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
+    },
+    {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, remove a sleep counter from that creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

@@ -2,54 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other+nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<2/OIL>"
+            "cost": "SubCounter<2/OIL>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile another target nonland permanent. Its controller draws two cards.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Land"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile another target nonland permanent. Its controller draws two cards.",
-        "TgtPrompt": "Select another target nonland permanent",
-        "SubAbility": "DBDraw"
-      }
+      "target_prompt": "Select another target nonland permanent"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever two or more creatures attack, put an oil counter on CARDNAME.",
       "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackersAmount": "GE2",
-        "AttackingPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Creature",
-        "Execute": "TrigCounter",
-        "TriggerDescription": "Whenever two or more creatures attack, put an oil counter on CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

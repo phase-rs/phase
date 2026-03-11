@@ -2,41 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add three mana of any one color. Activate only as an instant.",
-          "InstantSpeed": "True",
-          "Amount": "3"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<0/Hand>"
+            "cost": "Discard<0/Hand>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add three mana of any one color. Activate only as an instant.",
-        "InstantSpeed": "True",
-        "Amount": "3"
-      }
+      "description": "Add three mana of any one color. Activate only as an instant.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

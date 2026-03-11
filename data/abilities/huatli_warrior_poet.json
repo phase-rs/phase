@@ -2,76 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You gain life equal to the greatest power among creatures you control."
-      }
+      "description": "You gain life equal to the greatest power among creatures you control.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Create a 3/3 green Dinosaur creature token with trample.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_dinosaur_trample",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 3/3 green Dinosaur creature token with trample.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals X damage divided as you choose among any number of target creatures. Creatures dealt damage this way can't block this turn.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of target creatures. Creatures dealt damage this way can't block this turn.",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "TargetMax": "X",
-        "TargetMin": "0",
-        "DividedAsYouChoose": "X",
-        "SubAbility": "DBNoBlock",
-        "TgtPrompt": "Select any number of target creatures",
-        "RememberDamaged": "True"
-      }
+      "target_prompt": "Select any number of target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

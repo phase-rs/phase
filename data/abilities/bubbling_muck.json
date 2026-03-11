@@ -2,24 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Until end of turn, whenever a player taps a Swamp for mana, that player adds an additional {B}.",
-          "Triggers": "SwampTrigger"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, whenever a player taps a Swamp for mana, that player adds an additional {B}.",
-        "Triggers": "SwampTrigger"
-      }
+      "description": "Until end of turn, whenever a player taps a Swamp for mana, that player adds an additional {B}.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

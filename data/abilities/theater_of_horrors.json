@@ -2,54 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to target opponent or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent,Planeswalker"
-        }
+          "card_type": "Opponent,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 1 damage to target opponent or planeswalker.",
-        "TgtPrompt": "Select target opponent or planeswalker"
-      }
+      "target_prompt": "Select target opponent or planeswalker"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "During your turn, if an opponent lost life this turn, you may play lands and cast spells from among cards exiled with CARDNAME.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, exile the top card of your library.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Condition": "PlayerTurn",
-        "CheckSVar": "X",
-        "Affected": "Card.ExiledWithSource",
-        "Description": "During your turn, if an opponent lost life this turn, you may play lands and cast spells from among cards exiled with CARDNAME.",
-        "AffectedZone": "Exile"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,54 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player discards a card.",
           "effect": {
-            "type": "Discard",
             "count": 1,
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "TgtChoose",
-            "SpellDescription": "Target player discards a card."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Land"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy target land."
-          }
+          "description": "Destroy target land.",
+          "effect": {
+            "target": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

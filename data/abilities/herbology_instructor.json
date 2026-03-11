@@ -1,68 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
-              "Mode": "Transform",
-              "SorcerySpeed": "True",
-              "AILogic": "Always",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "6 BP"
+            "cost": "6 BP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
-            "Mode": "Transform",
-            "SorcerySpeed": "True",
-            "AILogic": "Always",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you gain 3 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, you gain 3 life.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigGainLife",
-            "Destination": "Battlefield",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature transforms into CARDNAME, target creature an opponent controls gets -0/-X until end of turn, where X is CARDNAME's power.",
           "mode": "Transformed",
-          "params": {
-            "Execute": "TrigPump",
-            "TriggerDescription": "When this creature transforms into CARDNAME, target creature an opponent controls gets -0/-X until end of turn, where X is CARDNAME's power.",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

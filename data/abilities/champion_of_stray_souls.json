@@ -2,68 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 B B"
+            "cost": "3 B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return X target creatures from your graveyard to the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{3}{B}{B}, {T}, Sacrifice X other creatures:",
-        "TargetMin": "X",
-        "TgtPrompt": "Select X target creature cards from your graveyard",
-        "TargetMax": "X",
-        "SpellDescription": "Return X target creatures from your graveyard to the battlefield.",
-        "AIMinTgts": "3"
-      }
+      "target_prompt": "Select X target creature cards from your graveyard"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 B B",
+        "type": "Mana"
+      },
+      "description": "Put CARDNAME on top of your library from your graveyard.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Library",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Put CARDNAME on top of your library from your graveyard.",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,36 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks, put a +1/+1 counter on it. Then if it has three or more +1/+1 counters on it, sacrifice CARDNAME.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted creature attacks, put a +1/+1 counter on it. Then if it has three or more +1/+1 counters on it, sacrifice CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When you sacrifice CARDNAME, you gain 10 life.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerDescription": "When you sacrifice CARDNAME, you gain 10 life.",
-        "ValidPlayer": "You",
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AE",
-        "Affected": "Creature.AttachedBy"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

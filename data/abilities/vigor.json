@@ -1,31 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library."
-      }
+      "description": "If damage would be dealt to another creature you control, prevent that damage. Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True",
-        "ExecuteMode": "PerTarget",
-        "Description": "If damage would be dealt to another creature you control, prevent that damage. Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
-        "ValidTarget": "Creature.YouCtrl+Other"
+      "description": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

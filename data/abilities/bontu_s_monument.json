@@ -1,30 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a creature spell, each opponent loses 1 life and you gain 1 life.",
-        "ValidCard": "Creature",
-        "Execute": "TrigDrain",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Creature.Black",
-        "Activator": "You",
-        "Type": "Spell",
-        "Amount": "1",
-        "Description": "Black creature spells you cast cost {1} less to cast."
-      }
+      "description": "Black creature spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a creature spell, each opponent loses 1 life and you gain 1 life.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

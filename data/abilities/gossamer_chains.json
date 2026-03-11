@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature.attacking+unblocked",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "Prevent all combat damage that would be dealt by target unblocked creature this turn.",
-          "TgtPrompt": "Select target unblocked creature",
-          "ReplacementEffects": "RPrevent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Return<1/CARDNAME>"
+        "cost": "Return<1/CARDNAME>",
+        "type": "Mana"
       },
+      "description": "Prevent all combat damage that would be dealt by target unblocked creature this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature.attacking+unblocked",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "Prevent all combat damage that would be dealt by target unblocked creature this turn.",
-        "TgtPrompt": "Select target unblocked creature",
-        "ReplacementEffects": "RPrevent"
-      }
+      "target_prompt": "Select target unblocked creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

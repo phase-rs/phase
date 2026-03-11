@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have shroud.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Affected": "Sliver",
-        "Description": "All Slivers have shroud."
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

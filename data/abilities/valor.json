@@ -1,19 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is in your graveyard and you control a Plains, creatures you control have first strike.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "First Strike",
-        "IsPresent": "Plains.YouCtrl",
-        "Description": "As long as CARDNAME is in your graveyard and you control a Plains, creatures you control have first strike.",
-        "EffectZone": "Graveyard"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

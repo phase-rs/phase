@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "You may put a planeswalker card from your hand onto the battlefield. Sacrifice it at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may put a planeswalker card from your hand onto the battlefield. Sacrifice it at the beginning of the next end step.",
-        "AtEOT": "Sacrifice",
-        "ChangeType": "Planeswalker.YouOwn",
-        "AILogic": "BeforeCombat",
-        "Optional": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

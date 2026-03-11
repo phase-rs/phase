@@ -2,51 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "All",
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "Defined": "You",
-        "SpellDescription": "Exile the top card of your library. You may play that card this turn."
-      }
+      "description": "Exile the top card of your library. You may play that card this turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another nontoken Vampire you control dies, create a Treasure token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self,Vampire.Other+!token+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another nontoken Vampire you control dies, create a Treasure token.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Vampire.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

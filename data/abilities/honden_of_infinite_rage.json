@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME deals damage to any target equal to the number of Shrines you control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals damage to any target equal to the number of Shrines you control.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

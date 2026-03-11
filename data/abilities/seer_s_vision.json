@@ -2,40 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "Look at target player's hand and choose a card from it. That player discards that card. Activate only as a sorcery.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at target player's hand and choose a card from it. That player discards that card. Activate only as a sorcery.",
-        "Mode": "LookYouChoose",
-        "SorcerySpeed": "True"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "Player",
-        "Description": "Your opponents play with their hands revealed.",
-        "AffectedZone": "Hand",
-        "Affected": "Card.OppOwn"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Your opponents play with their hands revealed.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

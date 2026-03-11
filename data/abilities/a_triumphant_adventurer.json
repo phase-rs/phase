@@ -1,28 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, venture into the dungeon.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "DBVenture"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has first strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "During your turn, CARDNAME has first strike.",
-        "Affected": "Card.Self",
-        "Condition": "PlayerTurn",
-        "AddKeyword": "First Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, venture into the dungeon.",
+      "mode": "Attacks",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

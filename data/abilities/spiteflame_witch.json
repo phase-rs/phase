@@ -2,24 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B R"
+        "cost": "B R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player loses 1 life.",
-        "Defined": "Player"
-      }
+      "description": "Each player loses 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

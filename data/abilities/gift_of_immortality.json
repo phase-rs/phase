@@ -1,19 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When enchanted creature dies, return that card to the battlefield under its owner's control. Return CARDNAME to the battlefield attached to that creature at the beginning of the next end step.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.EnchantedBy",
-        "TriggerDescription": "When enchanted creature dies, return that card to the battlefield under its owner's control. Return CARDNAME to the battlefield attached to that creature at the beginning of the next end step."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

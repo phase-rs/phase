@@ -1,46 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, gain control of target land that player controls. Untap it.",
-        "Execute": "TrigControl",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
+      "description": "Damage can't be prevented.",
       "mode": {
         "Other": "CantPreventDamage"
-      },
-      "params": {
-        "Description": "Damage can't be prevented."
       }
     },
     {
-      "mode": "CantGainLife",
-      "params": {
-        "Description": "Players can't gain life.",
-        "ValidPlayer": "Player"
-      }
+      "description": "Players can't gain life.",
+      "mode": "CantGainLife"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidSA": "Spell"
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, gain control of target land that player controls. Untap it.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "faces": []
+  ]
 }

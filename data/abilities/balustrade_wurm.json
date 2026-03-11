@@ -2,42 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 G G",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield with a finality counter on it. Activate only if there are four or more card types among cards in your graveyard and only as a sorcery.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "Activation": "Delirium",
-        "WithCountersType": "FINALITY",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield with a finality counter on it. Activate only if there are four or more card types among cards in your graveyard and only as a sorcery.",
-        "PrecostDesc": "Delirium —",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

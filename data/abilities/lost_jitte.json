@@ -2,37 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "DBUntap,DBCantBlock,DBPutCounter"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/CHARGE>"
+        "cost": "SubCounter<1/CHARGE>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DBUntap,DBCantBlock,DBPutCounter"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage, put a charge counter on CARDNAME.",
       "mode": "DamageDealtOnce",
-      "params": {
-        "ValidSource": "Creature.EquippedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever equipped creature deals combat damage, put a charge counter on CARDNAME.",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

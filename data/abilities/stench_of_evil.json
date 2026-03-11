@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Plains",
-        "SpellDescription": "Destroy all Plains. For each land destroyed this way, CARDNAME deals 1 damage to that land's controller unless they pay {2}.",
-        "SubAbility": "DBPay",
-        "RememberDestroyed": "True"
-      }
+      "description": "Destroy all Plains. For each land destroyed this way, CARDNAME deals 1 damage to that land's controller unless they pay {2}.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

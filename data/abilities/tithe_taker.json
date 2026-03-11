@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "ValidSpell": "Spell,Activated.!ManaAbility",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, spells your opponents cast cost {1} more to cast and abilities your opponents activate cost {1} more to activate unless they're mana abilities.",
-        "ValidCard": "Card",
-        "Activator": "Opponent",
-        "Amount": "1"
-      }
+      "description": "During your turn, spells your opponents cast cost {1} more to cast and abilities your opponents activate cost {1} more to activate unless they're mana abilities.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

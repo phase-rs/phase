@@ -2,23 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Gain control of all permanents you own. (This effect lasts indefinitely.)",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AllValid": "Permanent.YouOwn",
-        "SpellDescription": "Gain control of all permanents you own. (This effect lasts indefinitely.)"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

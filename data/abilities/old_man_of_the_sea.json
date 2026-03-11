@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerLEX"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Gain control of target creature with power less than or equal to CARDNAME's power for as long as CARDNAME remains tapped and that creature's power remains less than or equal to CARDNAME's power.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target creature with power less than or equal to CARDNAME's power for as long as CARDNAME remains tapped and that creature's power remains less than or equal to CARDNAME's power.",
-        "TgtPrompt": "Select target creature with power less than or equal to CARDNAME's power",
-        "StaticCommandCheckSVar": "Y",
-        "LoseControl": "Untap,LeavesPlay,LoseControl,StaticCommandCheck",
-        "StaticCommandSVarCompare": "GTX"
-      }
+      "target_prompt": "Select target creature with power less than or equal to CARDNAME's power"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

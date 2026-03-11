@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Description": "Each creature with mana value of the chosen quality has haste.",
-        "Affected": "Creature.cmcChosenEvenOdd"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Each creature without mana value of the chosen quality enters tapped.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "Each creature without mana value of the chosen quality enters tapped.",
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.cmcNotChosenEvenOdd",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Each creature with mana value of the chosen quality has haste.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

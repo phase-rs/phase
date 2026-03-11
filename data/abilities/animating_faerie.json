@@ -1,46 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target noncreature artifact you control becomes a 0/0 artifact creature. Put four +1/+1 counters on it.",
+          "duration": "Permanent",
           "effect": {
-            "type": "Animate",
             "power": 0,
+            "target": {
+              "card_type": "Artifact",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Creature"
+                }
+              ],
+              "type": "Typed"
+            },
             "toughness": 0,
+            "type": "Animate",
             "types": [
               "Artifact",
               "Creature"
-            ],
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact.nonCreature+YouCtrl"
-            }
+            ]
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBPutCounter",
-            "Duration": "Permanent",
-            "SpellDescription": "Target noncreature artifact you control becomes a 0/0 artifact creature. Put four +1/+1 counters on it.",
-            "TgtPrompt": "Select target noncreature artifact"
-          }
+          "target_prompt": "Select target noncreature artifact"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

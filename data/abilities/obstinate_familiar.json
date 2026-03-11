@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "Optional": "True",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "AICheckSVar": "AIHandling",
-        "Description": "If you would draw a card, you may skip that draw instead.",
-        "Prevent": "True",
-        "AISVarCompare": "EQ0"
-      }
+      "description": "If you would draw a card, you may skip that draw instead.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,35 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "PlanarDice",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever you roll the planar die, draw a card.",
-        "Execute": "RolledDie"
-      }
-    },
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, reveal the top card of your planar deck. You may put it on the bottom of your planar deck."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Player",
-        "EffectZone": "Command",
-        "Description": "Players have no maximum hand size.",
-        "SetMaxHandSize": "Unlimited"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Players have no maximum hand size.",
+      "effect_zone": "Command",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you roll the planar die, draw a card.",
+      "mode": "PlanarDice",
+      "trigger_zones": [
+        "Command"
+      ]
+    },
+    {
+      "description": "Whenever chaos ensues, reveal the top card of your planar deck. You may put it on the bottom of your planar deck.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

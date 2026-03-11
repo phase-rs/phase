@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All Sliver creatures get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Sliver",
-        "AddPower": "1",
-        "Description": "All Sliver creatures get +1/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

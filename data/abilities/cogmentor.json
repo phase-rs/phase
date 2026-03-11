@@ -2,36 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AssembleContraption",
-        "params": {
-          "ValidTgts": "Contraption.YouCtrl",
-          "SpellDescription": "Reassemble target Contraption you control.",
-          "DefinedContraption": "Targeted",
-          "Reassemble": "True",
-          "AILogic": "AtOppEOT",
-          "TgtPrompt": "Select target Contraption you control"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4"
+        "cost": "4",
+        "type": "Mana"
       },
+      "description": "Reassemble target Contraption you control.",
+      "effect": {
+        "description": "Reassemble target Contraption you control.",
+        "name": "AssembleContraption",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Contraption.YouCtrl",
-        "SpellDescription": "Reassemble target Contraption you control.",
-        "DefinedContraption": "Targeted",
-        "Reassemble": "True",
-        "AILogic": "AtOppEOT",
-        "TgtPrompt": "Select target Contraption you control"
-      }
+      "target_prompt": "Select target Contraption you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

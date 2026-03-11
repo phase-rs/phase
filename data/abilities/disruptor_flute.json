@@ -1,28 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.NamedCard",
-        "EffectZone": "Battlefield",
-        "Amount": "3",
-        "Description": "Spells with the chosen name cost {3} more to cast.",
-        "Activator": "Player"
-      }
+      "description": "Spells with the chosen name cost {3} more to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "Description": "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
-        "ValidSA": "Activated.!ManaAbility",
-        "ValidCard": "Card.NamedCard"
-      }
+      "description": "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

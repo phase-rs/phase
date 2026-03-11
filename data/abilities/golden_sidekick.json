@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, a random creature card in your hand perpetually gets +X/+X, where X is the amount of life you gained.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigChoose",
-        "TriggerDescription": "Whenever you gain life, a random creature card in your hand perpetually gets +X/+X, where X is the amount of life you gained."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

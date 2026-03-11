@@ -2,43 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "ValidCards": "Creature.StrictlyOther",
-          "CounterType": "M1M1",
-          "SpellDescription": "Put a -1/-1 counter on each other creature.",
-          "CounterNum": "1",
-          "IsCurse": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/M1M1>"
+            "cost": "SubCounter<1/M1M1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.StrictlyOther",
-        "CounterType": "M1M1",
-        "SpellDescription": "Put a -1/-1 counter on each other creature.",
-        "CounterNum": "1",
-        "IsCurse": "True"
-      }
+      "description": "Put a -1/-1 counter on each other creature.",
+      "effect": {
+        "description": "Put a -1/-1 counter on each other creature.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,86 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "TargetMin": "0",
-          "TargetMax": "1",
-          "TgtPrompt": "Select up to one target artifact token you control",
-          "ValidTgts": "Artifact.YouCtrl+token",
-          "SubAbility": "DBMill",
-          "SpellDescription": "Create a token that's a copy of up to one target artifact token you control. Mill two cards."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Create a token that's a copy of up to one target artifact token you control. Mill two cards.",
+      "effect": {
+        "description": "Create a token that's a copy of up to one target artifact token you control. Mill two cards.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TgtPrompt": "Select up to one target artifact token you control",
-        "ValidTgts": "Artifact.YouCtrl+token",
-        "SubAbility": "DBMill",
-        "SpellDescription": "Create a token that's a copy of up to one target artifact token you control. Mill two cards."
-      }
+      "target_prompt": "Select up to one target artifact token you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Defined": "Exiled",
-          "AddTypes": "Artifact",
-          "SpellDescription": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 W U B"
+            "cost": "1 W U B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Artifact;Creature/artifact or creature card>"
+            "cost": "ExileFromGrave<1/Artifact;Creature/artifact or creature card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Exiled",
-        "AddTypes": "Artifact",
-        "SpellDescription": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "description": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
+      "effect": {
+        "description": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

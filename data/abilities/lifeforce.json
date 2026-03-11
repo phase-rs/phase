@@ -2,28 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Black"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G G"
+        "cost": "G G",
+        "type": "Mana"
       },
+      "description": "Counter target black spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell",
-        "SpellDescription": "Counter target black spell."
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

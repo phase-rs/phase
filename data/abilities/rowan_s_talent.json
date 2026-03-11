@@ -1,29 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AbilityCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Planeswalker.EnchantedBy+inRealZoneBattlefield",
-        "TriggerDescription": "Whenever you activate a loyalty ability of enchanted planeswalker, copy that ability. You may choose new targets for the copy.",
-        "Execute": "TrigCopyAbility",
-        "ValidSA": "Activated.Loyalty"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Planeswalker",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted planeswalker has \"[+1]: Up to one target creature gets +2/+0 and gains first strike and trample until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Planeswalker.EnchantedBy",
-        "AddAbility": "RowanPlus",
-        "Description": "Enchanted planeswalker has \"[+1]: Up to one target creature gets +2/+0 and gains first strike and trample until end of turn.\""
-      }
+      "modifications": [
+        {
+          "ability": "RowanPlus",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you activate a loyalty ability of enchanted planeswalker, copy that ability. You may choose new targets for the copy.",
+      "mode": "AbilityCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Planeswalker",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

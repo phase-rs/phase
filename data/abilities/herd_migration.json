@@ -2,59 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Domain — Create a 3/3 green Beast creature token for each basic land type among lands you control.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_beast",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "X",
-        "SpellDescription": "Domain — Create a 3/3 green Beast creature token for each basic land type among lands you control.",
-        "TokenOwner": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle. You gain 3 life.",
-        "ChangeTypeDesc": "basic land",
-        "ChangeType": "Land.Basic",
-        "ActivationZone": "Hand",
-        "SubAbility": "DBGainLife"
-      }
+      "description": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle. You gain 3 life.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

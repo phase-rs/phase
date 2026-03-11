@@ -2,48 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "BRIBERY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouDontCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W U"
+            "cost": "W U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put a bribery counter on target creature you don't control. Its controller draws a card.",
+      "effect": {
+        "count": 1,
+        "counter_type": "BRIBERY",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Put a bribery counter on target creature you don't control. Its controller draws a card.",
-        "TgtPrompt": "Select target creature you don't control."
-      }
+      "target_prompt": "Select target creature you don't control."
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with bribery counters on them can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "Creatures with bribery counters on them can't attack or block.",
-        "ValidCard": "Creature.counters_GE1_BRIBERY"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

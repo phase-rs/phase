@@ -2,26 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment,Creature.withFlying"
-        }
-      },
       "cost": null,
+      "description": "Exile target artifact, enchantment or creature with flying.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Enchantment,Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact, enchantment or creature with flying",
-        "SpellDescription": "Exile target artifact, enchantment or creature with flying."
-      }
+      "target_prompt": "Select target artifact, enchantment or creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,37 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Library"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player looks at the top three cards of their library, puts one of them back on top of their library, then exiles the rest.",
-        "LibraryPosition": "0",
-        "Choser": "Targeted",
-        "ChangeNum": "1",
-        "DestinationZone2": "Exile"
-      }
+      "description": "Target player looks at the top three cards of their library, puts one of them back on top of their library, then exiles the rest.",
+      "effect": {
+        "count": 3,
+        "destination": "Library",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

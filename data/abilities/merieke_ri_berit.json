@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LoseControl": "LeavesPlay,LoseControl",
-        "SpellDescription": "Gain control of target creature for as long as you control CARDNAME. When CARDNAME leaves the battlefield or becomes untapped, destroy that creature. It can't be regenerated.",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Gain control of target creature for as long as you control CARDNAME. When CARDNAME leaves the battlefield or becomes untapped, destroy that creature. It can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME doesn't untap during your untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Description": "CARDNAME doesn't untap during your untap step.",
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

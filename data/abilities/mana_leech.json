@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Tap target land. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Tap target land. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

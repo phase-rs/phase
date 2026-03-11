@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted player's upkeep, that player exiles two cards from their graveyard.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.EnchantedBy",
-        "TriggerDescription": "At the beginning of enchanted player's upkeep, that player exiles two cards from their graveyard.",
-        "Execute": "TrigExile",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

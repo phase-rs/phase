@@ -2,86 +2,74 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "GW",
+        "type": "Mana"
+      },
+      "description": "This creature becomes a Kithkin Scout with base power and toughness 2/3.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Scout"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "GW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "This creature becomes a Kithkin Scout with base power and toughness 2/3.",
-        "RemoveCreatureTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 GW GW",
+        "type": "Mana"
+      },
+      "description": "If this creature is a Scout, it becomes a Kithkin Soldier with base power and toughness 4/5.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 5,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Soldier"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 GW GW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "RemoveCreatureTypes": "True",
-        "ConditionPresent": "Card.Self+Scout",
-        "SpellDescription": "If this creature is a Scout, it becomes a Kithkin Soldier with base power and toughness 4/5."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 GW GW GW",
+        "type": "Mana"
+      },
+      "description": "If this creature is a Soldier, it becomes a Kithkin Avatar with base power and toughness 7/8 and protection from each of your opponents.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 7,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 8,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Avatar"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 GW GW GW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "ConditionPresent": "Card.Self+Soldier",
-        "Duration": "Permanent",
-        "SpellDescription": "If this creature is a Soldier, it becomes a Kithkin Avatar with base power and toughness 7/8 and protection from each of your opponents.",
-        "Keywords": "Protection:Player.Opponent:each of your opponents"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

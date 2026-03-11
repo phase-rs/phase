@@ -2,24 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonCreature"
-        }
-      },
       "cost": null,
+      "description": "Destroy target noncreature permanent.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature permanent",
-        "SpellDescription": "Destroy target noncreature permanent."
-      }
+      "target_prompt": "Select target noncreature permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

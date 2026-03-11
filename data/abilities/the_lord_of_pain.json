@@ -1,27 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts their first spell each turn, choose another target player. CARDNAME deals damage equal to that spell's mana value to the chosen player.",
-        "ValidActivatingPlayer": "Player",
-        "ActivatorThisTurnCast": "EQ1",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantGainLife",
-      "params": {
-        "ValidPlayer": "Player.Opponent",
-        "Description": "Your opponents can't gain life."
-      }
+      "description": "Your opponents can't gain life.",
+      "mode": "CantGainLife"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a player casts their first spell each turn, choose another target player. CARDNAME deals damage equal to that spell's mana value to the chosen player.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

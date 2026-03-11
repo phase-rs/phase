@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose target creature.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [],
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target creature.",
-        "SubAbility": "DBDelayedTrigger",
-        "StackDescription": "When {c:Targeted} dies this turn, search your library for a creature card with lesser mana value, put it onto the battlefield tapped, then shuffle."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

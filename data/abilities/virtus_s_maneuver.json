@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AssignGroup",
-        "params": {
-          "AILogic": "FriendOrFoe",
-          "Choices": "DBToHand,DBSacrifice",
-          "SpellDescription": "For each player, choose friend or foe. Each friend returns a creature card from their graveyard to their hand. Each foe sacrifices a creature they control.",
-          "Defined": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "FriendOrFoe",
-        "Choices": "DBToHand,DBSacrifice",
-        "SpellDescription": "For each player, choose friend or foe. Each friend returns a creature card from their graveyard to their hand. Each foe sacrifices a creature they control.",
-        "Defined": "Player"
-      }
+      "description": "For each player, choose friend or foe. Each friend returns a creature card from their graveyard to their hand. Each foe sacrifices a creature they control.",
+      "effect": {
+        "description": "For each player, choose friend or foe. Each friend returns a creature card from their graveyard to their hand. Each foe sacrifices a creature they control.",
+        "name": "AssignGroup",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

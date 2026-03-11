@@ -2,47 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "CloneTarget": "Enchanted",
-          "Duration": "UntilEndOfTurn",
-          "Defined": "ExiledWith",
-          "PumpKeywords": "Haste",
-          "SpellDescription": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
-          "AddTypes": "Land"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CloneTarget": "Enchanted",
-        "Duration": "UntilEndOfTurn",
-        "Defined": "ExiledWith",
-        "PumpKeywords": "Haste",
-        "SpellDescription": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
-        "AddTypes": "Land"
-      }
+      "description": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
+      "duration": "UntilEndOfTurn",
+      "effect": {
+        "description": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card, then draft a card from CARDNAME's spellbook and exile it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "FreeCard",
-        "TriggerDescription": "When CARDNAME enters, draw a card, then draft a card from CARDNAME's spellbook and exile it."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

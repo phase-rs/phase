@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Rogue Trader — Whenever CARDNAME deals combat damage to a player, you may have that player return target permanent card from their graveyard to their hand. If you do, that player chooses a permanent card in your graveyard, then you put it onto the battlefield under your control.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "OptionalDecider": "You",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Rogue Trader — Whenever CARDNAME deals combat damage to a player, you may have that player return target permanent card from their graveyard to their hand. If you do, that player chooses a permanent card in your graveyard, then you put it onto the battlefield under your control."
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,53 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap target land.",
-        "AILogic": "PoolExtraMana"
-      }
+      "description": "Untap target land.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddOrRemoveCounter",
-        "params": {
-          "ValidTgts": "Battle",
-          "StackDescription": "REP Choose target battle_{p:You} chooses {c:Targeted} & remove_{p:You} removes & put_{p:You} puts & . Activate only as a sorcery._.",
-          "SpellDescription": "Choose target battle. If an opponent protects it, remove a defense counter from it. Otherwise, put a defense counter on it. Activate only as a sorcery.",
-          "CounterType": "DEFENSE",
-          "RemoveConditionSVar": "Targeted$Valid Battle.OppProtect",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Battle",
-        "StackDescription": "REP Choose target battle_{p:You} chooses {c:Targeted} & remove_{p:You} removes & put_{p:You} puts & . Activate only as a sorcery._.",
-        "SpellDescription": "Choose target battle. If an opponent protects it, remove a defense counter from it. Otherwise, put a defense counter on it. Activate only as a sorcery.",
-        "CounterType": "DEFENSE",
-        "RemoveConditionSVar": "Targeted$Valid Battle.OppProtect",
-        "SorcerySpeed": "True"
-      }
+      "description": "Choose target battle. If an opponent protects it, remove a defense counter from it. Otherwise, put a defense counter on it. Activate only as a sorcery.",
+      "effect": {
+        "description": "Choose target battle. If an opponent protects it, remove a defense counter from it. Otherwise, put a defense counter on it. Activate only as a sorcery.",
+        "name": "AddOrRemoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

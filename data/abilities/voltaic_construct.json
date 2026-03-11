@@ -2,27 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Untap target artifact creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap target artifact creature.",
-        "TgtPrompt": "Select target artifact creature"
-      }
+      "target_prompt": "Select target artifact creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

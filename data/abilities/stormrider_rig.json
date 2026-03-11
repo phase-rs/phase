@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a creature you control enters, you may attach CARDNAME to it.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigAttach",
-        "OptionalDecider": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+1.",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control enters, you may attach CARDNAME to it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

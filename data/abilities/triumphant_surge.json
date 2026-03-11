@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerGE4"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature with power 4 or greater. You gain 3 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with power 4 or greater",
-        "SubAbility": "NaturalLife",
-        "SpellDescription": "Destroy target creature with power 4 or greater. You gain 3 life."
-      }
+      "target_prompt": "Select target creature with power 4 or greater"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

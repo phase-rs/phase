@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "ChangeNum": "1",
-        "Mandatory": "True",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If the gift was promised, you may cast that card for as long as it remains exiled, and mana of any type can be spent to cast it.",
-        "StackDescription": "SpellDescription",
-        "Chooser": "You",
-        "IsCurse": "True",
-        "ChangeType": "Card.nonLand",
-        "DefinedPlayer": "Targeted"
-      }
+      "description": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If the gift was promised, you may cast that card for as long as it remains exiled, and mana of any type can be spent to cast it.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

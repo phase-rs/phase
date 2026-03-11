@@ -2,31 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap two other target permanents. Activate only as a sorcery and only once each turn.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "PrecostDesc": "Bigby's Hand —",
-        "TgtPrompt": "Select two other target permanents",
-        "TargetMax": "2",
-        "SpellDescription": "Untap two other target permanents. Activate only as a sorcery and only once each turn.",
-        "TargetMin": "2",
-        "ActivationLimit": "1"
-      }
+      "target_prompt": "Select two other target permanents"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

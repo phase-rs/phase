@@ -2,55 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
-        "TgtPrompt": "Select target noncreature artifact"
-      }
+      "target_prompt": "Select target noncreature artifact"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W B"
+        "cost": "W B",
+        "type": "Mana"
       },
+      "description": "Target artifact creature gains deathtouch and lifelink until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact creature",
-        "SpellDescription": "Target artifact creature gains deathtouch and lifelink until end of turn.",
-        "KW": "Deathtouch & Lifelink"
-      }
+      "target_prompt": "Select target artifact creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

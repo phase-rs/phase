@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked by a creature, gain control of that creature at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, gain control of that creature at end of combat.",
-        "ValidBlocker": "Creature",
-        "Execute": "DelTrig",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

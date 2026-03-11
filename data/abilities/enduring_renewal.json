@@ -1,40 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.YouOwn",
-        "TriggerDescription": "Whenever a creature is put into your graveyard from the battlefield, return it to your hand.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigEnduringBounce",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "If you would draw a card, reveal the top card of your library instead. If it's a creature card, put it into your graveyard. Otherwise, draw a card.",
+      "event": "Draw"
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Hand",
-        "MayLookAt": "Player",
-        "Description": "Play with your hand revealed.",
-        "Affected": "Card.YouOwn"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Play with your hand revealed.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "EnduringRevealTop",
-        "ValidPlayer": "You",
-        "Description": "If you would draw a card, reveal the top card of your library instead. If it's a creature card, put it into your graveyard. Otherwise, draw a card."
+      "description": "Whenever a creature is put into your graveyard from the battlefield, return it to your hand.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

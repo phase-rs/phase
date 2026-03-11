@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent exiles a creature they control and their graveyard.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.TargetedPlayerCtrl"
         ],
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent exiles a creature they control and their graveyard.",
-        "Mandatory": "True",
-        "SubAbility": "DBChangeZoneAll"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would roll one or more six-sided dice, instead roll them and you may exchange one result with this creature's base power or base toughness.",
       "event": {
         "Other": "RollDice"
-      },
-      "params": {
-        "ValidSides": "6",
-        "Description": "If you would roll one or more six-sided dice, instead roll them and you may exchange one result with this creature's base power or base toughness.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "ReplaceWith": "SwapRoll"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

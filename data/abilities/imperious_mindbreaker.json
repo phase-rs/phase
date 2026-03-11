@@ -1,18 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.PairedWith,Creature.Self+Paired",
-        "AddSVar": "AE & TrigMill",
-        "Description": "As long as CARDNAME is paired with another creature, each of those creatures has \"Whenever this creature attacks, each opponent mills cards equal to its toughness.\"",
-        "AddTrigger": "AttackTrig"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Creature.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, each of those creatures has \"Whenever this creature attacks, each opponent mills cards equal to its toughness.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

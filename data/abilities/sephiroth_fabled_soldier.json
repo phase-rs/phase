@@ -1,74 +1,87 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDraw1",
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDraw1",
-            "TriggerZones": "Battlefield",
-            "Secondary": "True"
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever another creature dies, target opponent loses 1 life and you gain 1 life. If this is the fourth time this ability has resolved this turn, transform Sephiroth.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigLoseLife",
-            "Origin": "Battlefield",
-            "TriggerDescription": "Whenever another creature dies, target opponent loses 1 life and you gain 1 life. If this is the fourth time this ability has resolved this turn, transform Sephiroth.",
-            "Destination": "Graveyard",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Creature.Other"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever NICKNAME attacks, you may sacrifice any number of other creatures. If you do, draw that many cards.",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDraw2"
+          "description": "Super Nova — As this creature transforms into CARDNAME, you get an emblem with \"Whenever a creature dies, target opponent loses 1 life and you gain 1 life.\"",
+          "event": {
+            "Other": "Transform"
+          },
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": {
-            "Other": "Transform"
-          },
-          "params": {
-            "ReplaceWith": "DBEffect",
-            "ValidCard": "Card.Self",
-            "Description": "Super Nova — As this creature transforms into CARDNAME, you get an emblem with \"Whenever a creature dies, target opponent loses 1 life and you gain 1 life.\""
+          "description": "Whenever NICKNAME attacks, you may sacrifice any number of other creatures. If you do, draw that many cards.",
+          "mode": "Attacks",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

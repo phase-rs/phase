@@ -1,36 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, create X 1/1 colorless Soldier artifact creature tokens, where X is the number of Soldiers you control.",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Opponent",
-        "ValidCard": "Card",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, your opponents can't cast spells or activate abilities of artifacts, creatures, or enchantments."
-      }
+      "description": "During your turn, your opponents can't cast spells or activate abilities of artifacts, creatures, or enchantments.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "ValidCard": "Artifact,Creature,Enchantment",
-        "Condition": "PlayerTurn",
-        "Activator": "Opponent"
-      }
+      "affected_zone": "Battlefield",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, create X 1/1 colorless Soldier artifact creature tokens, where X is the number of Soldiers you control.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

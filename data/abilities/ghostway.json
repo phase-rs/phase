@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Exile each creature you control. Return those cards to the battlefield under their owners' control at the beginning of the next end step.",
-        "ChangeType": "Creature.YouCtrl"
-      }
+      "description": "Exile each creature you control. Return those cards to the battlefield under their owners' control at the beginning of the next end step.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

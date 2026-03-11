@@ -1,27 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "You",
-        "Description": "You may look at the top card of your library any time.",
-        "AffectedZone": "Library",
-        "Affected": "Card.TopLibrary+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Description": "You may cast creature spells of the chosen type from the top of your library.",
-        "Affected": "Creature.ChosenType+TopLibrary+YouCtrl+nonLand",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          },
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may cast creature spells of the chosen type from the top of your library.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create two 2/2 white Astartes Warrior creature tokens with vigilance.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create two 2/2 white Astartes Warrior creature tokens with vigilance.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, attacking creatures you control gain flying until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, attacking creatures you control gain flying until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

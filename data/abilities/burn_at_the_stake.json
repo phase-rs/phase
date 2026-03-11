@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 R R R",
+            "type": "Mana"
+          },
+          {
+            "cost": "tapXType<X/Creature>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals damage to any target equal to three times the number of creatures tapped this way.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "Y"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 R R R"
-          },
-          {
-            "type": "Mana",
-            "cost": "tapXType<X/Creature>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "As an additional cost to cast this spell, tap any number of untapped creatures you control.",
-        "SpellDescription": "CARDNAME deals damage to any target equal to three times the number of creatures tapped this way."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,72 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Scry 2."
-      }
+      "description": "Scry 2.",
+      "effect": {
+        "count": 2,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top card of your library. If it's a land card or a creature card with mana value less than or equal to the number of loyalty counters on CARDNAME, you may put that card onto the battlefield.",
       "effect": {
-        "type": "Dig",
         "count": 1,
-        "destination": "Battlefield"
+        "destination": "Battlefield",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "AlwaysConfirm",
-        "LibraryPosition2": "0",
-        "Planeswalker": "True",
-        "Optional": "True",
-        "ChangeNum": "1",
-        "ChangeValid": "Land,Creature.cmcLEY",
-        "PromptToSkipOptionalAbility": "True",
-        "ForceRevealToController": "True",
-        "OptionalAbilityPrompt": "Would you like to put the permanent onto the battlefield?",
-        "SpellDescription": "Look at the top card of your library. If it's a land card or a creature card with mana value less than or equal to the number of loyalty counters on CARDNAME, you may put that card onto the battlefield."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap up to two target lands you control. They become 5/5 Elemental creatures with flying and haste until end of turn. They're still lands.",
-        "SubAbility": "Animate",
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "TargetMax": "2",
-        "Ultimate": "True"
-      }
+      "description": "Untap up to two target lands you control. They become 5/5 Elemental creatures with flying and haste until end of turn. They're still lands.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

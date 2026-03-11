@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, you may discard a card. If you do, draw a card.",
       "mode": "BecomesTarget",
-      "params": {
-        "Valiant": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, you may discard a card. If you do, draw a card.",
-        "ValidSource": "SpellAbility.YouCtrl",
-        "ValidTarget": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

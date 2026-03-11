@@ -2,48 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player loses 1 life and you gain 1 life.",
-        "SubAbility": "DBGainLife"
-      }
+      "description": "Target player loses 1 life and you gain 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Card.MultiColor",
-        "TriggerDescription": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
-        "Execute": "TrigReturn",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Graveyard"
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

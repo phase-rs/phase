@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a noncreature spell, each of that player's opponents may draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts a noncreature spell, each of that player's opponents may draw a card.",
-        "ValidCard": "Card.nonCreature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

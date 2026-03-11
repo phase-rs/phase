@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you tap a Swamp for mana, add an additional {B}.",
       "mode": "TapsForMana",
-      "params": {
-        "ValidCard": "Swamp",
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "TriggerDescription": "Whenever you tap a Swamp for mana, add an additional {B}.",
-        "Execute": "TrigMana",
-        "Activator": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Swamp",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,39 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/-1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": -1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature becomes the target of an ability of a land you control named Labyrinth of Skophos, you may have CARDNAME fight that creature. (Each deals damage equal to its power to the other.)",
       "mode": "BecomesTarget",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever another creature becomes the target of an ability of a land you control named Labyrinth of Skophos, you may have CARDNAME fight that creature. (Each deals damage equal to its power to the other.)",
-        "ValidSource": "Ability.Land+namedLabyrinth of Skophos+YouCtrl",
-        "Execute": "TrigFight",
-        "ValidTarget": "Creature.Other",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Ability",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

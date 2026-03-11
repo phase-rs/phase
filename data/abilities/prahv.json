@@ -1,35 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, you gain life equal to the number of cards in your hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "If you cast a spell this turn, you can't attack with creatures.",
-        "ValidCard": "Creature.ControlledBy You.castSpellThisTurn",
-        "EffectZone": "Command"
-      }
+      "description": "If you cast a spell this turn, you can't attack with creatures.",
+      "effect_zone": "Command",
+      "mode": "CantAttack"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "EffectZone": "Command",
-        "Description": "If you attacked with creatures this turn, you can't cast spells.",
-        "ValidCard": "Card",
-        "Caster": "You.attackedWithCreaturesThisTurn"
-      }
+      "description": "If you attacked with creatures this turn, you can't cast spells.",
+      "effect_zone": "Command",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, you gain life equal to the number of cards in your hand.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

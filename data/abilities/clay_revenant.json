@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 B",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Return CARDNAME from your graveyard to your hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,51 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "You may put a red creature card or an artifact creature card from your hand onto the battlefield. Sacrifice it at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Creature.Red,Creature.Artifact",
-        "SpellDescription": "You may put a red creature card or an artifact creature card from your hand onto the battlefield. Sacrifice it at the beginning of the next end step.",
-        "Optional": "You",
-        "AtEOT": "Sacrifice",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to red is less than five, NICKNAME is not a creature.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT5",
-        "Description": "As long as your devotion to red is less than five, NICKNAME is not a creature.",
-        "RemoveType": "Creature",
-        "CheckSVar": "X",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+Other",
-        "Description": "Other creatures you control have haste.",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

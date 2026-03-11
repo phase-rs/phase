@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, up to three target lands you control each become 2/2 Warrior creatures until end of turn. They're still lands.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, up to three target lands you control each become 2/2 Warrior creatures until end of turn. They're still lands.",
-        "ValidActivatingPlayer": "You",
-        "TargetsValid": "Card.Self"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

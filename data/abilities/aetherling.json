@@ -2,93 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrig",
-        "RememberChanged": "True",
-        "Defined": "Self",
-        "SpellDescription": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "CARDNAME can't be blocked this turn.",
-          "RememberObjects": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "CARDNAME can't be blocked this turn.",
-        "RememberObjects": "Self"
-      }
+      "description": "CARDNAME can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/-1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": -1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets -1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": -1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets -1/+1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

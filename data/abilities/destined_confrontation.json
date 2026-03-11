@@ -2,28 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player chooses any number of creatures they control with total power 4 or less, then sacrifices all other creatures they control.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "NegativePowerFirst",
-        "WithTotalPower": "4",
-        "SubAbility": "SacAllOthers",
-        "Reveal": "True",
-        "SpellDescription": "Each player chooses any number of creatures they control with total power 4 or less, then sacrifices all other creatures they control.",
-        "Defined": "Player"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

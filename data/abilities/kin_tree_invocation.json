@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create an X/X black and green Spirit Warrior creature token, where X is the greatest toughness among creatures you control.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "bg_x_x_spirit_warrior",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create an X/X black and green Spirit Warrior creature token, where X is the greatest toughness among creatures you control."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{1}, {T}, Sacrifice CARDNAME: CARDNAME deals 3 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature has \"{1}, {T}, Sacrifice CARDNAME: CARDNAME deals 3 damage to any target.\"",
-        "Affected": "Creature.EquippedBy",
-        "AddAbility": "MakeYourPoint"
-      }
+      "modifications": [
+        {
+          "ability": "MakeYourPoint",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy X target nonblack creatures. Draw X cards.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target nonblack creatures",
-        "SubAbility": "DBDraw",
-        "TargetMin": "X",
-        "TargetMax": "X",
-        "SpellDescription": "Destroy X target nonblack creatures. Draw X cards."
-      }
+      "target_prompt": "Select X target nonblack creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

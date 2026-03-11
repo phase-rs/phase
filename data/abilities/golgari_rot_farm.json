@@ -2,47 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B G",
-        "params": {
-          "SpellDescription": "Add {B}{G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}{G}."
-      }
+      "description": "Add {B}{G}.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "When CARDNAME enters, return a land you control to its owner's hand."
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped."
+      "description": "When CARDNAME enters, return a land you control to its owner's hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

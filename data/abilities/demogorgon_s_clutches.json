@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent discards two cards, mills two cards, and loses 2 life. (To mill a card, a player puts the top card of their library into their graveyard.)",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBMill",
-        "SpellDescription": "Target opponent discards two cards, mills two cards, and loses 2 life. (To mill a card, a player puts the top card of their library into their graveyard.)",
-        "Mode": "TgtChoose"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

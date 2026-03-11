@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Untapped creatures you control get +0/+2.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Untapped creatures you control get +0/+2.",
-        "Affected": "Creature.untapped+YouCtrl",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

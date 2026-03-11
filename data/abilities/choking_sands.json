@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.nonSwamp"
-        }
-      },
       "cost": null,
+      "description": "Destroy target non-Swamp land. If that land was nonbasic, CARDNAME deals 2 damage to the land's controller.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamage",
-        "TgtPrompt": "Select target non-Swamp land",
-        "SpellDescription": "Destroy target non-Swamp land. If that land was nonbasic, CARDNAME deals 2 damage to the land's controller."
-      }
+      "target_prompt": "Select target non-Swamp land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

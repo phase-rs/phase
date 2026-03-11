@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, open an Attraction.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, open an Attraction.",
-        "Execute": "TrigOpenAttraction",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

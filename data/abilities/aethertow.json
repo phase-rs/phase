@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking,Creature.blocking"
-        }
-      },
       "cost": null,
+      "description": "Put target attacking or blocking creature on top of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking or blocking creature",
-        "LibraryPosition": "0",
-        "SpellDescription": "Put target attacking or blocking creature on top of its owner's library."
-      }
+      "target_prompt": "Select target attacking or blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

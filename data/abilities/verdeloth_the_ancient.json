@@ -1,29 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self+kicked",
-        "Destination": "Battlefield",
-        "Execute": "TrigKicker",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, create X 1/1 green Saproling creature tokens."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Saproling,Creature.Treefolk"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Saproling creatures and other Treefolk creatures get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Saproling creatures and other Treefolk creatures get +1/+1.",
-        "Affected": "Creature.Saproling,Creature.Treefolk+Other",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if it was kicked, create X 1/1 green Saproling creature tokens.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

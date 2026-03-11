@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "NameCard",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "RevealHand",
-          "ValidCards": "Card.nonLand",
-          "ValidDescription": "nonland",
-          "SpellDescription": "Choose a nonland card name. Target player reveals their hand. That player discards a card with that name. If they can't, you draw a card."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "RevealHand",
-        "ValidCards": "Card.nonLand",
-        "ValidDescription": "nonland",
-        "SpellDescription": "Choose a nonland card name. Target player reveals their hand. That player discards a card with that name. If they can't, you draw a card."
-      }
+      "description": "Choose a nonland card name. Target player reveals their hand. That player discards a card with that name. If they can't, you draw a card.",
+      "effect": {
+        "description": "Choose a nonland card name. Target player reveals their hand. That player discards a card with that name. If they can't, you draw a card.",
+        "name": "NameCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

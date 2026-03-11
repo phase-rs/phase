@@ -2,47 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "SorcerySpeed": "True",
-          "StackDescription": "REP Put_{p:You} puts & . Activate only as a sorcery._.",
-          "Mode": "Phase",
-          "Phase": "End of Turn",
-          "Execute": "TrigPutCounter",
-          "SpellDescription": "Put three +1/+1 counters on CARDNAME at the beginning of the next end step. Activate only as a sorcery.",
-          "TriggerDescription": "Put three +1/+1 counters on CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R R R"
+            "cost": "R R R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<2/P1P1>"
+            "cost": "SubCounter<2/P1P1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "StackDescription": "REP Put_{p:You} puts & . Activate only as a sorcery._.",
-        "Mode": "Phase",
-        "Phase": "End of Turn",
-        "Execute": "TrigPutCounter",
-        "SpellDescription": "Put three +1/+1 counters on CARDNAME at the beginning of the next end step. Activate only as a sorcery.",
-        "TriggerDescription": "Put three +1/+1 counters on CARDNAME."
-      }
+      "description": "Put three +1/+1 counters on CARDNAME at the beginning of the next end step. Activate only as a sorcery.",
+      "effect": {
+        "description": "Put three +1/+1 counters on CARDNAME at the beginning of the next end step. Activate only as a sorcery.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

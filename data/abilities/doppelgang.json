@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "For each of X target permanents, create X tokens that are copies of that permanent.",
-          "ValidTgts": "Permanent",
-          "TgtPrompt": "Select X target permanents",
-          "TargetMin": "X",
-          "TargetMax": "X",
-          "NumCopies": "X"
-        }
-      },
       "cost": null,
+      "description": "For each of X target permanents, create X tokens that are copies of that permanent.",
+      "effect": {
+        "description": "For each of X target permanents, create X tokens that are copies of that permanent.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each of X target permanents, create X tokens that are copies of that permanent.",
-        "ValidTgts": "Permanent",
-        "TgtPrompt": "Select X target permanents",
-        "TargetMin": "X",
-        "TargetMax": "X",
-        "NumCopies": "X"
-      }
+      "target_prompt": "Select X target permanents"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

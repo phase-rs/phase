@@ -2,42 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 blue Wizard creature token. Draw a card, then discard a card.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_2_2_wizard",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 blue Wizard creature token. Draw a card, then discard a card.",
-        "SubAbility": "DBDraw",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "ValidTarget": "Creature.YouCtrl+inZoneBattlefield,Planeswalker.YouCtrl+inZoneBattlefield",
-        "Amount": "2",
-        "Description": "Spells your opponents cast that target a creature or planeswalker you control cost {2} more to cast.",
-        "Activator": "Player.Opponent"
-      }
+      "description": "Spells your opponents cast that target a creature or planeswalker you control cost {2} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
-        "Phase": "BeginCombat",
-        "Execute": "TrigFlip",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player wins a coin flip, draw a card.",
       "mode": "FlippedCoin",
-      "params": {
-        "ValidResult": "Win",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player wins a coin flip, draw a card.",
-        "Execute": "TrigDraw"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

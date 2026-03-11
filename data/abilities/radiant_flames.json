@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Converge — CARDNAME deals X damage to each creature, where X is the number of colors of mana spent to cast this spell.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "SpellDescription": "Converge — CARDNAME deals X damage to each creature, where X is the number of colors of mana spent to cast this spell.",
-        "ValidDescription": "each creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Krakens, Leviathans, Octopuses, and Serpents you control can't be blocked except by Krakens, Leviathans, Octopuses, and Serpents.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.nonKraken+nonLeviathan+nonOctopus+nonSerpent",
-        "Description": "Krakens, Leviathans, Octopuses, and Serpents you control can't be blocked except by Krakens, Leviathans, Octopuses, and Serpents.",
-        "ValidAttacker": "Creature.Kraken+YouCtrl,Creature.Leviathan+YouCtrl,Creature.Octopus+YouCtrl,Creature.Serpent+YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

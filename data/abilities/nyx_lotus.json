@@ -2,42 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "AINoRecursiveCheck": "True",
-          "SpellDescription": "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
-          "AILogic": "MostProminentComputerControls",
-          "SubAbility": "DBMana"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AINoRecursiveCheck": "True",
-        "SpellDescription": "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
-        "AILogic": "MostProminentComputerControls",
-        "SubAbility": "DBMana"
-      }
+      "description": "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+      "effect": {
+        "description": "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

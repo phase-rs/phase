@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield,Stack",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.cmcGE1,Card.inZoneStack+cmcGE1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target spell or permanent with mana value 1 or greater to its owner's hand.",
-        "TgtZone": "Stack,Battlefield",
-        "SubAbility": "DBLearn"
-      }
+      "description": "Return target spell or permanent with mana value 1 or greater to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield,Stack",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

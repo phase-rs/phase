@@ -2,65 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "SpellDescription": "Target creature gains protection from the color of your choice until end of turn.",
-          "ValidTgts": "Creature",
-          "Choices": "AnyColor",
-          "Gains": "Choice"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W W"
+            "cost": "W W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gains protection from the color of your choice until end of turn.",
-        "ValidTgts": "Creature",
-        "Choices": "AnyColor",
-        "Gains": "Choice"
-      }
+      "description": "Target creature gains protection from the color of your choice until end of turn.",
+      "effect": {
+        "description": "Target creature gains protection from the color of your choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B B"
+            "cost": "B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player loses 2 life and you gain 2 life.",
-        "ValidTgts": "Player",
-        "SubAbility": "DBGainLife"
-      }
+      "description": "Target player loses 2 life and you gain 2 life.",
+      "effect": {
+        "amount": 2,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,59 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "C C",
-            "params": {
-              "RestrictValid": "Activated",
-              "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RestrictValid": "Activated",
-            "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
-          }
+          "description": "Add {C}{C}. Spend this mana only to activate abilities.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Investigate",
-            "params": {
-              "Num": "X",
-              "SpellDescription": "Investigate X times. (Then exile this card. You may cast the creature later from exile.)"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Num": "X",
-            "SpellDescription": "Investigate X times. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "description": "Investigate X times. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "description": "Investigate X times. (Then exile this card. You may cast the creature later from exile.)",
+            "name": "Investigate",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

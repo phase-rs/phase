@@ -1,30 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "ValidCard": "Desert.YouCtrl",
-        "TriggerDescription": "Whenever a Desert you control enters, create two 1/1 red, green, and white Sand Warrior creature tokens.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Affected": "Desert.YouOwn",
-        "AffectedZone": "Graveyard",
-        "Description": "You may play Desert lands from your graveyard."
-      }
+      "affected": {
+        "card_type": "Desert",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may play Desert lands from your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Desert you control enters, create two 1/1 red, green, and white Sand Warrior creature tokens.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Desert",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

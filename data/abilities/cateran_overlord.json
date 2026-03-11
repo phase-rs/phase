@@ -2,57 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "6"
+            "cost": "6",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Permanent.Mercenary+cmcLE6",
-        "SpellDescription": "Search your library for a Mercenary permanent card with mana value 6 or less, put it onto the battlefield, then shuffle.",
-        "ChangeNum": "1"
-      }
+      "description": "Search your library for a Mercenary permanent card with mana value 6 or less, put it onto the battlefield, then shuffle.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

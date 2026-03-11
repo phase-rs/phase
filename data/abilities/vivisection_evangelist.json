@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Corrupted — When CARDNAME enters, if an opponent has three or more poison counters, destroy target creature or planeswalker an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "SVarCompare": "GE3",
-        "CheckSVar": "X",
-        "TriggerDescription": "Corrupted — When CARDNAME enters, if an opponent has three or more poison counters, destroy target creature or planeswalker an opponent controls.",
-        "Execute": "TrigDestroy"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

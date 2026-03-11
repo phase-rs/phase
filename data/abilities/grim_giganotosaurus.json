@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "10 B G",
+        "type": "Mana"
+      },
+      "description": "Monstrosity 10. This ability costs {1} less to activate for each creature with power 4 or greater your opponents control.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "10 B G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Monstrosity 10. This ability costs {1} less to activate for each creature with power 4 or greater your opponents control.",
-        "ReduceCost": "X",
-        "Monstrosity": "10"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes monstrous, destroy all artifacts and creatures other than CARDNAME.",
       "mode": "BecomeMonstrous",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME becomes monstrous, destroy all artifacts and creatures other than CARDNAME.",
-        "Execute": "TrigDestroyAll",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

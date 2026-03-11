@@ -1,29 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigAttach",
-        "TriggerDescription": "When CARDNAME enters, attach it to target Knight you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+2 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Vigilance",
-        "Description": "Equipped creature gets +0/+2 and has vigilance."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, attach it to target Knight you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

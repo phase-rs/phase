@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1 G",
+            "type": "Mana"
+          },
+          {
+            "cost": "RevealOrChoose<1/Creature>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals damage equal to the power of the creature you chose or the card you revealed to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1 G"
-          },
-          {
-            "type": "Mana",
-            "cost": "RevealOrChoose<1/Creature>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage equal to the power of the creature you chose or the card you revealed to target creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a player, that player gets a poison counter. (A player with ten or more poison counters loses the game.)",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player gets a poison counter. (A player with ten or more poison counters loses the game.)",
-        "Execute": "TrigPoison",
-        "ValidSource": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

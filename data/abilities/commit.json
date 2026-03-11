@@ -1,65 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield,Stack",
-            "destination": "Library",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent.nonLand,Card.inZoneStack"
-            }
-          },
           "cost": null,
+          "description": "Put target spell or nonland permanent into its owner's library second from the top.",
+          "effect": {
+            "destination": "Library",
+            "origin": "Battlefield,Stack",
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target spell or nonland permanent",
-            "LibraryPosition": "1",
-            "TgtZone": "Stack,Battlefield",
-            "SpellDescription": "Put target spell or nonland permanent into its owner's library second from the top."
-          }
+          "target_prompt": "Select target spell or nonland permanent"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Hand,Graveyard",
-            "destination": "Library",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDraw",
-            "AILogic": "TimeTwister",
-            "SpellDescription": "Each player shuffles their graveyard and hand into their library, then draws seven cards.",
-            "ChangeType": "Card",
-            "Shuffle": "True",
-            "UseAllOriginZones": "True"
-          }
+          "description": "Each player shuffles their graveyard and hand into their library, then draws seven cards.",
+          "effect": {
+            "destination": "Library",
+            "origin": "Hand,Graveyard",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZoneAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

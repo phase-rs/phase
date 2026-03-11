@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature with flying dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature with flying dies, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.withFlying"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

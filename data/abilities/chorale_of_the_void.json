@@ -1,36 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks, put target creature card from defending player's graveyard onto the battlefield under your control tapped and attacking.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted creature attacks, put target creature card from defending player's graveyard onto the battlefield under your control tapped and attacking.",
-        "Execute": "TrigChange"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Void — At the beginning of your end step, sacrifice this Aura unless a nonland permanent left the battlefield this turn or a spell was warped this turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "Void — At the beginning of your end step, sacrifice this Aura unless a nonland permanent left the battlefield this turn or a spell was warped this turn.",
-        "ValidPlayer": "You",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddSVar": "AE"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,77 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, return target nonlegendary creature card from your graveyard to your hand.",
           "mode": "SpellCastOrCopy",
-          "params": {
-            "ValidActivatingPlayer": "You",
-            "ValidCard": "Instant,Sorcery",
-            "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, return target nonlegendary creature card from your graveyard to your hand.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigReturn"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Sacrifice",
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "6 B R"
+                "cost": "6 B R",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "AILogic": "SacToReduceCost",
-            "Defined": "Player.Opponent",
-            "SubAbility": "DBToken",
-            "SacValid": "Creature",
-            "SpellDescription": "Each opponent sacrifices a creature."
-          }
+          "description": "Each opponent sacrifices a creature.",
+          "effect": {
+            "target": {
+              "type": "Any"
+            },
+            "type": "Sacrifice"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "Type": "Spell",
-            "EffectZone": "All",
-            "Relative": "True",
-            "Description": "This spell costs {2} less to cast for each creature sacrificed this way.",
-            "Amount": "Y",
-            "ValidCard": "Card.Self"
-          }
+          "description": "This spell costs {2} less to cast for each creature sacrificed this way.",
+          "effect_zone": "Battlefield",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

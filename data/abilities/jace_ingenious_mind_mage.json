@@ -2,70 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Defined": "You",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "Planeswalker": "True",
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "Untap all creatures you control."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Untap all creatures you control."
-      }
+      "description": "Untap all creatures you control.",
+      "effect": {
+        "description": "Untap all creatures you control.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -9,
+        "type": "Loyalty"
+      },
+      "description": "Gain control of up to three target creatures.",
       "effect": {
-        "type": "GainControl",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -9
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose up to three target creatures",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "TargetMax": "3",
-        "SpellDescription": "Gain control of up to three target creatures.",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Choose up to three target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

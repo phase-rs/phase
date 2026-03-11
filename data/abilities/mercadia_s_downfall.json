@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each attacking creature gets +1/+0 until end of turn for each nonbasic land defending player controls.",
-          "RepeatSubAbility": "DBPump",
-          "RepeatCards": "Creature.attacking"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each attacking creature gets +1/+0 until end of turn for each nonbasic land defending player controls.",
-        "RepeatSubAbility": "DBPump",
-        "RepeatCards": "Creature.attacking"
-      }
+      "description": "Each attacking creature gets +1/+0 until end of turn for each nonbasic land defending player controls.",
+      "effect": {
+        "description": "Each attacking creature gets +1/+0 until end of turn for each nonbasic land defending player controls.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

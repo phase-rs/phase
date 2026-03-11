@@ -2,60 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 R",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 2/2 white Samurai creature token with vigilance. Activate only as a sorcery.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_2_2_samurai_vigilance",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 R"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Create a 2/2 white Samurai creature token with vigilance. Activate only as a sorcery."
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or leaves the battlefield, exile the top card of your library. Until end of turn, you may play that card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, exile the top card of your library. Until end of turn, you may play that card.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigDig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or leaves the battlefield, exile the top card of your library. Until end of turn, you may play that card.",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDig",
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, exile the top card of your library. Until end of turn, you may play that card.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

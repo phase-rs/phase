@@ -2,66 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 1 damage to target player or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player or planeswalker",
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to target player or planeswalker."
-      }
+      "target_prompt": "Select target player or planeswalker"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn+cmcEQX"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
       },
+      "description": "Return target creature card with mana value X from your graveyard to the battlefield. That creature is a Vampire in addition to its other types.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target creature card with mana value X from your graveyard to the battlefield. That creature is a Vampire in addition to its other types.",
-        "AILogic": "SorinVengefulBloodlord",
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creature with mana value X from your graveyard",
-        "StaticEffect": "Animate"
-      }
+      "target_prompt": "Select target creature with mana value X from your graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Planeswalker.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, creatures and planeswalkers you control have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "AddKeyword": "Lifelink",
-        "Description": "During your turn, creatures and planeswalkers you control have lifelink.",
-        "Affected": "Creature.YouCtrl,Planeswalker.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

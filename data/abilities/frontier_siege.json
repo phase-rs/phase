@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "KhansTrigger",
-        "Affected": "Card.Self+ChosenModeKhans",
-        "Description": "• Khans — At the beginning of each of your main phases, add {G}{G}."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeKhans"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Khans — At the beginning of each of your main phases, add {G}{G}.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+ChosenModeDragons",
-        "AddTrigger": "DragonsTrigger",
-        "Description": "• Dragons — Whenever a creature with flying enters under your control, you may have it fight target creature you don't control."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeDragons"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Dragons — Whenever a creature with flying enters under your control, you may have it fight target creature you don't control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

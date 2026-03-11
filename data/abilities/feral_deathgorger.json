@@ -1,54 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature enters, exile up to two target cards from a single graveyard.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When this creature enters, exile up to two target cards from a single graveyard.",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "Execute": "TrigExile",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
+          "description": "Put a +1/+1 counter on up to one target creature. Draw a card. (Then shuffle this card into its owner's library.)",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMax": "1",
-            "SubAbility": "DBDraw",
-            "TgtPrompt": "Select up to one target creature",
-            "SpellDescription": "Put a +1/+1 counter on up to one target creature. Draw a card. (Then shuffle this card into its owner's library.)",
-            "TargetMin": "0"
-          }
+          "target_prompt": "Select up to one target creature"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

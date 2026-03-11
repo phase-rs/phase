@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more counters would be put on a permanent your team controls, that many plus one of each of those kinds of counters are put on that permanent instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Description": "If one or more counters would be put on a permanent your team controls, that many plus one of each of those kinds of counters are put on that permanent instead.",
-        "ValidCard": "Permanent.YourTeamCtrl+inZoneBattlefield",
-        "ReplaceWith": "AddOneMoreCounters"
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YourTeamCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

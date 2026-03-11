@@ -1,44 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, return up to one target creature to its owner's hand.",
           "mode": "UnlockDoor",
-          "params": {
-            "Execute": "TrigReturn",
-            "ValidCard": "Card.Self",
-            "ThisDoor": "True",
-            "ValidPlayer": "You",
-            "TriggerDescription": "When you unlock this door, return up to one target creature to its owner's hand."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever one or more creatures you control deal combat damage to a player, draw a card.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidSource": "Creature.YouCtrl",
-            "CombatDamage": "True",
-            "ValidTarget": "Player",
-            "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, draw a card.",
-            "Execute": "TrigDraw"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

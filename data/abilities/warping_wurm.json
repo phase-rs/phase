@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME phases out unless you pay {2}{G}{U}.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigWarp",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME phases out unless you pay {2}{G}{U}.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever CARDNAME phases in, put a +1/+1 counter on it.",
       "mode": "PhaseIn",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME phases in, put a +1/+1 counter on it.",
-        "Execute": "TrigBuff",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

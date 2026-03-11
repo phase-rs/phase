@@ -1,64 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "AddTurn",
-            "params": {
-              "PresentCompare": "GE2",
-              "NumTurns": "1",
-              "IsPresent": "Doctor.YouCtrl",
-              "SubAbility": "DBChange",
-              "SpellDescription": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one."
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "PresentCompare": "GE2",
-            "NumTurns": "1",
-            "IsPresent": "Doctor.YouCtrl",
-            "SubAbility": "DBChange",
-            "SpellDescription": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one."
-          }
+          "description": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one.",
+          "effect": {
+            "description": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one.",
+            "name": "AddTurn",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Search your library for a Doctor card, reveal it, put it into your hand, then shuffle.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
             "destination": "Hand",
+            "origin": "Library",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeType": "Doctor",
-            "ChangeNum": "1",
-            "SpellDescription": "Search your library for a Doctor card, reveal it, put it into your hand, then shuffle."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

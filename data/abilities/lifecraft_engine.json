@@ -1,26 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Vehicle"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Vehicle creatures you control are the chosen creature type in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Vehicle+YouCtrl",
-        "AddType": "ChosenType",
-        "Description": "Vehicle creatures you control are the chosen creature type in addition to their other types."
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ChosenType"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each creature you control of the chosen type other than this Vehicle gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Each creature you control of the chosen type other than this Vehicle gets +1/+1.",
-        "AddPower": "1",
-        "Affected": "Creature.ChosenType+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

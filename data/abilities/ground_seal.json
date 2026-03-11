@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected_zone": "Graveyard",
+      "description": "Cards in graveyards can't be the targets of spells or abilities.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "AffectedZone": "Graveyard",
-        "Description": "Cards in graveyards can't be the targets of spells or abilities."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

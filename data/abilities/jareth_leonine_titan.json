@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "SpellDescription": "NICKNAME gains protection from the color of your choice until end of turn.",
-          "Gains": "Choice",
-          "Choices": "AnyColor"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W"
+        "cost": "W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "NICKNAME gains protection from the color of your choice until end of turn.",
-        "Gains": "Choice",
-        "Choices": "AnyColor"
-      }
+      "description": "NICKNAME gains protection from the color of your choice until end of turn.",
+      "effect": {
+        "description": "NICKNAME gains protection from the color of your choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks, it gets +7/+7 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks, it gets +7/+7 until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

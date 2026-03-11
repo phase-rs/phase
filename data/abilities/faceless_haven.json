@@ -2,51 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S S",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)",
       "effect": {
-        "type": "Animate",
         "power": 4,
-        "toughness": 3,
-        "types": [
-          "Creature"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 3,
+        "type": "Animate",
+        "types": [
+          "Creature"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Vigilance",
-        "AddAllCreatureTypes": "True",
-        "Defined": "Self",
-        "StackDescription": "CARDNAME becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land.",
-        "SpellDescription": "CARDNAME becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

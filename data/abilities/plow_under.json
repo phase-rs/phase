@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": null,
+      "description": "Put two target lands on top of their owners' libraries.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "TargetMin": "2",
-        "LibraryPosition": "0",
-        "TgtPrompt": "Select two target lands",
-        "SpellDescription": "Put two target lands on top of their owners' libraries."
-      }
+      "target_prompt": "Select two target lands"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

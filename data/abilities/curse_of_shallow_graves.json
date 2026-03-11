@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player attacks enchanted player with one or more creatures, that attacking player may create a tapped 2/2 black Zombie creature token.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever a player attacks enchanted player with one or more creatures, that attacking player may create a tapped 2/2 black Zombie creature token.",
-        "OptionalDecider": "TriggeredAttackingPlayer",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "AttackedTarget": "Player.EnchantedBy"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

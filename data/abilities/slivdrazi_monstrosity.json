@@ -2,47 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Create a 1/1 colorless Eldrazi Sliver creature token. It has \"Sacrifice this creature: Add {C}.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_1_1_eldrazi_sliver_sac",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 colorless Eldrazi Sliver creature token. It has \"Sacrifice this creature: Add {C}.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Eldrazi"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Eldrazi you control are Slivers in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Eldrazi you control are Slivers in addition to their other types.",
-        "AddType": "Sliver",
-        "Affected": "Permanent.Eldrazi+YouCtrl"
-      }
+      "modifications": [
+        {
+          "core_type": "Sliver",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Slivers you control have devoid and annihilator 1.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Devoid & Annihilator:1",
-        "Affected": "Permanent.Sliver+YouCtrl",
-        "SetColor": "Colorless",
-        "Description": "Slivers you control have devoid and annihilator 1."
-      }
+      "modifications": [
+        {
+          "keyword": "Devoid",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Annihilator:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

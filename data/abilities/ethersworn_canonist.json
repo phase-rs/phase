@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.nonArtifact",
-        "NumLimitEachTurn": "1",
-        "Caster": "Player",
-        "Description": "Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells."
-      }
+      "description": "Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

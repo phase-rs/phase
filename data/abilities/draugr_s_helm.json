@@ -1,31 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you may pay {2}{B}. If you do, create a 2/2 black Zombie Berserker creature token, then attach CARDNAME to it.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2 and has menace.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "2",
-        "AddKeyword": "Menace",
-        "Description": "Equipped creature gets +2/+2 and has menace."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you may pay {2}{B}. If you do, create a 2/2 black Zombie Berserker creature token, then attach CARDNAME to it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

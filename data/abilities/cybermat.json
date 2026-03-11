@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks and isn't blocked, it gets +X/+0 until end of turn, where X is the number of attacking artifact creatures.",
       "mode": "AttackerUnblocked",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it gets +X/+0 until end of turn, where X is the number of attacking artifact creatures."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

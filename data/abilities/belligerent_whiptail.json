@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, CARDNAME gains first strike until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Land.YouCtrl",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, CARDNAME gains first strike until end of turn."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

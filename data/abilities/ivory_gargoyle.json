@@ -2,38 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 W",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, return it to the battlefield under its owner's control at the beginning of the next end step and you skip your next draw step.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigSkipDraw",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, return it to the battlefield under its owner's control at the beginning of the next end step and you skip your next draw step.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

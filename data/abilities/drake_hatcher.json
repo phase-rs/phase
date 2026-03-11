@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<3/INCUBATION>",
+        "type": "Mana"
+      },
+      "description": "Create a 2/2 blue Drake creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_2_2_drake_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/INCUBATION>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 blue Drake creature token with flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever this creature deals combat damage to a player, put that many incubation counters on it.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever this creature deals combat damage to a player, put that many incubation counters on it.",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,57 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -1,
-        "toughness": -2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+withoutFlying"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target attacking creature without flying gets -1/-2 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": -2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target attacking creature without flying gets -1/-2 until end of turn.",
-        "TgtPrompt": "Select target attacking creature without flying",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target attacking creature without flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, it gets +1/+0 and gains first strike until end of turn. Scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Valiant": "True",
-        "ValidSource": "SpellAbility.YouCtrl",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, it gets +1/+0 and gains first strike until end of turn. Scry 1. (Look at the top card of your library. You may put that card on the bottom.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,46 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TgtPrompt": "Choose target activated or triggered ability you control",
-          "ValidTgts": "Card,Emblem",
-          "MayChooseTarget": "True",
-          "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/FILM>"
+            "cost": "SubCounter<1/FILM>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target activated or triggered ability you control",
-        "ValidTgts": "Card,Emblem",
-        "MayChooseTarget": "True",
-        "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl"
-      }
+      "target_prompt": "Choose target activated or triggered ability you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

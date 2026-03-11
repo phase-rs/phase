@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each land of the chosen type has phasing. (It phases in or out before its controller untaps during each of their untap steps. While it's phased out, it's treated as though it doesn't exist.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each land of the chosen type has phasing. (It phases in or out before its controller untaps during each of their untap steps. While it's phased out, it's treated as though it doesn't exist.)",
-        "Affected": "Land.ChosenType",
-        "AddKeyword": "Phasing"
-      }
+      "modifications": [
+        {
+          "keyword": "Phasing",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,50 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 U",
+        "type": "Mana"
+      },
+      "description": "Put CARDNAME into its owner's library third from the top.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Library",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put CARDNAME into its owner's library third from the top.",
-        "LibraryPosition": "2"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, draw a card, then you may discard any number of land cards. When you discard one or more cards this way, CARDNAME deals twice that much damage to target creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DBDraw",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw a card, then you may discard any number of land cards. When you discard one or more cards this way, CARDNAME deals twice that much damage to target creature.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, draw a card, then you may discard any number of land cards. When you discard one or more cards this way, CARDNAME deals twice that much damage to target creature.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw a card, then you may discard any number of land cards. When you discard one or more cards this way, CARDNAME deals twice that much damage to target creature.",
-        "ValidCard": "Card.Self",
-        "Execute": "DBDraw"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

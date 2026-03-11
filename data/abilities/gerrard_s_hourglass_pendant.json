@@ -2,53 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "ValidGraveyard Artifact.YouOwn+ThisTurnEnteredFrom_Battlefield,Creature.YouOwn+ThisTurnEnteredFrom_Battlefield,Land.YouOwn+ThisTurnEnteredFrom_Battlefield,Enchantment.YouOwn+ThisTurnEnteredFrom_Battlefield",
-        "Tapped": "True",
-        "SpellDescription": "Return to the battlefield tapped all artifact, creature, enchantment, and land cards in your graveyard that were put there from the battlefield this turn."
-      }
+      "description": "Return to the battlefield tapped all artifact, creature, enchantment, and land cards in your graveyard that were put there from the battlefield this turn.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a player would begin an extra turn, that player skips that turn instead.",
       "event": {
         "Other": "BeginTurn"
-      },
-      "params": {
-        "ExtraTurn": "True",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "Description": "If a player would begin an extra turn, that player skips that turn instead."
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

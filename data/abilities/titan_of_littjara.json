@@ -1,37 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen type in addition to its other types.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddType": "ChosenType",
-        "Description": "CARDNAME is the chosen type in addition to its other types."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

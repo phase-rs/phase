@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-          "StaticAbilities": "CanAttack"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W"
+        "cost": "W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-        "StaticAbilities": "CanAttack"
-      }
+      "description": "CARDNAME can attack this turn as though it didn't have defender.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

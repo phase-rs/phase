@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, each time a source you control would deal damage this turn, it deals double that damage instead.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, each time a source you control would deal damage this turn, it deals double that damage instead."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

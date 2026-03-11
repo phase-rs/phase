@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "ValidSA": "Activated",
-        "Description": "Enchanted creature's activated abilities can't be activated."
-      }
+      "description": "Enchanted creature's activated abilities can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

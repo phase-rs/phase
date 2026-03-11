@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks, creatures you control get +1/+0 until end of turn for each creature you control with first strike or double strike.",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddStaticAbility": "SelfDT & WideFS",
-        "Description": "Max speed — NICKNAME has deathtouch. Other creatures you control have first strike."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — NICKNAME has deathtouch. Other creatures you control have first strike.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever NICKNAME attacks, creatures you control get +1/+0 until end of turn for each creature you control with first strike or double strike.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

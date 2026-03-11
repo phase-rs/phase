@@ -2,39 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "ValidDescription": "nonland",
-          "StackDescription": "SpellDescription",
-          "RevealedDestination": "Library",
-          "RememberFound": "True",
-          "RevealedLibraryPosition": "-1",
-          "SubAbility": "DBImmediateTrigger",
-          "RevealRandomOrder": "True",
-          "Valid": "Card.nonLand",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "nonland",
-        "StackDescription": "SpellDescription",
-        "RevealedDestination": "Library",
-        "RememberFound": "True",
-        "RevealedLibraryPosition": "-1",
-        "SubAbility": "DBImmediateTrigger",
-        "RevealRandomOrder": "True",
-        "Valid": "Card.nonLand",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order."
-      }
+      "description": "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

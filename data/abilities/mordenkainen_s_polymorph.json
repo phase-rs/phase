@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target creature becomes a Dragon with base power and toughness 4/4 and gains flying.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Dragon"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, target creature becomes a Dragon with base power and toughness 4/4 and gains flying.",
-        "RemoveCreatureTypes": "True",
-        "Keywords": "Flying",
-        "StackDescription": "SpellDescription"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

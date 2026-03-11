@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "The next time a creature of your choice with shadow would deal damage to you this turn, prevent that damage.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.withShadow"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mandatory": "True",
-        "SpellDescription": "The next time a creature of your choice with shadow would deal damage to you this turn, prevent that damage.",
-        "SubAbility": "DBEffect",
-        "AILogic": "NeedsPrevention"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

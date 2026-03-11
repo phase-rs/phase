@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "EffectZone": "All",
-        "Description": "This spell costs {1} less to cast if you weren't the starting player.",
-        "Type": "Spell",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {1} less to cast if you weren't the starting player.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

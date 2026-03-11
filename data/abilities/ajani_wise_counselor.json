@@ -2,69 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 1 life for each creature you control.",
-        "Defined": "You",
-        "Planeswalker": "True"
-      }
+      "description": "You gain 1 life for each creature you control.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Creatures you control get +2/+2 until end of turn.",
       "effect": {
-        "type": "PumpAll",
         "power": 2,
-        "toughness": 2,
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "toughness": 2,
+        "type": "PumpAll"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "Planeswalker": "True",
-        "SpellDescription": "Creatures you control get +2/+2 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Put X +1/+1 counters on target creature, where X is your life total."
-      }
+      "description": "Put X +1/+1 counters on target creature, where X is your life total.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

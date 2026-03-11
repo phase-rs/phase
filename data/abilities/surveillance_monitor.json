@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may collect evidence 4. (Exile cards with total mana value 4 or greater from your graveyard.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigEvidence",
-        "TriggerDescription": "When CARDNAME enters, you may collect evidence 4. (Exile cards with total mana value 4 or greater from your graveyard.)",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you collect evidence, create a 1/1 colorless Thopter artifact creature token with flying.",
       "mode": "CollectEvidence",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you collect evidence, create a 1/1 colorless Thopter artifact creature token with flying."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

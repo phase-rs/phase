@@ -1,27 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever equipped creature attacks, each opponent loses 1 life."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+1.",
-        "Affected": "Card.EquippedBy",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature attacks, each opponent loses 1 life.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

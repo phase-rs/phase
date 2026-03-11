@@ -1,19 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "As long as you control another Wizard, CARDNAME has \"When this creature dies, draw a card.\"",
-        "Affected": "Card.Self",
-        "AddTrigger": "DeathTrig",
-        "AddSVar": "TrigDraw",
-        "IsPresent": "Wizard.YouCtrl+Other"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Wizard",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control another Wizard, CARDNAME has \"When this creature dies, draw a card.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

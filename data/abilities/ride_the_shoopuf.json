@@ -2,44 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 G G",
+        "type": "Mana"
+      },
+      "description": "This enchantment becomes a 7/7 Beast creature in addition to its other types.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 7,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 7,
+        "type": "Animate",
         "types": [
           "Creature",
           "Beast"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "Duration": "Permanent",
-        "SpellDescription": "This enchantment becomes a 7/7 Beast creature in addition to its other types."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature you control."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

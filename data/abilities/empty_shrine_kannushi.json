@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has protection from the colors of permanents you control.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has protection from the colors of permanents you control.",
-        "AddKeyword": "Protection from colorsYouCtrl",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "colorsYouCtrl",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

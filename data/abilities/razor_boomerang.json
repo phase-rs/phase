@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{T}, Unattach CARDNAME: It deals 1 damage to any target. Return CARDNAME to its owner's hand.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "RazorDamage",
-        "Affected": "Creature.EquippedBy",
-        "AddSVar": "BoomerangCatch",
-        "Description": "Equipped creature has \"{T}, Unattach CARDNAME: It deals 1 damage to any target. Return CARDNAME to its owner's hand.\""
-      }
+      "modifications": [
+        {
+          "ability": "RazorDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

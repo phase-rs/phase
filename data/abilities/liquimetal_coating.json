@@ -2,30 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target permanent becomes an artifact in addition to its other types until end of turn."
-      }
+      "description": "Target permanent becomes an artifact in addition to its other types until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Artifact"
+        ]
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

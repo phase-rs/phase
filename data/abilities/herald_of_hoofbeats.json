@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Knight",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Knights you control have horsemanship.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Horsemanship",
-        "Description": "Other Knights you control have horsemanship.",
-        "Affected": "Knight.YouCtrl+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Horsemanship",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

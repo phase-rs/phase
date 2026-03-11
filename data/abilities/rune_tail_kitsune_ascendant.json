@@ -1,41 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you have 30 or more life, flip CARDNAME.",
           "mode": "Always",
-          "params": {
-            "LifeAmount": "GE30",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigFlip",
-            "TriggerDescription": "When you have 30 or more life, flip CARDNAME.",
-            "LifeTotal": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [],
       "replacements": [
         {
-          "event": "DamageDone",
-          "params": {
-            "ValidTarget": "Creature.YouCtrl",
-            "Description": "Prevent all damage that would be dealt to creatures you control.",
-            "Prevent": "True"
-          }
+          "description": "Prevent all damage that would be dealt to creatures you control.",
+          "event": "DamageDone"
         }
-      ]
+      ],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

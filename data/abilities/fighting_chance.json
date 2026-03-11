@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatCards": "Creature.blocking",
-          "Zone": "Battlefield",
-          "RepeatSubAbility": "DBFlip",
-          "SpellDescription": "For each blocking creature, flip a coin. If you win the flip, prevent all combat damage that would be dealt by that creature this turn."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatCards": "Creature.blocking",
-        "Zone": "Battlefield",
-        "RepeatSubAbility": "DBFlip",
-        "SpellDescription": "For each blocking creature, flip a coin. If you win the flip, prevent all combat damage that would be dealt by that creature this turn."
-      }
+      "description": "For each blocking creature, flip a coin. If you win the flip, prevent all combat damage that would be dealt by that creature this turn.",
+      "effect": {
+        "description": "For each blocking creature, flip a coin. If you win the flip, prevent all combat damage that would be dealt by that creature this turn.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

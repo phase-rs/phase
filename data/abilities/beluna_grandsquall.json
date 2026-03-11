@@ -1,50 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "Activator": "You",
-            "ValidCard": "Permanent.AdventureCard",
-            "Type": "Spell",
-            "Description": "Permanent spells you cast that have an Adventure cost {1} less to cast.",
-            "Amount": "1"
-          }
+          "description": "Permanent spells you cast that have an Adventure cost {1} less to cast.",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Mill seven cards. Then put all cards that have an Adventure from among the milled cards into your hand.",
           "effect": {
-            "type": "Mill",
             "count": 7,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Mill seven cards. Then put all cards that have an Adventure from among the milled cards into your hand.",
-            "RememberMilled": "True",
-            "SubAbility": "DBChangeZone"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

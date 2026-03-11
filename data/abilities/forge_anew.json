@@ -1,43 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME enters, return target Equipment card from your graveyard to the battlefield.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, you may activate equip abilities any time you could cast an instant.",
-        "ValidSA": "Activated.Equip"
-      }
+      "description": "During your turn, you may activate equip abilities any time you could cast an instant.",
+      "mode": "CastWithFlash"
     },
     {
+      "condition": {
+        "compare": "LT1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "You may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "Condition": "PlayerTurn",
-        "ValidSA": "Activated.Equip",
-        "SVarCompare": "LT1",
-        "ValidPlayer": "You",
-        "Description": "You may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
-        "CheckSVar": "X"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, return target Equipment card from your graveyard to the battlefield.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

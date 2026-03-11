@@ -1,29 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Aetherborn you control dies, you draw a card and you lose 1 life.",
-        "ValidCard": "Card.Self,Aetherborn.Other+YouCtrl",
-        "Destination": "Graveyard",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Aetherborn",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Aetherborn you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Aetherborn you control get +1/+1.",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Affected": "Aetherborn.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another Aetherborn you control dies, you draw a card and you lose 1 life.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Aetherborn.Other"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

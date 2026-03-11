@@ -2,82 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 2,
-        "destination": ""
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.",
-        "ChangeNum": "1",
-        "NoReveal": "True",
-        "DestinationZone2": "Graveyard"
-      }
+      "description": "Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.",
+      "effect": {
+        "count": 2,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "SpellDescription": "You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"",
-          "Triggers": "TrigSpellCast",
-          "Name": "Emblem — Ral",
-          "AILogic": "Always",
-          "Planeswalker": "True",
-          "Image": "emblem_ral"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "SpellDescription": "You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"",
-        "Triggers": "TrigSpellCast",
-        "Name": "Emblem — Ral",
-        "AILogic": "Always",
-        "Planeswalker": "True",
-        "Image": "emblem_ral"
-      }
+      "description": "You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

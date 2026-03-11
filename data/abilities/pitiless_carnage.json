@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Sacrifice any number of permanents you control, then draw that many cards.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Permanent.YouCtrl",
-        "Optional": "True",
-        "SacMessage": "permanent",
-        "RememberSacrificed": "True",
-        "Amount": "Count$Valid Permanent.YouCtrl",
-        "SpellDescription": "Sacrifice any number of permanents you control, then draw that many cards.",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

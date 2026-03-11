@@ -1,36 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "Description": "Other creatures you control have \"Ward—Pay 2 life.\"",
-        "AddKeyword": "Ward:PayLife<2>"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "Description": "This spell can't be countered.",
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell.YouCtrl",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "Description": "Spells you control can't be countered."
-      }
+      "description": "Spells you control can't be countered.",
+      "event": "Counter"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have \"Ward—Pay 2 life.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Ward:PayLife<2>",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

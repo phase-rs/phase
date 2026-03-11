@@ -2,39 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S S",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield tapped.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "Tapped": "True",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield tapped."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Zombie"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Creature.Snow"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Snow and Zombie creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Other Snow and Zombie creatures you control get +1/+1.",
-        "AddPower": "1",
-        "Affected": "Creature.Zombie+Other+YouCtrl,Creature.Snow+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

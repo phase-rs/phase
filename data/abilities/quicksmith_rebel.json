@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target artifact you control gains \"{T}: This artifact deals 2 damage to any target\" for as long as you control CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, target artifact you control gains \"{T}: This artifact deals 2 damage to any target\" for as long as you control CARDNAME.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigAnimate"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

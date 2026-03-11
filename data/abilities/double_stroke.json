@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell with the chosen name, you may copy it. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopySpell",
-        "OptionalDecider": "You",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell with the chosen name, you may copy it. You may choose new targets for the copy.",
-        "ValidCard": "Instant.NamedCard,Sorcery.NamedCard"
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NamedCard,Sorcery.NamedCard"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

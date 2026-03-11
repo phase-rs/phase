@@ -2,41 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SubAbility": "DBTap",
-        "SpellDescription": "CARDNAME gains indestructible until end of turn. Tap it.",
-        "KW": "Indestructible"
-      }
+      "description": "CARDNAME gains indestructible until end of turn. Tap it.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes tapped, exile up to one target card from a graveyard and put a +1/+1 counter on CARDNAME.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, exile up to one target card from a graveyard and put a +1/+1 counter on CARDNAME."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

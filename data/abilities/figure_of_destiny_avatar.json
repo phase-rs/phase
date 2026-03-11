@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.counters_LTX_P1P1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X"
+        "cost": "X",
+        "type": "Mana"
       },
+      "description": "Put a +1/+1 counter on target creature with fewer than X +1/+1 counters on it.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on target creature with fewer than X +1/+1 counters on it.",
-        "TgtPrompt": "Select target creature with fewer than X +1/+1 counters on it",
-        "ActivationZone": "Command"
-      }
+      "target_prompt": "Select target creature with fewer than X +1/+1 counters on it"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

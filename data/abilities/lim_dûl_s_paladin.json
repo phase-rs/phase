@@ -1,38 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may discard a card. If you don't, sacrifice CARDNAME and draw a card.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDiscard",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, you may discard a card. If you don't, sacrifice CARDNAME and draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever CARDNAME becomes blocked, CARDNAME gets +6/+3 until end of turn.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBlockedPump",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, CARDNAME gets +6/+3 until end of turn.",
-        "ValidBlocker": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 4 life.",
       "mode": "AttackerUnblocked",
-      "params": {
-        "Execute": "DBNoCombatDamage",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 4 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

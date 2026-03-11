@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, you may search your library for an instant or sorcery card, reveal it, put it into your hand, then shuffle.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Instant and sorcery spells have rebound.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Instant,Sorcery",
-        "AffectedZone": "Stack",
-        "EffectZone": "Command",
-        "Description": "Instant and sorcery spells have rebound.",
-        "AddKeyword": "Rebound"
-      }
+      "modifications": [
+        {
+          "keyword": "Rebound",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, you may search your library for an instant or sorcery card, reveal it, put it into your hand, then shuffle.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

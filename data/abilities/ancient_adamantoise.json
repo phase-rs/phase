@@ -1,40 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When this creature dies, exile it and create ten tapped Treasure tokens."
-      }
+      "description": "All damage that would be dealt to you and other permanents you control is dealt to this creature instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [
     {
+      "description": "Damage isn't removed from this creature during cleanup steps.",
       "mode": {
         "Other": "NoCleanupDamage"
-      },
-      "params": {
-        "Description": "Damage isn't removed from this creature during cleanup steps.",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "You,Permanent.Other+YouCtrl",
-        "DamageTarget": "Self",
-        "ReplaceWith": "DmgMe",
-        "Description": "All damage that would be dealt to you and other permanents you control is dealt to this creature instead."
+      "description": "When this creature dies, exile it and create ten tapped Treasure tokens.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, exile target instant or sorcery card with mana value less than or equal to CARDNAME's power from your graveyard. Copy that card. You may cast the copy without paying its mana cost.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, exile target instant or sorcery card with mana value less than or equal to CARDNAME's power from your graveyard. Copy that card. You may cast the copy without paying its mana cost."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

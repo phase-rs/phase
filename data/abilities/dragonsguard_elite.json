@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G G",
+        "type": "Mana"
+      },
+      "description": "Double the number of +1/+1 counters on CARDNAME.",
       "effect": {
-        "type": "MultiplyCounter",
         "counter_type": "P1P1",
         "multiplier": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "MultiplyCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Double the number of +1/+1 counters on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCastOrCopy",
-      "params": {
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

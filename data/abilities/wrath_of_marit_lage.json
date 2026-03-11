@@ -1,32 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigTapAll",
-        "TriggerDescription": "When CARDNAME enters, tap all red creatures."
+      "description": "Red creatures don't untap during their controllers' untap steps.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "Red creatures don't untap during their controllers' untap steps.",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.Red"
+      "description": "When CARDNAME enters, tap all red creatures.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

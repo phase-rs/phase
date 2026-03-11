@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, it gets +1/+1 and gains menace until end of turn. (An exerted creature won't untap during your next untap step.)",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Trigger": "TrigPump",
-        "Cost": "Exert<1/CARDNAME>",
-        "Description": "You may exert CARDNAME as it attacks. When you do, it gets +1/+1 and gains menace until end of turn. (An exerted creature won't untap during your next untap step.)"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

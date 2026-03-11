@@ -2,50 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 R R",
+            "type": "Mana"
+          },
+          {
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 4/4 red Dragon creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_4_4_dragon_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 R R"
-          },
-          {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 4/4 red Dragon creature token with flying.",
-        "ActivationZone": "Hand",
-        "PrecostDesc": "Channel —"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Dragon or noncreature spell, draft a card from CARDNAME's spellbook and put it onto the battlefield.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Dragon,Card.nonCreature",
-        "Execute": "TrigDraft",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a Dragon or noncreature spell, draft a card from CARDNAME's spellbook and put it onto the battlefield.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Dragon,Card.nonCreature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

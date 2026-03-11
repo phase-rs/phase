@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library and/or graveyard for a card named Sorin, Vampire Lord, and put it into your hand. If you search your library this way, shuffle it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigSearch",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you may search your library and/or graveyard for a card named Sorin, Vampire Lord, and put it into your hand. If you search your library this way, shuffle it."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

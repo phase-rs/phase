@@ -2,46 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "SpellDescription": "Conjure a random card from CARDNAME's spellbook into your hand.",
-          "Conjure": "True",
-          "Spellbook": "Light of Hope,Swords to Plowshares,Force Spike,Ponder,Dark Ritual,Duress,Assault Strobe,Lightning Bolt,Fog,Giant Growth",
-          "Zone": "Hand",
-          "RememberMade": "True",
-          "AtRandom": "True",
-          "SubAbility": "DBAnimate"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Conjure a random card from CARDNAME's spellbook into your hand.",
-        "Conjure": "True",
-        "Spellbook": "Light of Hope,Swords to Plowshares,Force Spike,Ponder,Dark Ritual,Duress,Assault Strobe,Lightning Bolt,Fog,Giant Growth",
-        "Zone": "Hand",
-        "RememberMade": "True",
-        "AtRandom": "True",
-        "SubAbility": "DBAnimate"
-      }
+      "description": "Conjure a random card from CARDNAME's spellbook into your hand.",
+      "effect": {
+        "description": "Conjure a random card from CARDNAME's spellbook into your hand.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

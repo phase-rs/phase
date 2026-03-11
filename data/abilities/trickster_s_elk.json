@@ -1,23 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature loses all abilities and is a green Elk creature with base power and toughness 3/3.",
       "mode": "Continuous",
-      "params": {
-        "SetColor": "Green",
-        "Affected": "Creature.EnchantedBy",
-        "SetToughness": "3",
-        "RemoveAllAbilities": "True",
-        "RemoveCreatureTypes": "True",
-        "Description": "Enchanted creature loses all abilities and is a green Elk creature with base power and toughness 3/3.",
-        "RemoveCardTypes": "True",
-        "SetPower": "3",
-        "AddType": "Creature & Elk"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Creature & Elk",
+          "type": "AddType"
+        },
+        {
+          "colors": [
+            "Green"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,57 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, exile cards from the top of your library until you exile two nonland cards with mana value 4 or less. You may cast one of those two cards without paying its mana cost. Put one of them into your hand. Then put the other cards exiled this way on the bottom of your library in a random order.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, exile cards from the top of your library until you exile two nonland cards with mana value 4 or less. You may cast one of those two cards without paying its mana cost. Put one of them into your hand. Then put the other cards exiled this way on the bottom of your library in a random order.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Origin": "Any",
-            "Execute": "TrigDig"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidTgts": "Player",
-            "SubAbility": "DBChangeZone",
-            "SpellDescription": "Target player draws two cards."
-          }
+          "description": "Target player draws two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "CARDNAME is all colors.",
-            "Affected": "Card.Self",
-            "CharacteristicDefining": "True",
-            "SetColor": "All"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "characteristic_defining": true,
+          "description": "CARDNAME is all colors.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted Wall can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Description": "Enchanted Wall can attack as though it didn't have defender.",
-        "ValidCard": "Card.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

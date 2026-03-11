@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDelay",
-        "RememberChanged": "True",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top card of your library. During your next turn, you may play that card.",
-        "Defined": "You"
-      }
+      "description": "Exile the top card of your library. During your next turn, you may play that card.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,47 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G U",
-        "params": {
-          "SpellDescription": "Add {G} or {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G} or {U}."
-      }
+      "description": "Add {G} or {U}.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "When CARDNAME enters, you gain 1 life.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "description": "When CARDNAME enters, you gain 1 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

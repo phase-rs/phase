@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put a +1/+1 counter on each other creature you control named Charmed Stray.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each other creature you control named Charmed Stray.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigPutCounters"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

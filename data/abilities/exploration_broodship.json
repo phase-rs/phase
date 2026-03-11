@@ -1,27 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "STATION 3+ You may play an additional land on each of your turns.",
-        "Affected": "Card.Self+counters_GE3_CHARGE",
-        "AddStaticAbility": "ExplorationStatic"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 3+ You may play an additional land on each of your turns.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 8+ Flying,,,Once during each of your turns, you may cast a permanent spell from your graveyard by sacrificing a land in addition to paying its other costs.",
       "mode": "Continuous",
-      "params": {
-        "Description": "STATION 8+ Flying,,,Once during each of your turns, you may cast a permanent spell from your graveyard by sacrificing a land in addition to paying its other costs.",
-        "Affected": "Card.Self+counters_GE8_CHARGE",
-        "AddStaticAbility": "BroodshipStatic",
-        "AddType": "Creature",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

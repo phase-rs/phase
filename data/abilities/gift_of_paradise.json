@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, you gain 3 life.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "DBGainLife"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\"",
-        "AddAbility": "AbundantGrowthTap",
-        "Affected": "Card.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "ability": "AbundantGrowthTap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you gain 3 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

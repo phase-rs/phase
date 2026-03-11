@@ -1,50 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AddToughness": "X",
-            "Affected": "Card.EquippedBy",
-            "Description": "Equipped creature gets +1/+1 for each creature you control.",
-            "AddPower": "X"
-          }
+          "affected": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +1/+1 for each creature you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create X 1/1 white Soldier creature tokens. (Then exile this card. You may cast the artifact later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "w_1_1_soldier",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenAmount": "X",
-            "SpellDescription": "Create X 1/1 white Soldier creature tokens. (Then exile this card. You may cast the artifact later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

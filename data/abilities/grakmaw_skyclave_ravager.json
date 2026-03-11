@@ -1,30 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature you control dies, if it had a +1/+1 counter on it, put a +1/+1 counter on NICKNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.YouCtrl+Other+counters_GE1_P1P1",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever another creature you control dies, if it had a +1/+1 counter on it, put a +1/+1 counter on NICKNAME."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "When NICKNAME dies, create an X/X black and green Hydra creature token, where X is the number of +1/+1 counters on NICKNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME dies, create an X/X black and green Hydra creature token, where X is the number of +1/+1 counters on NICKNAME.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

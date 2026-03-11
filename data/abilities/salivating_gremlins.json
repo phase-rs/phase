@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact you control enters, CARDNAME gets +2/+0 and gains trample until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigPump",
-        "ValidCard": "Artifact.YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an artifact you control enters, CARDNAME gets +2/+0 and gains trample until end of turn."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

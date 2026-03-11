@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, the player with the lowest life total gains control of CARDNAME. If two or more players are tied for lowest life total, you choose one of them, and that player gains control of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainControl",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, the player with the lowest life total gains control of CARDNAME. If two or more players are tied for lowest life total, you choose one of them, and that player gains control of CARDNAME.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

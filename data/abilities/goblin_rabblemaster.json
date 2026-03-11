@@ -1,35 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token with haste."
-      }
-    },
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +1/+0 until end of turn for each other attacking Goblin.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "Other Goblin creatures you control attack each combat if able.",
-        "ValidCreature": "Creature.Goblin+Other+YouCtrl"
-      }
+      "description": "Other Goblin creatures you control attack each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token with haste.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever CARDNAME attacks, it gets +1/+0 until end of turn for each other attacking Goblin.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

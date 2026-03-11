@@ -2,43 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player exiles two cards from their hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Exile",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "2",
-        "Hidden": "True",
-        "Mandatory": "True",
-        "DefinedPlayer": "Player",
-        "SpellDescription": "Each player exiles two cards from their hand."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Swamp",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a Swamp, you may sacrifice a creature rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Description": "If you control a Swamp, you may sacrifice a creature rather than pay this spell's mana cost.",
-        "Cost": "Sac<1/Creature/creature>",
-        "IsPresent": "Swamp.YouCtrl",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

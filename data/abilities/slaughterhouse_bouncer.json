@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Hellbent — When CARDNAME dies, if you have no cards in hand, target creature gets -3/-3 until end of turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigPump",
-        "Hellbent": "True",
-        "TriggerDescription": "Hellbent — When CARDNAME dies, if you have no cards in hand, target creature gets -3/-3 until end of turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,40 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains haste until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Haste",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gains haste until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, seek a card with mana value equal to the number of poison counters that player has.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigSeek",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, seek a card with mana value equal to the number of poison counters that player has.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

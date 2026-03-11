@@ -2,53 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "RestrictValid": "Spell.Instant,Spell.Sorcery",
-          "SpellDescription": "Add one mana of any color. Spend this mana only to cast an instant or sorcery spell."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Instant,Spell.Sorcery",
-        "SpellDescription": "Add one mana of any color. Spend this mana only to cast an instant or sorcery spell."
-      }
+      "description": "Add one mana of any color. Spend this mana only to cast an instant or sorcery spell.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 3,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "5 U"
+            "cost": "5 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills three cards. (They put the top three cards of their library into their graveyard.)"
-      }
+      "description": "Target player mills three cards. (They put the top three cards of their library into their graveyard.)",
+      "effect": {
+        "count": 3,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

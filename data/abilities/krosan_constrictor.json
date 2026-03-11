@@ -2,29 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -2,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Black"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target black creature gets -2/-0 until end of turn.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target black creature gets -2/-0 until end of turn.",
-        "IsCurse": "True",
-        "TgtPrompt": "Choose target black creature"
-      }
+      "target_prompt": "Choose target black creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

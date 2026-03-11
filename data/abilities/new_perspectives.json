@@ -1,34 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw three cards.",
-        "Origin": "Any",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "GE7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have seven or more cards in hand, you may pay {0} rather than pay cycling costs.",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "ValidSA": "Activated.Cycling",
-        "CostDesc": "0",
-        "ValidPlayer": "You",
-        "Description": "As long as you have seven or more cards in hand, you may pay {0} rather than pay cycling costs.",
-        "SVarCompare": "GE7",
-        "Cost": "Discard<1/CARDNAME>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw three cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

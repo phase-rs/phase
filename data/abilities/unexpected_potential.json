@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may spend mana as though it were mana of any color to cast spells with the chosen name.",
+      "effect_zone": "Command",
       "mode": {
         "Other": "ManaConvert"
-      },
-      "params": {
-        "ManaConversion": "AnyType->AnyColor",
-        "EffectZone": "Command",
-        "ValidSA": "Spell",
-        "Description": "You may spend mana as though it were mana of any color to cast spells with the chosen name.",
-        "ValidPlayer": "You",
-        "ValidCard": "Card.NamedCard"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

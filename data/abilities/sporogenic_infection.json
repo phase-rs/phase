@@ -1,36 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target player sacrifices a creature other than enchanted creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, target player sacrifices a creature other than enchanted creature.",
-        "Execute": "TrigSacrifice",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When enchanted creature is dealt damage, destroy it.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Creature.EnchantedBy",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When enchanted creature is dealt damage, destroy it."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "MortalDestroy",
-        "Affected": "Creature.EnchantedBy"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

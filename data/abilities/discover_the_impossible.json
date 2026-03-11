@@ -2,26 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 5,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBCast",
-        "ExileFaceDown": "True",
-        "RememberChanged": "True",
-        "RestRandomOrder": "True",
-        "SpellDescription": "Look at the top five cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost if it's an instant spell with mana value 2 or less. If you don't, put that card into your hand."
-      }
+      "description": "Look at the top five cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost if it's an instant spell with mana value 2 or less. If you don't, put that card into your hand.",
+      "effect": {
+        "count": 5,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Menace",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have menace."
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

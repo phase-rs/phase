@@ -1,52 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, target opponent reveals their hand. You choose an artifact or creature card from it. That player discards that card.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, target opponent reveals their hand. You choose an artifact or creature card from it. That player discards that card.",
-            "Execute": "TrigRemove"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME enters or attacks, you may mill two cards. (You may put the top two cards of your library into your graveyard.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill",
-            "TriggerDescription": "Whenever CARDNAME enters or attacks, you may mill two cards. (You may put the top two cards of your library into your graveyard.)"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME enters or attacks, you may mill two cards.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME enters or attacks, you may mill two cards.",
-            "ValidCard": "Card.Self",
-            "Secondary": "True",
-            "Execute": "TrigMill"
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets -X/-Y. If that creature is attacking, X is the number of snow lands defending player controls. Otherwise, X is the number of snow lands its controller controls. Y is equal to X or to enchanted creature's toughness minus 1, whichever is smaller.",
-        "AddPower": "-AttackingX",
-        "Affected": "Card.AttachedBy",
-        "CheckSVar": "CheckAttacking",
-        "AddToughness": "-AttackingY"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "CheckAttacking"
+      },
+      "description": "Enchanted creature gets -X/-Y. If that creature is attacking, X is the number of snow lands defending player controls. Otherwise, X is the number of snow lands its controller controls. Y is equal to X or to enchanted creature's toughness minus 1, whichever is smaller.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "CheckSVar": "CheckAttacking",
-        "AddPower": "-NotAttackingX",
-        "Affected": "Card.AttachedBy",
-        "SVarCompare": "EQ0",
-        "AddToughness": "-NotAttackingY"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "CheckAttacking"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

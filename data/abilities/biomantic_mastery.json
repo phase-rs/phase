@@ -2,23 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card for each creature target player controls, then draw a card for each creature another target player controls.",
-        "ValidTgts": "Player",
-        "Defined": "You",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Draw a card for each creature target player controls, then draw a card for each creature another target player controls.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

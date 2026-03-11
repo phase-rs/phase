@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may pay {1}{R} and discard a card. If you do, CARDNAME deals damage to target creature or planeswalker equal to the discarded card's mana value.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {1}{R} and discard a card. If you do, CARDNAME deals damage to target creature or planeswalker equal to the discarded card's mana value.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDamage"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

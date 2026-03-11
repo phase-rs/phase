@@ -2,60 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Battlefield"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition2": "0",
-        "OptionalAbilityPrompt": "Would you like to put the land onto the battlefield tapped?",
-        "ForceRevealToController": "True",
-        "PromptToSkipOptionalAbility": "True",
-        "DestinationZone2": "Library",
-        "Optional": "True",
-        "ChangeNum": "All",
-        "ChangeValid": "Land",
-        "Tapped": "True",
-        "SpellDescription": "Look at the top card of your library. If it's a land card, you may put it onto the battlefield tapped. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
-        "SubAbility": "DBMoveToBottom",
-        "RememberChanged": "True"
-      }
+      "description": "Look at the top card of your library. If it's a land card, you may put it onto the battlefield tapped. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
+      "effect": {
+        "count": 1,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

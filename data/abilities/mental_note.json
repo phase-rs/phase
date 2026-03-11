@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Mill two cards. Draw a card.",
       "effect": {
-        "type": "Mill",
         "count": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "Mill two cards. Draw a card.",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

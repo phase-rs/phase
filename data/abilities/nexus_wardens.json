@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Constellation — Whenever an enchantment enters under you control, you gain 2 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Constellation — Whenever an enchantment enters under you control, you gain 2 life.",
-        "Destination": "Battlefield",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

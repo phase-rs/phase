@@ -1,53 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a 3/3 green Hippo creature token.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_3_3_hippo",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 3/3 green Hippo creature token.",
-            "TokenOwner": "You"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw a card for each creature you control with power 3 or greater."
-          }
+          "description": "Draw a card for each creature you control with power 3 or greater.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

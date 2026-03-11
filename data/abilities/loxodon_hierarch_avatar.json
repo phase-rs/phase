@@ -2,34 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ActivationZone": "Command",
-          "SpellDescription": "Regenerate target creature you control.",
-          "ValidTgts": "Creature.YouCtrl",
-          "TgtPrompt": "Select target creature you control"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Regenerate target creature you control.",
+      "effect": {
+        "description": "Regenerate target creature you control.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Command",
-        "SpellDescription": "Regenerate target creature you control.",
-        "ValidTgts": "Creature.YouCtrl",
-        "TgtPrompt": "Select target creature you control"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,44 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPutCounter",
-        "SpellDescription": "Draw a card and put a point counter on CARDNAME. Then if it has five or more point counters on it, sacrifice it and create a Treasure token."
-      }
+      "description": "Draw a card and put a point counter on CARDNAME. Then if it has five or more point counters on it, sacrifice it and create a Treasure token.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever you're dealt combat damage, the attacking player gains control of CARDNAME and untaps it.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainGontrol",
-        "TriggerDescription": "Whenever you're dealt combat damage, the attacking player gains control of CARDNAME and untaps it.",
-        "ValidTarget": "You",
-        "CombatDamage": "True",
-        "ValidSource": "Card"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

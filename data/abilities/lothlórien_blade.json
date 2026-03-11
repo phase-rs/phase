@@ -1,18 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, it deals damage equal to its power to target creature defending player controls.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigExchangeDamage",
-        "TriggerDescription": "Whenever equipped creature attacks, it deals damage equal to its power to target creature defending player controls.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.EquippedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a colorless spell, CARDNAME gets +1/+0 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Colorless",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a colorless spell, CARDNAME gets +1/+0 until end of turn.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

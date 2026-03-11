@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "SultaiTrigger",
-        "Affected": "Card.Self+ChosenModeSultai",
-        "Description": "• Sultai — Whenever a counter is put on a creature you control, draw a card. This ability triggers only once each turn."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeSultai"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Sultai — Whenever a counter is put on a creature you control, draw a card. This ability triggers only once each turn.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "• Abzan — Whenever you attack, put a +1/+1 counter on target attacking creature. It gains menace until end of turn.",
-        "AddTrigger": "AbzanTrigger",
-        "Affected": "Card.Self+ChosenModeAbzan"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeAbzan"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Abzan — Whenever you attack, put a +1/+1 counter on target attacking creature. It gains menace until end of turn.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

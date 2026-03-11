@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "RememberRevealed": "True",
-          "Defined": "You",
-          "ConditionCheckSVar": "X",
-          "SubAbility": "DBChangeZone",
-          "SpellDescription": "Reveal a card from your hand. Search your library for a card with the same name as that card, reveal it, put it into your hand, then shuffle. Hellbent — If you have no cards in hand, instead search your library for a card, put it into your hand, then shuffle."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberRevealed": "True",
-        "Defined": "You",
-        "ConditionCheckSVar": "X",
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "Reveal a card from your hand. Search your library for a card with the same name as that card, reveal it, put it into your hand, then shuffle. Hellbent — If you have no cards in hand, instead search your library for a card, put it into your hand, then shuffle."
-      }
+      "description": "Reveal a card from your hand. Search your library for a card with the same name as that card, reveal it, put it into your hand, then shuffle. Hellbent — If you have no cards in hand, instead search your library for a card, put it into your hand, then shuffle.",
+      "effect": {
+        "description": "Reveal a card from your hand. Search your library for a card with the same name as that card, reveal it, put it into your hand, then shuffle. Hellbent — If you have no cards in hand, instead search your library for a card, put it into your hand, then shuffle.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

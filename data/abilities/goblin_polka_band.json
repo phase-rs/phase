@@ -2,44 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X 2"
+            "cost": "X 2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberTapped": "True",
-        "AILogic": "GoblinPolkaBand",
-        "TargetMax": "TgtNum",
-        "XColor": "R",
-        "AnnounceTitle": "any number of creatures to target",
-        "CostDesc": "{2}, {T}:",
-        "SubAbility": "GoblinHangover",
-        "SpellDescription": "Tap any number of target creatures chosen at random. Goblins tapped this way do not untap during their controllers' next untap step. This ability costs {R} more to activate for each target.",
-        "TargetsAtRandom": "True",
-        "Announce": "TgtNum",
-        "TargetMin": "TgtNum"
-      }
+      "description": "Tap any number of target creatures chosen at random. Goblins tapped this way do not untap during their controllers' next untap step. This ability costs {R} more to activate for each target.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

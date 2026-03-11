@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it deals 3 damage to you unless you pay {2}.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever CARDNAME attacks, it deals 3 damage to you unless you pay {2}."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

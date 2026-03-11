@@ -1,79 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Dig",
-            "count": 3,
-            "destination": "Exile"
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBEffect",
-            "RememberChanged": "True",
-            "ValidTgts": "Opponent",
-            "SpellDescription": "Target opponent exiles the top three cards of their library. Until the end of your next turn, you may play those cards. If you cast a spell this way, mana of any type can be spent to cast it.",
-            "ChangeNum": "All"
-          }
+          "description": "Target opponent exiles the top three cards of their library. Until the end of your next turn, you may play those cards. If you cast a spell this way, mana of any type can be spent to cast it.",
+          "effect": {
+            "count": 3,
+            "destination": "Exile",
+            "type": "Dig"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "EffectZone": "All",
-            "Type": "Spell",
-            "Description": "This spell costs {1} less to cast for each 1 life your opponents have lost this turn.",
-            "ValidCard": "Card.Self",
-            "Amount": "X"
-          }
+          "description": "This spell costs {1} less to cast for each 1 life your opponents have lost this turn.",
+          "effect_zone": "Battlefield",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Combo B R",
-            "params": {
-              "SpellDescription": "Add {B} or {R}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {B} or {R}."
+          "description": "Add {B} or {R}.",
+          "effect": {
+            "produced": [
+              "Black",
+              "Red"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "ReplacementResult": "Updated",
-            "Destination": "Battlefield",
-            "ReplaceWith": "ETBTapped",
-            "Description": "CARDNAME enters tapped."
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

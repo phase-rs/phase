@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create a 3/3 blue Illusion Villain creature token for each nontoken Villain you control. Exile those tokens when NICKNAME leaves the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When NICKNAME enters, create a 3/3 blue Illusion Villain creature token for each nontoken Villain you control. Exile those tokens when NICKNAME leaves the battlefield.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

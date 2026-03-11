@@ -1,18 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Rogue",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has deathtouch as long as you control another Rogue.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Rogue.YouCtrl+Other",
-        "AddKeyword": "Deathtouch",
-        "Description": "CARDNAME has deathtouch as long as you control another Rogue.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

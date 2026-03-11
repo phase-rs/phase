@@ -1,35 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a creature, it gets -1/-1 and can't block.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "As long as enchanted permanent is a creature, it gets -1/-1 and can't block.",
-        "AddPower": "-1",
-        "AddToughness": "-1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     },
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "As long as enchanted permanent is a creature, it gets -1/-1 and can't block.",
-        "Secondary": "True"
-      }
+      "description": "As long as enchanted permanent is a creature, it gets -1/-1 and can't block.",
+      "mode": "CantBlock"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "AddTrigger": "TriggerTorment",
-        "AddSVar": "TrigLoseLife",
-        "Description": "Enchanted permanent has \"At the beginning of your upkeep, you lose 1 life.\""
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent has \"At the beginning of your upkeep, you lose 1 life.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

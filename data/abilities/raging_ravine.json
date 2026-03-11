@@ -2,63 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo R G",
-        "params": {
-          "SpellDescription": "Add {R} or {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R} or {G}."
-      }
+      "description": "Add {R} or {G}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R G",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, this land becomes a 3/3 red and green Elemental creature with \"Whenever this creature attacks, put a +1/+1 counter on it.\" It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Elemental"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Red,Green",
-        "OverwriteColors": "True",
-        "Triggers": "TrigAttack",
-        "SpellDescription": "Until end of turn, this land becomes a 3/3 red and green Elemental creature with \"Whenever this creature attacks, put a +1/+1 counter on it.\" It's still a land.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This land enters tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "This land enters tapped.",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

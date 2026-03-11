@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may discard a card. When you do, CARDNAME deals X damage to any target, where X is the number of card types the discarded card has.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, you may discard a card. When you do, CARDNAME deals X damage to any target, where X is the number of card types the discarded card has."
-      }
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

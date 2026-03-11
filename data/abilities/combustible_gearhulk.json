@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then CARDNAME deals damage to that player equal to the total mana value of those cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then CARDNAME deals damage to that player equal to the total mana value of those cards.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "DBChoice"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

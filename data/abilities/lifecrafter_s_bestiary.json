@@ -1,30 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, scry 1.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigScry",
-        "TriggerDescription": "At the beginning of your upkeep, scry 1."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you cast a creature spell, you may pay {G}. If you do, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Creature",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you cast a creature spell, you may pay {G}. If you do, draw a card.",
-        "Execute": "TrigDraw"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

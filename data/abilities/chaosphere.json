@@ -1,27 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with flying can block only creatures with flying.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.withFlying",
-        "Description": "Creatures with flying can block only creatures with flying.",
-        "ValidAttacker": "Creature.withoutFlying"
       }
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures without flying have reach. (They can block creatures with flying.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.withoutFlying",
-        "Description": "Creatures without flying have reach. (They can block creatures with flying.)",
-        "AddKeyword": "Reach"
-      }
+      "modifications": [
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

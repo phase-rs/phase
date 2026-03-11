@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP target creature_{c:Targeted}",
-        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature.",
-        "LoseControl": "EOT",
-        "Untap": "True",
-        "SubAbility": "DBAnimate"
-      }
+      "description": "Gain control of target creature until end of turn. Untap that creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

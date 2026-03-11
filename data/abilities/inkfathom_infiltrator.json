@@ -1,24 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't block and can't be blocked."
-      }
+      "description": "CARDNAME can't block and can't be blocked.",
+      "mode": "CantBlock"
     },
     {
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

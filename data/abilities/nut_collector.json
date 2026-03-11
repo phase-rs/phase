@@ -1,31 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your upkeep, you may create a 1/1 green Squirrel creature token.",
-        "Phase": "Upkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Squirrel"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Threshold — Squirrel creatures get +2/+2 as long as there are seven or more cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Threshold",
-        "Affected": "Creature.Squirrel",
-        "Description": "Threshold — Squirrel creatures get +2/+2 as long as there are seven or more cards in your graveyard.",
-        "AddPower": "2",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, you may create a 1/1 green Squirrel creature token.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

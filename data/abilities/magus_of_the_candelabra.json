@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Untap X target lands.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target lands",
-        "TargetMax": "X",
-        "SpellDescription": "Untap X target lands.",
-        "TargetMin": "X"
-      }
+      "target_prompt": "Select X target lands"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

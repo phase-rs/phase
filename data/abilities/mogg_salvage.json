@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact."
-      }
+      "description": "Destroy target artifact.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls an Island and you control a Mountain, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "Description": "If an opponent controls an Island and you control a Mountain, you may cast this spell without paying its mana cost.",
-        "ValidCard": "Card.Self",
-        "ValidPlayer": "You",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "CheckSecondSVar": "Y",
-        "ValidSA": "Spell"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

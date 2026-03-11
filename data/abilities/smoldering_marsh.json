@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control two or more basic lands.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "LandTapped",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped unless you control two or more basic lands."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

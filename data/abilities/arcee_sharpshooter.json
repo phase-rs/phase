@@ -1,64 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "costs": [
+              {
+                "cost": "1 XMin1",
+                "type": "Mana"
+              },
+              {
+                "cost": "SubCounter<X/P1P1/NICKNAME>",
+                "type": "Mana"
+              }
+            ],
+            "type": "Composite"
+          },
+          "description": "It deals that much damage to target creature.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Variable",
               "value": "X"
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": "1 XMin1"
-              },
-              {
-                "type": "Mana",
-                "cost": "SubCounter<X/P1P1/NICKNAME>"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "It deals that much damage to target creature.",
-            "SubAbility": "DBConvert"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
-          "mode": "SpellCast",
-          "params": {
-            "Execute": "TrigPutCounters",
-            "TargetsValid": "Creature.YouCtrl,Vehicle.YouCtrl",
-            "TriggerDescription": "Whenever you cast a spell that targets one or more creatures or Vehicles you control, put that many +1/+1 counters on NICKNAME. Convert NICKNAME.",
-            "ValidActivatingPlayer": "You"
-          }
+          "description": "Whenever you cast a spell that targets one or more creatures or Vehicles you control, put that many +1/+1 counters on NICKNAME. Convert NICKNAME.",
+          "mode": "SpellCast"
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a legendary creature an opponent controls dies, put CARDNAME on the bottom of its owner's library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Legendary+OppCtrl",
-        "TriggerDescription": "When a legendary creature an opponent controls dies, put CARDNAME on the bottom of its owner's library.",
-        "Destination": "Graveyard",
-        "Execute": "TrigChange"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

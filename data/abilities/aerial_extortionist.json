@@ -1,41 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
       "mode": "DamageDone",
-      "params": {
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "Execute": "TrigExile",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
-        "ValidTarget": "Player"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever another player casts a spell from anywhere other than their hand, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.!wasCastFromTheirHand",
-        "TriggerDescription": "Whenever another player casts a spell from anywhere other than their hand, draw a card.",
-        "ValidActivatingPlayer": "Player.Other"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

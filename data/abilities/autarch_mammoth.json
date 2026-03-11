@@ -1,29 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature enters and whenever it attacks while saddled, create a 3/3 green Elephant creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever this creature enters and whenever it attacks while saddled, create a 3/3 green Elephant creature token.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever this creature enters and whenever it attacks while saddled, create a 3/3 green Elephant creature token.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self+IsSaddled",
-        "Execute": "TrigToken",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever this creature enters and whenever it attacks while saddled, create a 3/3 green Elephant creature token.",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsSaddled"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

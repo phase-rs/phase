@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle a card, you may have CARDNAME become a 5/4 Dinosaur creature with trample and haste in addition to its other types until end of turn.",
       "mode": "Cycled",
-      "params": {
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.YouOwn",
-        "TriggerDescription": "Whenever you cycle a card, you may have CARDNAME become a 5/4 Dinosaur creature with trample and haste in addition to its other types until end of turn."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

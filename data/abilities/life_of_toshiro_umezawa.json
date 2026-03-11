@@ -1,50 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "B",
-            "params": {
-              "RestrictValid": "Spell.Instant,Spell.Sorcery",
-              "SpellDescription": "Add {B}. Spend this mana only to cast an instant or sorcery spell."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "PayLife<1>"
+                "cost": "PayLife<1>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RestrictValid": "Spell.Instant,Spell.Sorcery",
-            "SpellDescription": "Add {B}. Spend this mana only to cast an instant or sorcery spell."
-          }
+          "description": "Add {B}. Spend this mana only to cast an instant or sorcery spell.",
+          "effect": {
+            "produced": [
+              "Black"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

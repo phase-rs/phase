@@ -1,29 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a red spell, remove a -1/-1 counter from CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Red",
-        "TriggerDescription": "Whenever you cast a red spell, remove a -1/-1 counter from CARDNAME.",
-        "Execute": "TrigRemoveCounter",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a white spell, remove a -1/-1 counter from CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.White",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "Whenever you cast a white spell, remove a -1/-1 counter from CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

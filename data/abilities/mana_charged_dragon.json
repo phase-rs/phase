@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Join forces — Whenever CARDNAME attacks or blocks, each player starting with you may pay any amount of mana. CARDNAME gets +X/+0 until end of turn, where X is the total amount of mana paid this way.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigJoinForces",
-        "TriggerDescription": "Join forces — Whenever CARDNAME attacks or blocks, each player starting with you may pay any amount of mana. CARDNAME gets +X/+0 until end of turn, where X is the total amount of mana paid this way.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Join forces — Whenever CARDNAME attacks or blocks, each player starting with you may pay any amount of mana. CARDNAME gets +X/+0 until end of turn, where X is the total amount of mana paid this way.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Join forces — Whenever CARDNAME attacks or blocks, each player starting with you may pay any amount of mana. CARDNAME gets +X/+0 until end of turn, where X is the total amount of mana paid this way.",
-        "Secondary": "True",
-        "Execute": "TrigJoinForces"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

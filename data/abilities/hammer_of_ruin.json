@@ -1,30 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidSource": "Creature.EquippedBy",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may destroy target Equipment that player controls.",
-        "ValidTarget": "Player"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Description": "Equipped creature gets +2/+0.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, you may destroy target Equipment that player controls.",
+      "mode": "DamageDone",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

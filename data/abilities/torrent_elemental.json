@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 BG BG",
+        "type": "Mana"
+      },
+      "description": "Put CARDNAME from exile onto the battlefield tapped. Activate only as a sorcery.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
         "destination": "Battlefield",
+        "origin": "Exile",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 BG BG"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Exile",
-        "SpellDescription": "Put CARDNAME from exile onto the battlefield tapped. Activate only as a sorcery.",
-        "Tapped": "True",
-        "SorcerySpeed": "True"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, tap all creatures defending player controls.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, tap all creatures defending player controls.",
-        "Execute": "TrigTap"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

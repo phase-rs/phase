@@ -2,48 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Food>"
+        "cost": "tapXType<2/Food>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a noncreature spell, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever an opponent casts a noncreature spell, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")",
-        "Execute": "DBToken",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.nonCreature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever a creature deals combat damage to you, sacrifice a Food token.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature deals combat damage to you, sacrifice a Food token.",
-        "ValidSource": "Creature",
-        "ValidTarget": "You",
-        "CombatDamage": "True",
-        "Execute": "TrigSac"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

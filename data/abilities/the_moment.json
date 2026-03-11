@@ -2,76 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Untap target creature you control. It phases out until CARDNAME leaves the battlefield.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "SubAbility": "DBPhase",
-        "SpellDescription": "Untap target creature you control. It phases out until CARDNAME leaves the battlefield."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Permanent.nonLand+cmcLEX",
-        "SpellDescription": "Destroy each nonland permanent with mana value less than or equal to the number of time counters on CARDNAME. Then sacrifice CARDNAME. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "SubAbility": "DBSacrifice"
-      }
+      "description": "Destroy each nonland permanent with mana value less than or equal to the number of time counters on CARDNAME. Then sacrifice CARDNAME. Activate only as a sorcery.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a time counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a time counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

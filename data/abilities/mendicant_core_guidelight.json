@@ -1,26 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "NICKNAME's power is equal to the number of artifacts you control.",
-        "SetPower": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "NICKNAME's power is equal to the number of artifacts you control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Max speed — Whenever you cast an artifact spell, you may pay {1}. If you do, copy it. (The copy becomes a token.)",
-        "Condition": "MaxSpeed",
-        "AddTrigger": "CastTrig",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — Whenever you cast an artifact spell, you may pay {1}. If you do, copy it. (The copy becomes a token.)",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

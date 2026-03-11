@@ -2,49 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 4 damage to target creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "Amount": "3",
-        "EffectZone": "All",
-        "Description": "This spell costs {3} less to cast if you've sacrificed an artifact this turn.",
-        "Type": "Spell"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered. (This includes by the ward ability.)",
       "event": "Counter",
-      "params": {
-        "Description": "This spell can't be countered. (This includes by the ward ability.)",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {3} less to cast if you've sacrificed an artifact this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

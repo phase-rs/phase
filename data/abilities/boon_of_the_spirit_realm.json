@@ -1,29 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, put a blessing counter on CARDNAME.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
-        "Execute": "TrigCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control get +1/+1 for each blessing counter on CARDNAME."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+1 for each blessing counter on CARDNAME.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Constellation — Whenever CARDNAME or another enchantment you control enters, put a blessing counter on CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Enchantment.Other"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

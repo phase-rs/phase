@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has base power and toughness 10/10.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "SetPower": "10",
-        "SetToughness": "10",
-        "Description": "Equipped creature has base power and toughness 10/10."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 10
+        },
+        {
+          "type": "SetToughness",
+          "value": 10
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

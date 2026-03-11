@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SubAbility": "DBToken",
-        "RememberCounteredCMC": "True",
-        "SpellDescription": "Counter target spell. Create an X/X green Ooze creature token, where X is that spell's mana value."
-      }
+      "description": "Counter target spell. Create an X/X green Ooze creature token, where X is that spell's mana value.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

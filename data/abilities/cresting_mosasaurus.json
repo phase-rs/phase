@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, return each non-Dinosaur creature to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigBounceAll",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, return each non-Dinosaur creature to its owner's hand.",
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

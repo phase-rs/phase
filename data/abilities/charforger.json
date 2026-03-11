@@ -2,49 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/OIL/CARDNAME>"
+        "cost": "SubCounter<3/OIL/CARDNAME>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Exile the top card of your library. You may play that card this turn.",
-        "ChangeNum": "All"
-      }
+      "description": "Exile the top card of your library. You may play that card this turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 1/1 red Phyrexian Goblin creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a 1/1 red Phyrexian Goblin creature token."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME.",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.Other+YouCtrl,Artifact.Other+YouCtrl",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Artifact.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,33 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, you may pay {X}. When you do, put any number of target creature cards with total mana value X or less from that player's graveyard onto the battlefield under your control.",
           "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may pay {X}. When you do, put any number of target creature cards with total mana value X or less from that player's graveyard onto the battlefield under your control.",
-            "ValidSource": "Card.Self",
-            "ValidTarget": "Player",
-            "Execute": "TrigImmediateTrig"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

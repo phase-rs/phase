@@ -2,40 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.IsCommander+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put a +1/+1 counter on CARDNAME and a +1/+1 counter on up to one target commander creature you control.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select up to one target commander creature you control",
-        "Defined": "Self & Targeted",
-        "TargetMax": "1",
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME and a +1/+1 counter on up to one target commander creature you control.",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select up to one target commander creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

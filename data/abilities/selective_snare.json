@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.ChosenType"
-        }
-      },
       "cost": null,
+      "description": "Return X target creatures of the creature type of your choice to their owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "ChosenType"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "MostProminentOppControls",
-        "TargetMin": "X",
-        "TgtPrompt": "Select X target creatures of the chosen creature type",
-        "SpellDescription": "Return X target creatures of the creature type of your choice to their owner's hand.",
-        "TargetMax": "X",
-        "AnnounceType": "CreatureType"
-      }
+      "target_prompt": "Select X target creatures of the chosen creature type"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Discard any number of cards. Counter target spell unless its controller pays {3} for each card discarded this way.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AnyNumber": "True",
-        "RememberDiscarded": "True",
-        "SpellDescription": "Discard any number of cards. Counter target spell unless its controller pays {3} for each card discarded this way.",
-        "Mode": "TgtChoose",
-        "Optional": "True",
-        "SubAbility": "DBCounter"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

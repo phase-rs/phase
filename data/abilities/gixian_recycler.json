@@ -1,30 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigConjure",
-        "TriggerDescription": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigConjure",
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "Origin": "Hand,Library",
-        "TriggerDescription": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard."
+      "origin": "Hand,Library",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

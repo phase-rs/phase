@@ -2,27 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard,Exile",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant.inZoneGraveyard+YouCtrl,Sorcery.inZoneGraveyard+YouCtrl,Card.withFlashback+inZoneExile+YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Return target instant or sorcery card from your graveyard or exiled card with flashback you own to your hand. Add {R}.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard,Exile",
+        "target": {
+          "card_type": "Instant",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Sorcery.inZoneGraveyard"
+            },
+            {
+              "type": "Other",
+              "value": "YouCtrl,Card.withFlashback"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBMana",
-        "SpellDescription": "Return target instant or sorcery card from your graveyard or exiled card with flashback you own to your hand. Add {R}.",
-        "TgtPrompt": "Choose target instant or sorcery card in your graveyard or exiled card with flashback you own"
-      }
+      "target_prompt": "Choose target instant or sorcery card in your graveyard or exiled card with flashback you own"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

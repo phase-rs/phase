@@ -2,28 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Aura.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Attach target Aura you control to target creature. Draw a card.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Aura",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target aura you control",
-        "SubAbility": "FinesseAttach",
-        "StackDescription": "None",
-        "SpellDescription": "Attach target Aura you control to target creature. Draw a card."
-      }
+      "target_prompt": "Select target aura you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

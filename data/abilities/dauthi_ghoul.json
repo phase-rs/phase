@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature with shadow dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.withShadow",
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature with shadow dies, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

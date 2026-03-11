@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a player, that player discards all the cards in their hand, then draws that many cards.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "Execute": "TrigDiscard",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player discards all the cards in their hand, then draws that many cards."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

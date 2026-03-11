@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Detain",
-        "params": {
-          "ValidTgts": "Creature.OppCtrl",
-          "TargetMin": "0",
-          "TgtPrompt": "Select target creature your opponent controls to detain.",
-          "SpellDescription": "Detain up to two target creatures your opponents control. (Until your next turn, those permanents can't attack or block and their activated abilities can't be activated.)",
-          "TargetMax": "2"
-        }
-      },
       "cost": null,
+      "description": "Detain up to two target creatures your opponents control. (Until your next turn, those permanents can't attack or block and their activated abilities can't be activated.)",
+      "effect": {
+        "description": "Detain up to two target creatures your opponents control. (Until your next turn, those permanents can't attack or block and their activated abilities can't be activated.)",
+        "name": "Detain",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.OppCtrl",
-        "TargetMin": "0",
-        "TgtPrompt": "Select target creature your opponent controls to detain.",
-        "SpellDescription": "Detain up to two target creatures your opponents control. (Until your next turn, those permanents can't attack or block and their activated abilities can't be activated.)",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select target creature your opponent controls to detain."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "Optional": "True",
-          "TargetType": "Spell",
-          "ValidTgts": "Card.Arcane",
-          "SpellDescription": "You may change any targets of target Arcane spell."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "TargetType": "Spell",
-        "ValidTgts": "Card.Arcane",
-        "SpellDescription": "You may change any targets of target Arcane spell."
-      }
+      "description": "You may change any targets of target Arcane spell.",
+      "effect": {
+        "description": "You may change any targets of target Arcane spell.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

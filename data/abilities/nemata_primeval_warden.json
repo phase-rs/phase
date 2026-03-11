@@ -2,78 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "G",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME gets +2/+2 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "G"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Aristocrat",
-        "SpellDescription": "CARDNAME gets +2/+2 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card.",
-        "Defined": "You"
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidLKI": "Card.Creature+OppCtrl",
-        "ReplaceWith": "Exile",
-        "Description": "If a creature an opponent controls would die, exile it instead. When you do, create a 1/1 green Saproling creature token.",
-        "Origin": "Battlefield",
-        "ActiveZones": "Battlefield",
-        "Destination": "Graveyard"
-      }
+      "description": "If a creature an opponent controls would die, exile it instead. When you do, create a 1/1 green Saproling creature token.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

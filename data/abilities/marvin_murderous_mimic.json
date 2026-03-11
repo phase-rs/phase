@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOf": "Creature.YouCtrl+!sharesNameWith Self",
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield",
-        "Description": "CARDNAME has all activated abilities of creatures you control that don't have the same name as this creature."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of creatures you control that don't have the same name as this creature.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

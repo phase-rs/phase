@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes tapped, target creature can't block this turn.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, target creature can't block this turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCanNotBlock"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

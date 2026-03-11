@@ -1,26 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "Description": "Equipped creature has first strike.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Human",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as equipped creature is a Human, it gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as equipped creature is a Human, it gets +1/+1.",
-        "AddPower": "1",
-        "Affected": "Human.EquippedBy",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,36 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Untap target attacking creature you control. Prevent all combat damage that would be dealt to and dealt by it this turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "SpellDescription": "Untap target attacking creature you control. Prevent all combat damage that would be dealt to and dealt by it this turn.",
-        "TgtPrompt": "Select target attacking creature you control"
-      }
+      "target_prompt": "Select target attacking creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, conjure a card named Lightning Bolt into your hand, then discard a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, conjure a card named Lightning Bolt into your hand, then discard a card.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigConjure"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you conjure one or more cards, put a +1/+1 counter on CARDNAME.",
       "mode": "ConjureAll",
-      "params": {
-        "TriggerDescription": "Whenever you conjure one or more cards, put a +1/+1 counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

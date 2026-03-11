@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME attacks, defending player can't cast spells this turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "When CARDNAME attacks, defending player can't cast spells this turn.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigEffect"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

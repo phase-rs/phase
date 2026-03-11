@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, create two green and green 2/2 Elf Knight creature tokens with vigilance.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, create two green and green 2/2 Elf Knight creature tokens with vigilance.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

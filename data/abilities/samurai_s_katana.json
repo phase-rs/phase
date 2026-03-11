@@ -1,20 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2, has trample and haste, and is a Samurai in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Samurai",
-        "AddKeyword": "Trample & Haste",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +2/+2, has trample and haste, and is a Samurai in addition to its other types.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Samurai",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

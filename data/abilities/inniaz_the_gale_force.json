@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 WU"
+        "cost": "2 WU",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Attacking creatures with flying get +1/+1 until end of turn.",
-        "ValidCards": "Creature.attacking+withFlying"
-      }
+      "description": "Attacking creatures with flying get +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever three or more creatures you control with flying attack, each player gains control of a nonland permanent of your choice controlled by the player to their right.",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackingPlayer": "You",
-        "Execute": "TrigGainControl",
-        "ValidAttackers": "Creature.withFlying",
-        "ValidAttackersAmount": "GE3",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever three or more creatures you control with flying attack, each player gains control of a nonland permanent of your choice controlled by the player to their right."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

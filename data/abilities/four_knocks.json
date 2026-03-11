@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first main phase, draw a card.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "At the beginning of your first main phase, draw a card.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Main1"
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

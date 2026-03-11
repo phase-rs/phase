@@ -2,41 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerGE4"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
+      "description": "Exile target creature with power 4 or greater.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Exile target creature with power 4 or greater.",
-        "TgtPrompt": "Select target creature with power 4 or greater"
-      }
+      "target_prompt": "Select target creature with power 4 or greater"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "Prevent all noncombat damage that would be dealt to you and other permanents you control.",
-        "IsCombat": "False",
-        "Prevent": "True",
-        "ValidTarget": "You,Permanent.Other+YouCtrl",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "Prevent all noncombat damage that would be dealt to you and other permanents you control.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever this creature deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigReturn",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever this creature deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

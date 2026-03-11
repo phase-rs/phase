@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Shuffle",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBMill",
-          "SpellDescription": "Shuffle your library, then mill four cards. Put each creature card milled this way onto the battlefield. They gain haste."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBMill",
-        "SpellDescription": "Shuffle your library, then mill four cards. Put each creature card milled this way onto the battlefield. They gain haste."
-      }
+      "description": "Shuffle your library, then mill four cards. Put each creature card milled this way onto the battlefield. They gain haste.",
+      "effect": {
+        "description": "Shuffle your library, then mill four cards. Put each creature card milled this way onto the battlefield. They gain haste.",
+        "name": "Shuffle",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

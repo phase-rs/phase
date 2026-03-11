@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks alone, it can't be blocked this combat.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Alone": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks alone, it can't be blocked this combat.",
-        "Execute": "TrigUnblockable"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,26 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Equipped creature gets +2/+2.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          },
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)",
-        "Affected": "Card.EquippedBy+Legendary",
-        "AddKeyword": "Hexproof"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, create a 2/2 white Cat creature token for each Equipment attached to CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your upkeep, create a 2/2 white Cat creature token for each Equipment attached to CARDNAME."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

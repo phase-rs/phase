@@ -2,36 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U B R",
-        "params": {
-          "SpellDescription": "Add {U}, {B}, or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}, {B}, or {R}."
-      }
+      "description": "Add {U}, {B}, or {R}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy all creatures.",
-        "ValidCards": "Creature"
-      }
+      "description": "Destroy all creatures.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "CheckSVar": "X",
-        "ValidCard": "Card.Self",
-        "Amount": "2",
-        "Description": "This spell costs {2} less to cast if a player's life total is less than or equal to half their starting life total.",
-        "EffectZone": "All",
-        "Type": "Spell"
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {2} less to cast if a player's life total is less than or equal to half their starting life total.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

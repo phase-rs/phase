@@ -1,29 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, you may sacrifice an artifact or creature. If you do, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When this creature enters, you may sacrifice an artifact or creature. If you do, draw a card.",
-        "Execute": "TrigDraw",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another creature you control dies, if it had counters on it, put its counters on this creature.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever another creature you control dies, if it had counters on it, put its counters on this creature.",
-        "Destination": "Graveyard",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.Other+YouCtrl+HasCounters"
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "HasCounters"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

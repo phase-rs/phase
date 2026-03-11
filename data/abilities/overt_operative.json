@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, it assembles a Contraption.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, it assembles a Contraption.",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigAssemble"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

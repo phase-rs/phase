@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "BelieveTrigger",
-        "Affected": "Card.Self+ChosenModeBelieve",
-        "Description": "• Believe — Whenever a nontoken creature you control dies, create a 2/2 black Horror enchantment creature token."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeBelieve"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Believe — Whenever a nontoken creature you control dies, create a 2/2 black Horror enchantment creature token.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "DoubtTrigger",
-        "Description": "• Doubt — At the beginning of your end step, you may return a nonland permanent you own to your hand. If you do, draw a card.",
-        "Affected": "Card.Self+ChosenModeDoubt"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeDoubt"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Doubt — At the beginning of your end step, you may return a nonland permanent you own to your hand. If you do, draw a card.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

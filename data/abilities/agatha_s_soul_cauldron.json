@@ -2,53 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Exile target card from a graveyard. When a creature card is exiled this way, put a +1/+1 counter on target creature you control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "TgtPrompt": "Choose target card in a graveyard",
-        "SubAbility": "TrigImmediateTrig",
-        "SpellDescription": "Exile target card from a graveyard. When a creature card is exiled this way, put a +1/+1 counter on target creature you control."
-      }
+      "target_prompt": "Choose target card in a graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may spend mana as though it were mana of any color to activate abilities of creatures you control.",
       "mode": {
         "Other": "ManaConvert"
-      },
-      "params": {
-        "ManaConversion": "AnyType->AnyColor",
-        "ValidSA": "Activated",
-        "Description": "You may spend mana as though it were mana of any color to activate abilities of creatures you control.",
-        "ValidPlayer": "You",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield"
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOf": "Creature.ExiledWithSource",
-        "EffectZone": "Battlefield",
-        "GainsAbilitiesOfZones": "Exile",
-        "Description": "Creatures you control with +1/+1 counters on them have all activated abilities of all creature cards exiled with CARDNAME.",
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with +1/+1 counters on them have all activated abilities of all creature cards exiled with CARDNAME.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

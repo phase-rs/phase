@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with one or more creatures, untap up to X lands, where X is the greatest power among those creatures.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "ValidAttackers": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever you attack with one or more creatures, untap up to X lands, where X is the greatest power among those creatures."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

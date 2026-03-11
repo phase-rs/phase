@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+X until end of turn, where X is the number of other Elves you control.",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may have NICKNAME assign its combat damage as though it weren't blocked.",
       "mode": {
         "Other": "AssignCombatDamageAsUnblocked"
-      },
-      "params": {
-        "Optional": "True",
-        "Description": "You may have NICKNAME assign its combat damage as though it weren't blocked.",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, it gets +X/+X until end of turn, where X is the number of other Elves you control.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

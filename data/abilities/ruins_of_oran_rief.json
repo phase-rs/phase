@@ -2,56 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Colorless+ThisTurnEntered"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Put a +1/+1 counter on target colorless creature that entered this turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Colorless"
+            },
+            {
+              "type": "Other",
+              "value": "ThisTurnEntered"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target colorless creature that entered this turn",
-        "SpellDescription": "Put a +1/+1 counter on target colorless creature that entered this turn."
-      }
+      "target_prompt": "Select target colorless creature that entered this turn"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

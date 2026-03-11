@@ -1,50 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a creature, tap that creature. It doesn't untap during its controller's next untap step.",
           "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, tap that creature. It doesn't untap during its controller's next untap step.",
-            "ValidTarget": "Creature",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTap",
-            "ValidSource": "Card.Self"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "card_type": "Creature",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Tap",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBPump",
-            "SpellDescription": "Tap target creature. It doesn't untap during its controller's next untap step. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "description": "Tap target creature. It doesn't untap during its controller's next untap step. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Tap"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

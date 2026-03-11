@@ -1,64 +1,75 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Card.StrictlySelf",
-        "Destination": "Battlefield",
-        "Execute": "TrigReanimate",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with CARDNAME.\" Put enchanted creature card onto the battlefield tapped under your control and attach CARDNAME to it. When CARDNAME leaves the battlefield, that creature's controller sacrifices it."
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player.EnchantedController",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "EnchantedController",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player may pay {1}{B}. If the player does, untap that creature.",
-        "Execute": "TrigUntap"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "1",
-        "Description": "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step.",
-        "AddToughness": "1"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "Secondary": "True",
-        "Layer": "CantHappen"
-      }
+      "description": "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with CARDNAME.\" Put enchanted creature card onto the battlefield tapped under your control and attach CARDNAME to it. When CARDNAME leaves the battlefield, that creature's controller sacrifices it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, that player may pay {1}{B}. If the player does, untap that creature.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

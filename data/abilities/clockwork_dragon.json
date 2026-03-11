@@ -2,46 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat.",
-        "Execute": "DelTrig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat.",
-        "Execute": "DelTrig",
-        "Secondary": "True",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

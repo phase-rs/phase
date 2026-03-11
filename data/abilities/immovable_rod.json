@@ -2,65 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W"
+            "cost": "3 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "SpellDescription": "For as long as CARDNAME remains tapped, another target permanent loses all abilities and can't attack or block."
-      }
+      "description": "For as long as CARDNAME remains tapped, another target permanent loses all abilities and can't attack or block.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes untapped, venture into the dungeon.",
       "mode": "Untaps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigVenture",
-        "TriggerDescription": "Whenever CARDNAME becomes untapped, venture into the dungeon.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "Untaps",
-      "params": {
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "ClearRemembered",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.IsRemembered",
-        "AddHiddenKeyword": "CARDNAME can't attack or block.",
-        "RemoveAllAbilities": "True"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

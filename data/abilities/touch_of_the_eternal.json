@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, your life total becomes equal to the number of permanents you control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigLife",
-        "TriggerDescription": "At the beginning of your upkeep, your life total becomes equal to the number of permanents you control.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

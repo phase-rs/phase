@@ -1,55 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another nontoken creature you control dies, create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self,Creature.Other+!token+YouCtrl",
-            "Execute": "TrigToken",
-            "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control dies, create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")"
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.Other"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever you create a Blood token, if you control five or more Blood tokens, transform CARDNAME.",
           "mode": "TokenCreated",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "IsPresent": "Blood.token+YouCtrl",
-            "ValidToken": "Blood",
-            "TriggerDescription": "Whenever you create a Blood token, if you control five or more Blood tokens, transform CARDNAME.",
-            "ValidPlayer": "You",
-            "PresentCompare": "GE5",
-            "Execute": "TrigTransform"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, up to one target Blood token you control becomes a 2/2 black Bat creature with flying and haste in addition to its other types.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of combat on your turn, up to one target Blood token you control becomes a 2/2 black Bat creature with flying and haste in addition to its other types.",
-            "Phase": "BeginCombat",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigAnimate"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

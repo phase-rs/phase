@@ -2,78 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W",
-        "params": {
-          "SpellDescription": "Add {W}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W}."
-      }
+      "description": "Add {W}.",
+      "effect": {
+        "produced": [
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Optional": "True",
-          "Amount": "All",
-          "ConditionCheckSVar": "X",
-          "Controller": "You",
-          "ConditionSVarCompare": "GE3",
-          "PlayerTurn": "True",
-          "Defined": "ExiledWith",
-          "WithoutManaCost": "True",
-          "SpellDescription": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "Amount": "All",
-        "ConditionCheckSVar": "X",
-        "Controller": "You",
-        "ConditionSVarCompare": "GE3",
-        "PlayerTurn": "True",
-        "Defined": "ExiledWith",
-        "WithoutManaCost": "True",
-        "SpellDescription": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn."
-      }
+      "description": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn.",
+      "effect": {
+        "description": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a land card from your library chosen at random onto the battlefield.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, put a land card from your library chosen at random onto the battlefield.",
-        "Execute": "TrigBounce"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, that player untaps CARDNAME and gains control of it.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerDescription": "At the beginning of each player's upkeep, that player untaps CARDNAME and gains control of it.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigControl",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever NICKNAME attacks, creatures of the creature type of your choice get +3/+3 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigChoosePump",
-        "TriggerDescription": "Whenever NICKNAME attacks, creatures of the creature type of your choice get +3/+3 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

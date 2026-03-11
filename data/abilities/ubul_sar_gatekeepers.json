@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Gates, target creature an opponent controls gets -2/-2 until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "PresentCompare": "GE2",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Gates, target creature an opponent controls gets -2/-2 until end of turn.",
-        "Execute": "TrigPump",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "IsPresent": "Gate.YouCtrl",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

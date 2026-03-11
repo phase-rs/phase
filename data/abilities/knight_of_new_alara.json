@@ -1,18 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "AffectedX",
-        "AddPower": "AffectedX",
-        "Description": "Each other multicolored creature you control gets +1/+1 for each of its colors.",
-        "Affected": "Creature.MultiColor+Other+YouCtrl"
-      }
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "MultiColor"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other multicolored creature you control gets +1/+1 for each of its colors.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

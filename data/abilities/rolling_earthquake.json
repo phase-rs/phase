@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to each creature without horsemanship and each player.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.withoutHorsemanship",
-        "SpellDescription": "CARDNAME deals X damage to each creature without horsemanship and each player.",
-        "ValidPlayers": "Player"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

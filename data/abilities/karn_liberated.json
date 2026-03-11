@@ -2,83 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 4,
+        "type": "Loyalty"
+      },
+      "description": "Target player exiles a card from their hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Exile",
+        "origin": "Hand",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 4
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "IsCurse": "True",
-        "Mandatory": "True",
-        "SpellDescription": "Target player exiles a card from their hand.",
-        "Hidden": "True",
-        "Planeswalker": "True",
-        "ChangeType": "Card",
-        "Chooser": "Targeted"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Exile target permanent.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target permanent.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RestartGame",
-        "params": {
-          "RestrictFromZone": "Exile",
-          "RestrictFromValid": "Card.!ExiledWithSource,Spell,Card.Aura",
-          "SubAbility": "ReturnFromExile",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "SpellDescription": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -14
+        "amount": -14,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictFromZone": "Exile",
-        "RestrictFromValid": "Card.!ExiledWithSource,Spell,Card.Aura",
-        "SubAbility": "ReturnFromExile",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control."
-      }
+      "description": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control.",
+      "effect": {
+        "description": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control.",
+        "name": "RestartGame",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

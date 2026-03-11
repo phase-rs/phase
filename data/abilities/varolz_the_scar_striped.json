@@ -2,38 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Graveyard",
-        "Description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost.",
-        "AddKeyword": "Scavenge:CardManaCost",
-        "Affected": "Creature.YouOwn"
-      }
+      "modifications": [
+        {
+          "keyword": "Scavenge:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

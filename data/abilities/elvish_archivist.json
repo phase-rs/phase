@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more artifacts you control enter, put two +1/+1 counters on CARDNAME. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever one or more artifacts you control enter, put two +1/+1 counters on CARDNAME. This ability triggers only once each turn.",
-        "ActivationLimit": "1",
-        "ValidCards": "Artifact.YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever one or more enchantments you control enter, draw a card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "ValidCards": "Enchantment.YouCtrl",
-        "ActivationLimit": "1",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever one or more enchantments you control enter, draw a card. This ability triggers only once each turn.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

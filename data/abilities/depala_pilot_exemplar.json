@@ -1,37 +1,81 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Taps",
-      "params": {
-        "Execute": "TrigDig",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, you may pay {X}. If you do, reveal the top X cards of your library, put all Dwarf and Vehicle cards from among them into your hand, then put the rest on the bottom of your library in a random order.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Dwarf"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Dwarves you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Dwarves you control get +1/+1.",
-        "Affected": "Permanent.Dwarf+Other+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Vehicle"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each Vehicle you control gets +1/+1 as long as it's a creature.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each Vehicle you control gets +1/+1 as long as it's a creature.",
-        "Affected": "Creature.Vehicle+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes tapped, you may pay {X}. If you do, reveal the top X cards of your library, put all Dwarf and Vehicle cards from among them into your hand, then put the rest on the bottom of your library in a random order.",
+      "mode": "Taps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

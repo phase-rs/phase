@@ -1,70 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Mode": "Transform",
-              "AILogic": "Always",
-              "Defined": "Self",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "9 GP"
+            "cost": "9 GP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "Transform",
-            "AILogic": "Always",
-            "Defined": "Self",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
-          }
+          "description": "Transform NICKNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform NICKNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When NICKNAME enters, each player exiles cards from the top of their library until they exile a nonland card. You may cast any number of spells from among the nonland cards exiled this way without paying their mana costs.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDig",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When NICKNAME enters, each player exiles cards from the top of their library until they exile a nonland card. You may cast any number of spells from among the nonland cards exiled this way without paying their mana costs."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever NICKNAME deals combat damage to a player, they get that many poison counters. (A player with ten or more poison counters loses the game.)",
           "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "ValidTarget": "Player",
-            "ValidSource": "Card.Self",
-            "Execute": "TrigPoison",
-            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, they get that many poison counters. (A player with ten or more poison counters loses the game.)"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

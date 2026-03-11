@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "SpellDescription": "You may tap or untap target artifact, creature, or land.",
-          "TgtPrompt": "Select target artifact, creature, or land",
-          "ValidTgts": "Artifact,Creature,Land"
-        }
-      },
       "cost": null,
+      "description": "You may tap or untap target artifact, creature, or land.",
+      "effect": {
+        "description": "You may tap or untap target artifact, creature, or land.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may tap or untap target artifact, creature, or land.",
-        "TgtPrompt": "Select target artifact, creature, or land",
-        "ValidTgts": "Artifact,Creature,Land"
-      }
+      "target_prompt": "Select target artifact, creature, or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

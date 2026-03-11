@@ -2,38 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player sacrifices a creature with mana value 3 or less.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player sacrifices a creature with mana value 3 or less.",
-        "SacValid": "Creature.cmcLE3",
-        "SacMessage": "creature with mana value 3 or less"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you have more cards in hand than each opponent, you may return CARDNAME from your graveyard to your hand.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if you have more cards in hand than each opponent, you may return CARDNAME from your graveyard to your hand.",
-        "SVarCompare": "GTY",
-        "OptionalDecider": "You",
-        "CheckSVar": "X",
-        "Execute": "TrigReturn",
-        "Phase": "Upkeep",
-        "TriggerZones": "Graveyard"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

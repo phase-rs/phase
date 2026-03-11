@@ -2,50 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.counters_GE1_STUN"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Shuffle CARDNAME and target creature with a stun counter on it into their owners' libraries.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Shuffle": "True",
-        "SpellDescription": "Shuffle CARDNAME and target creature with a stun counter on it into their owners' libraries.",
-        "TgtPrompt": "Select target creature with a stun counter on it",
-        "ThisDefinedAndTgts": "Self"
-      }
+      "target_prompt": "Select target creature with a stun counter on it"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, tap target creature an opponent controls and put a stun counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, tap target creature an opponent controls and put a stun counter on it.",
-        "Execute": "TrigTap"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

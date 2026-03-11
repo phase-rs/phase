@@ -1,29 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigDraw",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land is an Island.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "Description": "Enchanted land is an Island.",
-        "RemoveLandTypes": "True",
-        "AddType": "Island"
-      }
+      "modifications": [
+        {
+          "core_type": "Island",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

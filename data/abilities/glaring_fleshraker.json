@@ -1,30 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a colorless spell, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Colorless",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you cast a colorless spell, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever another colorless creature you control enters, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever another colorless creature you control enters, CARDNAME deals 1 damage to each opponent.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Creature.Other+Colorless+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Colorless"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

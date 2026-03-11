@@ -2,24 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W W"
+        "cost": "3 W W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "You draw a card and target opponent gains 3 life."
-      }
+      "description": "You draw a card and target opponent gains 3 life.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

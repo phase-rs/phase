@@ -2,41 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "MayChooseTarget": "True",
-          "ValidTgts": "Instant,Sorcery",
-          "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-          "TargetType": "Spell"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MayChooseTarget": "True",
-        "ValidTgts": "Instant,Sorcery",
-        "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-        "TargetType": "Spell"
-      }
+      "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay 1 life and exile a red card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "You may pay 1 life and exile a red card from your hand rather than pay this spell's mana cost.",
-        "Cost": "PayLife<1> ExileFromHand<1/Card.Red+Other>",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

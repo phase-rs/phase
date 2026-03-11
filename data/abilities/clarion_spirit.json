@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your second spell each turn, create a 1/1 white Spirit creature token with flying.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigToken",
-        "ActivatorThisTurnCast": "EQ2",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast your second spell each turn, create a 1/1 white Spirit creature token with flying.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "ResultSubAbilities": "1-9:DBDraw,10-20:DBDig",
-          "PrecostDesc": "Search the Room —",
-          "Sides": "20",
-          "SpellDescription": "Roll a d20."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 U"
+        "cost": "5 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ResultSubAbilities": "1-9:DBDraw,10-20:DBDig",
-        "PrecostDesc": "Search the Room —",
-        "Sides": "20",
-        "SpellDescription": "Roll a d20."
-      }
+      "description": "Roll a d20.",
+      "effect": {
+        "description": "Roll a d20.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

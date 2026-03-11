@@ -1,20 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +2/+2 as long as you control eight or more lands.",
       "mode": "Continuous",
-      "params": {
-        "PresentCompare": "GE8",
-        "Description": "CARDNAME gets +2/+2 as long as you control eight or more lands.",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Affected": "Card.Self",
-        "IsPresent": "Land.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

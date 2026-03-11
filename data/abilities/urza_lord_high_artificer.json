@@ -2,61 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SpellDescription": "Add {U}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Artifact>"
+        "cost": "tapXType<1/Artifact>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}."
-      }
+      "description": "Add {U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Shuffle",
-        "params": {
-          "AILogic": "OwnMain2",
-          "Defined": "You",
-          "SubAbility": "DBExile",
-          "SpellDescription": "Shuffle your library, then exile the top card. Until end of turn, you may play that card without paying its mana cost."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5"
+        "cost": "5",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "OwnMain2",
-        "Defined": "You",
-        "SubAbility": "DBExile",
-        "SpellDescription": "Shuffle your library, then exile the top card. Until end of turn, you may play that card without paying its mana cost."
-      }
+      "description": "Shuffle your library, then exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+      "effect": {
+        "description": "Shuffle your library, then exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+        "name": "Shuffle",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 0/0 colorless Construct artifact creature token with \"This creature gets +1/+1 for each artifact you control.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigUrzaConstruct",
-        "TriggerDescription": "When CARDNAME enters, create a 0/0 colorless Construct artifact creature token with \"This creature gets +1/+1 for each artifact you control.\""
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

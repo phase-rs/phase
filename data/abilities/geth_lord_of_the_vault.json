@@ -2,32 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppOwn+cmcEQX,Artifact.OppOwn+cmcEQX"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X B"
+        "cost": "X B",
+        "type": "Mana"
       },
+      "description": "Put target artifact or creature card with mana value X from an opponent's graveyard onto the battlefield under your control tapped. Then that player mills X cards.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBMill",
-        "SpellDescription": "Put target artifact or creature card with mana value X from an opponent's graveyard onto the battlefield under your control tapped. Then that player mills X cards.",
-        "Tapped": "True",
-        "TgtPrompt": "Choose target artifact or creature card in an opponent's graveyard",
-        "GainControl": "True"
-      }
+      "target_prompt": "Choose target artifact or creature card in an opponent's graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

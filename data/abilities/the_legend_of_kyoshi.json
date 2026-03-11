@@ -1,50 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "Amount": "X",
-              "SpellDescription": "Add X mana of any one color, where X is the greatest power among creatures you control."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "X",
-            "SpellDescription": "Add X mana of any one color, where X is the greatest power among creatures you control."
-          }
+          "description": "Add X mana of any one color, where X is the greatest power among creatures you control.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Land",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "description": "Lands you control have trample and hexproof.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Land.YouCtrl",
-            "AddKeyword": "Trample & Hexproof",
-            "Description": "Lands you control have trample and hexproof."
-          }
+          "modifications": [
+            {
+              "keyword": "Trample",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "&",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Hexproof",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

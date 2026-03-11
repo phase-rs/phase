@@ -2,40 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 6 damage to target creature or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 6
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "CARDNAME deals 6 damage to target creature or planeswalker."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "3",
-        "EffectZone": "All",
-        "IsPresent": "Giant.YouCtrl",
-        "Description": "This spell costs {3} less to cast if you control a Giant."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Giant",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {3} less to cast if you control a Giant.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

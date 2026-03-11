@@ -1,37 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy target artifact. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "description": "Destroy target artifact. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "target": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

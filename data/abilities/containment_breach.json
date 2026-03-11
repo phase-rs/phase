@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact or enchantment. If its mana value is 2 or less, create a 1/1 black and green Pest creature token with \"When this creature dies, you gain 1 life.\"",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "TrigToken",
-        "SpellDescription": "Destroy target artifact or enchantment. If its mana value is 2 or less, create a 1/1 black and green Pest creature token with \"When this creature dies, you gain 1 life.\"",
-        "TgtPrompt": "Select target artifact or enchantment"
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

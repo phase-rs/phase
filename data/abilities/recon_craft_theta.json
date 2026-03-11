@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 0/0 blue Alien creature token. Put a +1/+1 counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, create a 0/0 blue Alien creature token. Put a +1/+1 counter on it.",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigProliferate"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

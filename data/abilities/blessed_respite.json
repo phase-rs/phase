@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBFog",
-        "SpellDescription": "Target player shuffles their graveyard into their library. Prevent all combat damage that would be dealt this turn.",
-        "ChangeType": "Card",
-        "Shuffle": "True"
-      }
+      "description": "Target player shuffles their graveyard into their library. Prevent all combat damage that would be dealt this turn.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

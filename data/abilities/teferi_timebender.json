@@ -2,72 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Untap up to one target artifact or creature.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap up to one target artifact or creature.",
-        "TgtPrompt": "Choose target artifact or creature",
-        "Planeswalker": "True",
-        "TargetMax": "1",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Choose target artifact or creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "Planeswalker": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "You gain 2 life and draw two cards."
-      }
+      "description": "You gain 2 life and draw two cards.",
+      "effect": {
+        "amount": 2,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddTurn",
-        "params": {
-          "Planeswalker": "True",
-          "SpellDescription": "Take an extra turn after this one.",
-          "Ultimate": "True",
-          "NumTurns": "1"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Take an extra turn after this one.",
-        "Ultimate": "True",
-        "NumTurns": "1"
-      }
+      "description": "Take an extra turn after this one.",
+      "effect": {
+        "description": "Take an extra turn after this one.",
+        "name": "AddTurn",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

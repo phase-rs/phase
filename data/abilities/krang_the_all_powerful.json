@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Drawn",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player draws their second card each turn, put a +1/+1 counter on NICKNAME.",
-        "Number": "2",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidMode": "Drawn",
-        "Description": "If a player drawing a card causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."
-      }
+      "description": "If a player drawing a card causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a player draws their second card each turn, put a +1/+1 counter on NICKNAME.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

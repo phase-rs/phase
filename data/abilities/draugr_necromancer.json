@@ -1,31 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "MayPlaySnowIgnoreColor": "True",
-        "Affected": "Card.OppOwn+counters_GE1_ICE+nonLand",
-        "Description": "You may cast spells from among cards in exile your opponents own with ice counters on them, and you may spend mana from snow sources as though it were mana of any color to cast those spells.",
-        "AffectedZone": "Exile",
-        "MayPlay": "True"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "ActiveZones": "Battlefield",
-        "ValidLKI": "Creature.!token+OppCtrl",
-        "ReplaceWith": "Exile",
-        "Description": "If a nontoken creature an opponent controls would die, exile that card with an ice counter on it instead.",
-        "Origin": "Battlefield"
-      }
+      "description": "If a nontoken creature an opponent controls would die, exile that card with an ice counter on it instead.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may cast spells from among cards in exile your opponents own with ice counters on them, and you may spend mana from snow sources as though it were mana of any color to cast those spells.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

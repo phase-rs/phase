@@ -2,69 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 3
+        "amount": 3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 3 life.",
-        "Planeswalker": "True"
-      }
+      "description": "You gain 3 life.",
+      "effect": {
+        "amount": 3,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -4,
+        "type": "Loyalty"
+      },
+      "description": "Reveal the top two cards of your library. Put all land cards from among them onto the battlefield and the rest into your hand.",
       "effect": {
-        "type": "Dig",
         "count": 2,
-        "destination": "Battlefield"
+        "destination": "Battlefield",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -4
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeValid": "Land",
-        "SpellDescription": "Reveal the top two cards of your library. Put all land cards from among them onto the battlefield and the rest into your hand.",
-        "Planeswalker": "True",
-        "Reveal": "True",
-        "ChangeNum": "All",
-        "DestinationZone2": "Hand"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 5,
-        "toughness": 5,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -12
+        "amount": -12,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "KW": "Trample",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Creatures you control get +5/+5 and gain trample until end of turn."
-      }
+      "description": "Creatures you control get +5/+5 and gain trample until end of turn.",
+      "effect": {
+        "power": 5,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 5,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

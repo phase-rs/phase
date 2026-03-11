@@ -1,53 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a creature an opponent controls dies, put a number of +1/+1 counters on CARDNAME equal to that creature's power.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Origin": "Battlefield",
-            "ValidCard": "Creature.OppCtrl",
-            "Execute": "TrigPutCounter",
-            "TriggerDescription": "Whenever a creature an opponent controls dies, put a number of +1/+1 counters on CARDNAME equal to that creature's power.",
-            "Destination": "Graveyard"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "controller": "Opponent",
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever CARDNAME attacks, you may transform it.",
           "mode": "Attacks",
-          "params": {
-            "OptionalDecider": "You",
-            "TriggerDescription": "Whenever CARDNAME attacks, you may transform it.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigTransform"
+          "optional": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME dies, return it to the battlefield tapped (front face up).",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigChangeZone",
-            "Destination": "Graveyard",
-            "TriggerDescription": "When CARDNAME dies, return it to the battlefield tapped (front face up)."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

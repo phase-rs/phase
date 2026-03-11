@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, each opponent chooses a creature they control, then sacrifices the rest.",
       "mode": "SetInMotion",
-      "params": {
-        "Execute": "TrigChoose",
-        "TriggerZones": "Command",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you set this scheme in motion, each opponent chooses a creature they control, then sacrifices the rest."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

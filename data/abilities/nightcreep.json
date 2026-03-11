@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "ValidCards": "Creature",
-          "OverwriteColors": "True",
-          "SubAbility": "AnimateSwamp",
-          "SpellDescription": "Until end of turn, all creatures become black and all lands become Swamps.",
-          "Colors": "Black"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "OverwriteColors": "True",
-        "SubAbility": "AnimateSwamp",
-        "SpellDescription": "Until end of turn, all creatures become black and all lands become Swamps.",
-        "Colors": "Black"
-      }
+      "description": "Until end of turn, all creatures become black and all lands become Swamps.",
+      "effect": {
+        "description": "Until end of turn, all creatures become black and all lands become Swamps.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

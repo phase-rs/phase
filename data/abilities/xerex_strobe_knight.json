@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "wu_2_2_knight_vigilance",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "CheckSVar": "X",
-        "SVarCompare": "GE2",
-        "SpellDescription": "Create a 2/2 white and blue Knight creature token with vigilance. Activate only if you've cast two or more spells this turn."
-      }
+      "description": "Create a 2/2 white and blue Knight creature token with vigilance. Activate only if you've cast two or more spells this turn.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "wu_2_2_knight_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

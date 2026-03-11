@@ -1,61 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card"
-            }
-          },
           "cost": null,
+          "description": "Exile up to two target cards from a single graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMin": "0",
-            "TargetsWithSameController": "True",
-            "TgtPrompt": "Select up to two target cards from a single graveyard",
-            "SpellDescription": "Exile up to two target cards from a single graveyard.",
-            "TargetMax": "2",
-            "SubAbility": "DBGainLife"
-          }
+          "target_prompt": "Select up to two target cards from a single graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "DestroyAll",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy all artifacts and enchantments.",
-            "ValidCards": "Artifact,Enchantment"
-          }
+          "description": "Destroy all artifacts and enchantments.",
+          "effect": {
+            "target": {
+              "type": "Any"
+            },
+            "type": "DestroyAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, CARDNAME deals 4 damage to that player.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDmg",
-        "TriggerDescription": "Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, CARDNAME deals 4 damage to that player.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Instant",
-        "ValidActivatingPlayer": "Player.Opponent",
-        "ActivatorThisTurnCast": "GT1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

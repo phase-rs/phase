@@ -2,74 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Variable",
-          "value": "X"
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withFlying"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X G"
+            "cost": "X G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to target creature with flying.",
-        "TgtPrompt": "Select target creature with flying"
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "CARDNAME deals X damage to target creature with flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
+      "kind": "Activated",
+      "sub_ability": null,
+      "target_prompt": "Select target creature with flying"
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X G G"
+            "cost": "X G G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/NICKNAME>"
+            "cost": "Discard<1/NICKNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Channel —",
-        "SpellDescription": "NICKNAME deals X damage to each creature with flying.",
-        "ValidDescription": "each creature with flying.",
-        "ValidCards": "Creature.withFlying",
-        "ActivationZone": "Hand"
-      }
+      "description": "NICKNAME deals X damage to each creature with flying.",
+      "effect": {
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        },
+        "type": "DamageAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

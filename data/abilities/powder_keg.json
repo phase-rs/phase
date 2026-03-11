@@ -2,49 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy each artifact and creature with mana value equal to the number of fuse counters on CARDNAME.",
-        "ValidCards": "Artifact.cmcEQX,Creature.cmcEQX"
-      }
+      "description": "Destroy each artifact and creature with mana value equal to the number of fuse counters on CARDNAME.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a fuse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, you may put a fuse counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

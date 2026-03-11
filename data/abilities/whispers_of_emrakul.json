@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent discards a card at random. Delirium — If there are four or more card types among cards in your graveyard, that player discards two cards at random instead.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent discards a card at random. Delirium — If there are four or more card types among cards in your graveyard, that player discards two cards at random instead.",
-        "Mode": "Random"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

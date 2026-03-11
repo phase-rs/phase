@@ -2,55 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Another target creature you control can't be blocked this turn except by Spirits.",
-          "ValidTgts": "Creature.YouCtrl+Other",
-          "TgtPrompt": "Select another target creature you control",
-          "StaticAbilities": "EffModeCantBlockBy",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
+      "description": "Another target creature you control can't be blocked this turn except by Spirits.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Another target creature you control can't be blocked this turn except by Spirits.",
-        "ValidTgts": "Creature.YouCtrl+Other",
-        "TgtPrompt": "Select another target creature you control",
-        "StaticAbilities": "EffModeCantBlockBy",
-        "RememberObjects": "Targeted"
+      "target_prompt": "Select another target creature you control"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked except by Spirits.",
+      "mode": {
+        "Other": "CantBlockBy"
       }
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME becomes the target of a spell, sacrifice it.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "When CARDNAME becomes the target of a spell, sacrifice it.",
-        "ValidSource": "Spell",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "type": "Typed"
       },
-      "params": {
-        "ValidBlocker": "Creature.nonSpirit",
-        "Description": "CARDNAME can't be blocked except by Spirits.",
-        "ValidAttacker": "Card.Self"
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

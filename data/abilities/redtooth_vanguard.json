@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an enchantment you control enters, you may pay {2}. If you do, return CARDNAME from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Enchantment.YouCtrl",
-        "Origin": "Any",
-        "TriggerZones": "Graveyard",
-        "Destination": "Battlefield",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever an enchantment you control enters, you may pay {2}. If you do, return CARDNAME from your graveyard to your hand."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

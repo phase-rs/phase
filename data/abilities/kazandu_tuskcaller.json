@@ -1,31 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 2-5 1/1 {T}: Create a 3/3 green Elephant creature token.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SetPower": "1",
-        "AddAbility": "TokenLow",
-        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE5_LEVEL",
-        "Description": "LEVEL 2-5 1/1 {T}: Create a 3/3 green Elephant creature token.",
-        "SetToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "ability": "TokenLow",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 6+ 1/1 {T}: Create two 3/3 green Elephant creature tokens.",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "1",
-        "AddAbility": "TokenHigh",
-        "IsPresent": "Card.Self+counters_GE6_LEVEL",
-        "Description": "LEVEL 6+ 1/1 {T}: Create two 3/3 green Elephant creature tokens.",
-        "SetToughness": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "ability": "TokenHigh",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

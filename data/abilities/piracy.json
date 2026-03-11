@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Until end of turn, you may tap lands you don't control for mana. Spend this mana only to cast spells.",
-          "AINoRecursiveCheck": "True",
-          "StaticAbilities": "STPiracy"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, you may tap lands you don't control for mana. Spend this mana only to cast spells.",
-        "AINoRecursiveCheck": "True",
-        "StaticAbilities": "STPiracy"
-      }
+      "description": "Until end of turn, you may tap lands you don't control for mana. Spend this mana only to cast spells.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

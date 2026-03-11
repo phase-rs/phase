@@ -1,27 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, scry 1.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, scry 1.",
-        "Execute": "TrigScry",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you scry, tap up to X target nonland permanents, where X is the number of cards looked at while scrying this way.",
       "mode": "Scry",
-      "params": {
-        "Execute": "TrigTap",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you scry, tap up to X target nonland permanents, where X is the number of cards looked at while scrying this way."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

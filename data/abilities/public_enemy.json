@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When enchanted creature dies, draw a card.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "All creatures attack enchanted creature's controller each combat if able.",
-        "MustAttack": "EnchantedController",
-        "ValidCreature": "Creature"
-      }
+      "description": "All creatures attack enchanted creature's controller each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature dies, draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

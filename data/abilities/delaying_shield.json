@@ -1,30 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "RemoveCounters",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+counters_GE1_DELAY",
-        "TriggerDescription": "At the beginning of your upkeep, remove all delay counters from CARDNAME. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}."
-      }
+      "description": "If damage would be dealt to you, put that many delay counters on CARDNAME instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If damage would be dealt to you, put that many delay counters on CARDNAME instead.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Counters",
-        "ValidTarget": "You"
-      }
+      "description": "At the beginning of your upkeep, remove all delay counters from CARDNAME. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

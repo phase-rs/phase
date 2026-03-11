@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your end step, destroy each creature with mana value equal to the number of +1/+1 counters on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "At the beginning of your end step, destroy each creature with mana value equal to the number of +1/+1 counters on CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

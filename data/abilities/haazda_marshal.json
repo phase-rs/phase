@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME and at least two other creatures attack, create a 1/1 white Soldier creature token with lifelink.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Creature.attacking+Other",
-        "TriggerDescription": "Whenever CARDNAME and at least two other creatures attack, create a 1/1 white Soldier creature token with lifelink.",
-        "PresentCompare": "GE2",
-        "TriggerZones": "Battlefield",
-        "NoResolvingCheck": "True",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

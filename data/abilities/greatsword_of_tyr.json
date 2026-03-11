@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, put a +1/+1 counter on it and tap up to one target creature defending player controls.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature attacks, put a +1/+1 counter on it and tap up to one target creature defending player controls.",
-        "Execute": "TrigPut",
-        "ValidCard": "Card.AttachedBy"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

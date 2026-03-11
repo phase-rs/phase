@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Spirit or Arcane spell, you may draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may draw a card.",
-        "ValidCard": "Spirit,Arcane",
-        "ValidActivatingPlayer": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spirit,Arcane",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

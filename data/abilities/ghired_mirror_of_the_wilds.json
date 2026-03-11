@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Nontoken creatures you control have \"{T}: Create a token that's a copy of target token you control that entered this turn.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.!token+YouCtrl",
-        "Description": "Nontoken creatures you control have \"{T}: Create a token that's a copy of target token you control that entered this turn.\"",
-        "AddAbility": "ABCopyPermanent"
-      }
+      "modifications": [
+        {
+          "ability": "ABCopyPermanent",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

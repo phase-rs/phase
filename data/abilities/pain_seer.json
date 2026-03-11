@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Inspired — Whenever CARDNAME becomes untapped, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",
       "mode": "Untaps",
-      "params": {
-        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "SeerDig"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

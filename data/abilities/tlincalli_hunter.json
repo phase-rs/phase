@@ -1,54 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Creature",
-            "MayPlay": "True",
-            "Description": "Once each turn, you may pay {0} rather than pay the mana cost for a creature spell you cast from exile.",
-            "MayPlayLimit": "1",
-            "AffectedZone": "Exile",
-            "MayPlayAltManaCost": "0",
-            "MayPlayDontGrantZonePermissions": "True"
-          }
+          "affected": {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          "affected_zone": "Exile",
+          "description": "Once each turn, you may pay {0} rather than pay the mana cost for a creature spell you cast from exile.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouOwn"
-            }
-          },
           "cost": null,
+          "description": "Exile target creature card from your graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouOwn"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target creature card in your graveyard",
-            "SubAbility": "DBEffect",
-            "SpellDescription": "Exile target creature card from your graveyard."
-          }
+          "target_prompt": "Select target creature card in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

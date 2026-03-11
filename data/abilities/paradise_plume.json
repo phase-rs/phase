@@ -2,36 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Chosen",
-        "params": {
-          "SpellDescription": "Add one mana of the chosen color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of the chosen color."
-      }
+      "description": "Add one mana of the chosen color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell of the chosen color, you may gain 1 life.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigGainLife",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player casts a spell of the chosen color, you may gain 1 life.",
-        "ValidCard": "Card.ChosenColor",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

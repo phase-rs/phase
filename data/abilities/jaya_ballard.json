@@ -2,92 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "AILogic": "ManaRitual",
-          "RestrictValid": "Spell.Instant,Spell.Sorcery",
-          "SpellDescription": "Add {R}{R}{R}. Spend this mana only to cast instant or sorcery spells.",
-          "Amount": "3",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "ManaRitual",
-        "RestrictValid": "Spell.Instant,Spell.Sorcery",
-        "SpellDescription": "Add {R}{R}{R}. Spend this mana only to cast instant or sorcery spells.",
-        "Amount": "3",
-        "Planeswalker": "True"
-      }
+      "description": "Add {R}{R}{R}. Spend this mana only to cast instant or sorcery spells.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Discard up to three cards, then draw that many cards.",
       "effect": {
-        "type": "Discard",
         "count": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RememberDiscarded": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Discard up to three cards, then draw that many cards.",
-        "Mode": "TgtChoose",
-        "Optional": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "JayaReplace",
-          "SpellDescription": "You get an emblem with \"You may cast instant and sorcery spells from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.\"",
-          "Image": "emblem_jaya_ballard",
-          "Name": "Emblem — Jaya Ballard",
-          "Stackable": "False",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "StaticAbilities": "STJaya",
-          "AILogic": "Always"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "JayaReplace",
-        "SpellDescription": "You get an emblem with \"You may cast instant and sorcery spells from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.\"",
-        "Image": "emblem_jaya_ballard",
-        "Name": "Emblem — Jaya Ballard",
-        "Stackable": "False",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "StaticAbilities": "STJaya",
-        "AILogic": "Always"
-      }
+      "description": "You get an emblem with \"You may cast instant and sorcery spells from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

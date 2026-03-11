@@ -1,69 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever this creature enters or transforms into CARDNAME, create a 2/2 green Wolf creature token and you gain 2 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Execute": "TokenAndLife",
-            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, create a 2/2 green Wolf creature token and you gain 2 life."
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever this creature enters or transforms into CARDNAME, create a 2/2 green Wolf creature token and you gain 2 life.",
           "mode": "Transformed",
-          "params": {
-            "Secondary": "True",
-            "Execute": "TokenAndLife",
-            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, create a 2/2 green Wolf creature token and you gain 2 life.",
-            "ValidCard": "Card.Self"
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "WerewolfTransformCondition": "True",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "Phase": "Upkeep"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever this creature transforms into CARDNAME, it deals 2 damage to target opponent or planeswalker and 2 damage to up to one target creature that player or that planeswalker's controller controls.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "Whenever this creature transforms into CARDNAME, it deals 2 damage to target opponent or planeswalker and 2 damage to up to one target creature that player or that planeswalker's controller controls.",
-            "ValidCard": "Card.Self",
-            "Execute": "DamageAndMoreDamage"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Phase": "Upkeep",
-            "WerewolfUntransformCondition": "True",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,23 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": ""
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "2",
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Look at the top four cards of your library. Put two of them into your hand and the rest on the bottom of your library in any order. You lose 2 life."
-      }
+      "description": "Look at the top four cards of your library. Put two of them into your hand and the rest on the bottom of your library in any order. You lose 2 life.",
+      "effect": {
+        "count": 4,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

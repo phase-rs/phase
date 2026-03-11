@@ -2,64 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Blight",
-        "params": {
-          "SorcerySpeed": "True",
-          "ValidTgts": "Opponent",
-          "SpellDescription": "Target opponent blights 2. Activate only as a sorcery.",
-          "Num": "2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<1>",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Blight<2>"
+            "cost": "Blight<2>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "ValidTgts": "Opponent",
-        "SpellDescription": "Target opponent blights 2. Activate only as a sorcery.",
-        "Num": "2"
-      }
+      "description": "Target opponent blights 2. Activate only as a sorcery.",
+      "effect": {
+        "description": "Target opponent blights 2. Activate only as a sorcery.",
+        "name": "Blight",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "As an additional cost to cast this spell, behold a Goblin and exile it. (Exile a Goblin you control or a Goblin card from your hand.)",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     }
   ],
   "triggers": [
     {
+      "description": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
-        "Origin": "Battlefield",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "RaiseCost",
-      "params": {
-        "Activator": "You",
-        "EffectZone": "All",
-        "Description": "As an additional cost to cast this spell, behold a Goblin and exile it. (Exile a Goblin you control or a Goblin card from your hand.)",
-        "Type": "Spell",
-        "Cost": "BeholdExile<1/Goblin>",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,38 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts an instant or sorcery card, exile it. Then that player copies each instant or sorcery card exiled with CARDNAME. For each copy, the player may cast the copy without paying its mana cost.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player casts an instant or sorcery card, exile it. Then that player copies each instant or sorcery card exiled with CARDNAME. For each copy, the player may cast the copy without paying its mana cost.",
-        "Execute": "TrigExileSpell",
-        "ValidCard": "Instant.!token,Sorcery.!token"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.IsRemembered",
-        "Static": "True",
-        "Execute": "DBForget",
-        "Origin": "Exile",
-        "Destination": "Any"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Static": "True",
-        "Execute": "DBCleanup"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

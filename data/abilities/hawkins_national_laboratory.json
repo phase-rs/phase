@@ -1,125 +1,115 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "C",
-            "params": {
-              "SpellDescription": "Add {C}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {C}."
-          }
+          "description": "Add {C}.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "Investigate",
-            "params": {
-              "SpellDescription": "Investigate."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4"
+                "cost": "4",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Investigate."
-          }
+          "description": "Investigate.",
+          "effect": {
+            "description": "Investigate.",
+            "name": "Investigate",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if you sacrificed three or more clues this turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "SVarCompare": "GE3",
-            "TriggerZones": "Battlefield",
-            "CheckSVar": "ClueResearch",
-            "Execute": "TrigTransform",
-            "Phase": "End of Turn",
-            "TriggerDescription": "At the beginning of your end step, if you sacrificed three or more clues this turn, transform CARDNAME."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "B",
-            "params": {
-              "SpellDescription": "Add {B}."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "PayLife<1>"
+                "cost": "PayLife<1>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {B}."
-          }
+          "description": "Add {B}.",
+          "effect": {
+            "produced": [
+              "Black"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this land transforms into CARDNAME, return target creature card from your graveyard to the battlefield.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "When this land transforms into CARDNAME, return target creature card from your graveyard to the battlefield.",
-            "Execute": "TrigReturn",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "When the creature card put onto the battlefield with CARDNAME leaves the battlefield, transform CARDNAME.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When the creature card put onto the battlefield with CARDNAME leaves the battlefield, transform CARDNAME.",
-            "Origin": "Battlefield",
-            "ValidCard": "Card.IsRemembered",
-            "Destination": "Any",
-            "Execute": "TrigTransform2",
-            "TriggerZones": "Battlefield"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "IsRemembered"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

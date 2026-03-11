@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 and is an artifact in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "AddType": "Artifact",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature gets +1/+1 and is an artifact in addition to its other types."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Artifact",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

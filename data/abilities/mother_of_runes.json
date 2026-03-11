@@ -2,33 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "TgtPrompt": "Select target creature you control",
-          "Gains": "Choice",
-          "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn.",
-          "Choices": "AnyColor"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature you control gains protection from the color of your choice until end of turn.",
+      "effect": {
+        "description": "Target creature you control gains protection from the color of your choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "TgtPrompt": "Select target creature you control",
-        "Gains": "Choice",
-        "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn.",
-        "Choices": "AnyColor"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

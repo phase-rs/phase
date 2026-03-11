@@ -2,55 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.!enchanted"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U U"
+            "cost": "2 U U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target permanent that isn't enchanted to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target permanent that isn't enchanted to its owner's hand.",
-        "TgtPrompt": "Select target unenchanted permanent"
-      }
+      "target_prompt": "Select target unenchanted permanent"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
-        "Execute": "DelayedTrig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
       "mode": "Blocks",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
-        "ValidCard": "Card.Self",
-        "Execute": "DelayedTrig"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

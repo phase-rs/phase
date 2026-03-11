@@ -2,48 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Controller": "You",
-          "SpellDescription": "You may cast a noncreature spell from your hand without paying its mana cost.",
-          "ValidZone": "Hand",
-          "WithoutManaCost": "True",
-          "Optional": "True",
-          "Valid": "Card",
-          "ValidSA": "Spell.nonCreature+YouOwn",
-          "Amount": "1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "Waterbend<5>"
+            "cost": "Waterbend<5>",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Controller": "You",
-        "SpellDescription": "You may cast a noncreature spell from your hand without paying its mana cost.",
-        "ValidZone": "Hand",
-        "WithoutManaCost": "True",
-        "Optional": "True",
-        "Valid": "Card",
-        "ValidSA": "Spell.nonCreature+YouOwn",
-        "Amount": "1"
-      }
+      "description": "You may cast a noncreature spell from your hand without paying its mana cost.",
+      "effect": {
+        "description": "You may cast a noncreature spell from your hand without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,48 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddOrRemoveCounter",
-        "params": {
-          "ValidTgts": "Saga.YouCtrl",
-          "TgtPrompt": "Select target Saga you control",
-          "SpellDescription": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
-          "CounterType": "LORE",
-          "CounterNum": "1",
-          "Boast": "True"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
+      "effect": {
+        "description": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
+        "name": "AddOrRemoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Saga.YouCtrl",
-        "TgtPrompt": "Select target Saga you control",
-        "SpellDescription": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
-        "CounterType": "LORE",
-        "CounterNum": "1",
-        "Boast": "True"
-      }
+      "target_prompt": "Select target Saga you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you put a lore counter on a Saga you control, put a +1/+1 counter on up to one other target creature.",
       "mode": "CounterAdded",
-      "params": {
-        "ValidSource": "You",
-        "ValidCard": "Saga.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you put a lore counter on a Saga you control, put a +1/+1 counter on up to one other target creature.",
-        "CounterType": "LORE"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

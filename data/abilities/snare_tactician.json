@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle a card, tap target creature an opponent controls.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card.YouOwn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cycle a card, tap target creature an opponent controls.",
-        "Execute": "TrigTap"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

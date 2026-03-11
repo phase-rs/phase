@@ -1,58 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "4 B",
+            "type": "Mana"
+          },
+          "description": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if an opponent has eight or more cards in their graveyard.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "4 B"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBReturn",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if an opponent has eight or more cards in their graveyard.",
-            "SorcerySpeed": "True",
-            "SVarCompare": "GE8",
-            "CheckSVar": "X",
-            "RememberChanged": "True"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, each opponent sacrifices a nontoken creature or planeswalker.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "DBSacrifice",
-            "TriggerDescription": "When CARDNAME enters, each opponent sacrifices a nontoken creature or planeswalker.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

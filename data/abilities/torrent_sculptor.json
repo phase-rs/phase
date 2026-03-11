@@ -1,50 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, exile an instant or sorcery card from your graveyard. Put a number of +1/+1 counters on CARDNAME equal to half that card's mana value, rounded up.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigChangeZone",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, exile an instant or sorcery card from your graveyard. Put a number of +1/+1 counters on CARDNAME equal to half that card's mana value, rounded up."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Discard a card, then draw a card.",
           "effect": {
-            "type": "Discard",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Discard a card, then draw a card.",
-            "SubAbility": "DBDraw",
-            "Mode": "TgtChoose",
-            "RememberDiscarded": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

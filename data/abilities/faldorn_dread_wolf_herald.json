@@ -2,64 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top card of your library. You may play it this turn.",
-        "Defined": "You"
-      }
+      "description": "Exile the top card of your library. You may play it this turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell from exile or a land you control enters from exile, create a 2/2 green Wolf creature token.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.wasCastFromExile",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell from exile or a land you control enters from exile, create a 2/2 green Wolf creature token.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a spell from exile or a land you control enters from exile, create a 2/2 green Wolf creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "Origin": "Exile",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell from exile or a land you control enters from exile, create a 2/2 green Wolf creature token."
+      "origin": "Exile",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

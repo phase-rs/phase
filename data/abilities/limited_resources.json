@@ -1,30 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, each player chooses five lands they control and sacrifices the rest.",
-        "Execute": "DBCardChoice",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Players can't play lands as long as ten or more lands are on the battlefield.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "Description": "Players can't play lands as long as ten or more lands are on the battlefield.",
-        "PresentCompare": "GE10",
-        "IsPresent": "Land"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, each player chooses five lands they control and sacrifices the rest.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

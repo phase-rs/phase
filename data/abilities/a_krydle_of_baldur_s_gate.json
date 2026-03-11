@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player loses 1 life and mills a card, then you gain 1 life and scry 1.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player loses 1 life and mills a card, then you gain 1 life and scry 1.",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever you attack, target creature can't be blocked this turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigUnblockable",
-        "TriggerDescription": "Whenever you attack, target creature can't be blocked this turn.",
-        "AttackingPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

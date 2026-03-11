@@ -1,19 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Swamp",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is in your graveyard and you control a Swamp, creatures you control have swampwalk.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "AddKeyword": "Landwalk:Swamp",
-        "IsPresent": "Swamp.YouCtrl",
-        "Description": "As long as CARDNAME is in your graveyard and you control a Swamp, creatures you control have swampwalk.",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Swamp",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

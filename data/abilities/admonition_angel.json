@@ -1,31 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, you may exile target nonland permanent other than CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Landfall — Whenever a land you control enters, you may exile target nonland permanent other than CARDNAME.",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigExile"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, return all cards exiled with it to the battlefield under their owners' control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME leaves the battlefield, return all cards exiled with it to the battlefield under their owners' control.",
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

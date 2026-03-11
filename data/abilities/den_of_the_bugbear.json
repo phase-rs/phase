@@ -2,63 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}."
-      }
+      "description": "Add {R}.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 3/2 red Goblin creature with \"Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking.\" It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Creature",
           "Goblin"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Red",
-        "Defined": "Self",
-        "OverwriteColors": "True",
-        "Triggers": "TrigAttack",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 3/2 red Goblin creature with \"Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking.\" It's still a land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you control two or more other lands, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "LandTapped",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Description": "If you control two or more other lands, CARDNAME enters tapped.",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

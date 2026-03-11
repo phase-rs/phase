@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Enchantment",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack or block if an enchantment is on the battlefield.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack or block if an enchantment is on the battlefield.",
-        "IsPresent": "Enchantment"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

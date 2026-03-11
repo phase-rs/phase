@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, target creature gets +1/+1 and gains lifelink until end of turn.",
       "mode": "CrankContraption",
-      "params": {
-        "TriggerDescription": "Whenever you crank CARDNAME, target creature gets +1/+1 and gains lifelink until end of turn.",
-        "Execute": "TrigCrank",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

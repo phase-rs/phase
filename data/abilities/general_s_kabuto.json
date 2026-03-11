@@ -1,17 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has shroud. (It can't be the target of spells or abilities.) Prevent all combat damage that would be dealt to equipped creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Shroud & Prevent all combat damage that would be dealt to CARDNAME.",
-        "Description": "Equipped creature has shroud. (It can't be the target of spells or abilities.) Prevent all combat damage that would be dealt to equipped creature."
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Prevent",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "all",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "combat",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "damage",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "that",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "would",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "be",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "dealt",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "to",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "CARDNAME.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,72 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile target card from a graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target card in a graveyard",
-        "SpellDescription": "Exile target card from a graveyard."
-      }
+      "target_prompt": "Choose target card in a graveyard"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W B"
+            "cost": "2 W B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile target nonland card from a graveyard, all other cards from graveyards with the same name as that card, and all permanents with that name.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeAll",
-        "SpellDescription": "Exile target nonland card from a graveyard, all other cards from graveyards with the same name as that card, and all permanents with that name.",
-        "ForgetOtherTargets": "True",
-        "TgtPrompt": "Choose target card in a graveyard",
-        "RememberTargets": "True"
-      }
+      "target_prompt": "Choose target card in a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

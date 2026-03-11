@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever NICKNAME attacks, you and defending player each draw a card, then discard a card. Put two +1/+1 counters on NICKNAME if you discarded the card with the highest mana value among those cards or tied for highest.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "Description": "During your turn, CARDNAME has indestructible.",
-        "Condition": "PlayerTurn",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever NICKNAME attacks, you and defending player each draw a card, then discard a card. Put two +1/+1 counters on NICKNAME if you discarded the card with the highest mana value among those cards or tied for highest.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

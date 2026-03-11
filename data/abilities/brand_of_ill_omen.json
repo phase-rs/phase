@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Player.EnchantedController",
-        "Description": "Enchanted creature's controller can't cast creature spells.",
-        "ValidCard": "Creature"
-      }
+      "description": "Enchanted creature's controller can't cast creature spells.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

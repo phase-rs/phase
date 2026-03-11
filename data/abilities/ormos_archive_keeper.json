@@ -2,45 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 5
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U U"
+            "cost": "1 U U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<3/Card+WithDifferentNames>"
+            "cost": "Discard<3/Card+WithDifferentNames>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw five cards."
-      }
+      "description": "Draw five cards.",
+      "effect": {
+        "count": 5,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "Description": "If you would draw a card while your library has no cards in it, instead put five +1/+1 counters on CARDNAME.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "AddCounters",
-        "PresentCompare": "EQ0",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.YouOwn",
-        "PresentZone": "Library"
-      }
+      "description": "If you would draw a card while your library has no cards in it, instead put five +1/+1 counters on CARDNAME.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

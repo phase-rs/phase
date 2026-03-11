@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more Vehicles you control attack, create a 1/1 colorless Pilot creature token with \"This creature crews Vehicles as though its power were 2 greater.\"",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Vehicle.YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever one or more Vehicles you control attack, create a 1/1 colorless Pilot creature token with \"This creature crews Vehicles as though its power were 2 greater.\""
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Nontoken creatures you control get +1/+1 and have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddKeyword": "Vigilance",
-        "Description": "Nontoken creatures you control get +1/+1 and have vigilance.",
-        "AddToughness": "1",
-        "Affected": "Creature.!token+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

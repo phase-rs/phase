@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks a creature with flying, put a +1/+1 counter on CARDNAME at end of combat.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidCard": "Creature.withFlying",
-        "Execute": "DelayedTrig",
-        "ValidBlocker": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks a creature with flying, put a +1/+1 counter on CARDNAME at end of combat."
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

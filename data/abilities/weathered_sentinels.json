@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +3/+3 and gains indestructible until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can attack players who attacked you during their last turn as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Description": "CARDNAME can attack players who attacked you during their last turn as though it didn't have defender.",
-        "ValidCard": "Card.Self",
-        "ValidAttacked": "Player.attackedYouTheirLastTurn"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, it gets +3/+3 and gains indestructible until end of turn.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

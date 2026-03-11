@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, target creature gets -1/-1 until end of turn.",
       "mode": "CrankContraption",
-      "params": {
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, target creature gets -1/-1 until end of turn.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

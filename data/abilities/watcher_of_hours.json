@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you remove a time counter from CARDNAME while it's exiled, surveil 1.",
       "mode": "CounterRemoved",
-      "params": {
-        "TriggerZones": "Exile",
-        "Execute": "TrigSurveil",
-        "ValidCard": "Card.Self",
-        "CounterType": "TIME",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you remove a time counter from CARDNAME while it's exiled, surveil 1."
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

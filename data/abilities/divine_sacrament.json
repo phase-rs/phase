@@ -1,28 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "White creatures get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Affected": "Creature.White",
-        "Description": "White creatures get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Creature.White",
-        "Description": "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
-        "Condition": "Threshold"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

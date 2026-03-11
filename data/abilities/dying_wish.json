@@ -1,19 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When enchanted creature dies, target player loses X life and you gain X life, where X is its power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When enchanted creature dies, target player loses X life and you gain X life, where X is its power.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.EnchantedBy",
-        "Execute": "TrigLose"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

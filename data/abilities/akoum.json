@@ -1,28 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, destroy target creature that isn't enchanted.",
-        "Execute": "RolledChaos"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "EffectZone": "Command",
-        "Caster": "Player",
-        "Description": "Players may cast enchantment spells as though they had flash.",
-        "ValidCard": "Enchantment",
-        "ValidSA": "Spell"
-      }
+      "description": "Players may cast enchantment spells as though they had flash.",
+      "effect_zone": "Command",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, destroy target creature that isn't enchanted.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

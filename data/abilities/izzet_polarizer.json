@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, conjure a card named Ionize or a card named Electrolyze into your hand. (Your choice is not revealed to other players.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigConjure",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, conjure a card named Ionize or a card named Electrolyze into your hand. (Your choice is not revealed to other players.)",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

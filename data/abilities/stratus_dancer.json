@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, counter target instant or sorcery spell.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "When CARDNAME is turned face up, counter target instant or sorcery spell.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

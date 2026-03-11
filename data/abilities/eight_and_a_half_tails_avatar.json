@@ -2,34 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Until end of turn, target permanent you control gains protection from a color chosen at random from colors it doesn't have protection from.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Protection from red & Protection from blue & Protection from black & Protection from white & Protection from green",
-        "TgtPrompt": "Select target permanent you control",
-        "StackDescription": "SpellDescription",
-        "RandomKeyword": "True",
-        "ActivationZone": "Command",
-        "NoRepetition": "True",
-        "SpellDescription": "Until end of turn, target permanent you control gains protection from a color chosen at random from colors it doesn't have protection from."
-      }
+      "target_prompt": "Select target permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

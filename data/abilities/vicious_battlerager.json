@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you take the initiative.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you take the initiative.",
-        "Destination": "Battlefield",
-        "Execute": "TrigInitiative",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Spiked Retribution — Whenever CARDNAME becomes blocked by a creature, that creature's controller loses 5 life.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Spiked Retribution — Whenever CARDNAME becomes blocked by a creature, that creature's controller loses 5 life.",
-        "ValidBlocker": "Creature",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

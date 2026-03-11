@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Creature.leastPower",
-        "AITgts": "Card.leastPower",
-        "ConditionDefined": "Targeted",
-        "SpellDescription": "Destroy target creature if it has the least power or is tied for least power among creatures on the battlefield.",
-        "ConditionCompare": "EQ1"
-      }
+      "description": "Destroy target creature if it has the least power or is tied for least power among creatures on the battlefield.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

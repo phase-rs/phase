@@ -2,40 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose any number of target players.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Player"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose any number of target players.",
-        "TargetMax": "MaxPlayers",
-        "SubAbility": "DBInvestigate",
-        "TargetMin": "0"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "EffectZone": "All",
-        "Relative": "True",
-        "Description": "This spell costs {W}{U} more to cast for each target beyond the first.",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Amount": "IncreaseCost",
-        "Cost": "W U"
-      }
+      "description": "This spell costs {W}{U} more to cast for each target beyond the first.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

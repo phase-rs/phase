@@ -2,46 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "2",
-          "RestrictValid": "Spell.Mount,Spell.Vehicle",
-          "SpellDescription": "Add two mana of any one color. Spend this mana only to cast Mount or Vehicle spells."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "RestrictValid": "Spell.Mount,Spell.Vehicle",
-        "SpellDescription": "Add two mana of any one color. Spend this mana only to cast Mount or Vehicle spells."
-      }
+      "description": "Add two mana of any one color. Spend this mana only to cast Mount or Vehicle spells.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

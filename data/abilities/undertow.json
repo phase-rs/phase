@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with islandwalk can be blocked as though they didn't have islandwalk.",
       "mode": {
         "Other": "IgnoreLandWalk"
-      },
-      "params": {
-        "ValidKeyword": "Landwalk:Island",
-        "Description": "Creatures with islandwalk can be blocked as though they didn't have islandwalk."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

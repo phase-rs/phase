@@ -1,31 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME enters, return target creature an opponent controls to its owner's hand.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "IsPresent": "Wizard.YouCtrl",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast if you control a Wizard.",
-        "EffectZone": "All",
-        "Amount": "1"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Wizard",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control a Wizard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, return target creature an opponent controls to its owner's hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

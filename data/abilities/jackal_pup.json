@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, it deals that much damage to you.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, it deals that much damage to you.",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

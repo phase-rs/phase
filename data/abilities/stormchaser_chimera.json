@@ -2,24 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U R"
+        "cost": "2 U R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1, then reveal the top card of your library. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value.",
-        "SubAbility": "DBReveal"
-      }
+      "description": "Scry 1, then reveal the top card of your library. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

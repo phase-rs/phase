@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment,Instant,Sorcery"
-        }
-      },
       "cost": null,
+      "description": "Counter target enchantment, instant or sorcery spell. Its controller creates a 2/2 blue Bird creature token with flying.",
+      "effect": {
+        "target": {
+          "card_type": "Enchantment,Instant,Sorcery",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target enchantment, instant or sorcery spell",
-        "SubAbility": "DBToken",
-        "SpellDescription": "Counter target enchantment, instant or sorcery spell. Its controller creates a 2/2 blue Bird creature token with flying.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target enchantment, instant or sorcery spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

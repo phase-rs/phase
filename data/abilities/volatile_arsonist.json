@@ -1,39 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, it deals 1 damage to each of up to one target creature, up to one target player, and/or up to one target planeswalker.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigDamage1",
-            "TriggerDescription": "Whenever CARDNAME attacks, it deals 1 damage to each of up to one target creature, up to one target player, and/or up to one target planeswalker.",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, it deals 2 damage to each of up to one target creature, up to one target player, and/or up to one target planeswalker.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigDamage1",
-            "TriggerDescription": "Whenever CARDNAME attacks, it deals 2 damage to each of up to one target creature, up to one target player, and/or up to one target planeswalker.",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,39 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "ValidCards": "Creature.attackedThisTurn",
-          "SpellDescription": "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.",
-          "SubAbility": "DBAddCombat"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.attackedThisTurn",
-        "SpellDescription": "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.",
-        "SubAbility": "DBAddCombat"
-      }
+      "description": "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.",
+      "effect": {
+        "description": "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile two red cards from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Cost": "ExileFromHand<2/Card.Red+Other>",
-        "Description": "You may exile two red cards from your hand rather than pay this spell's mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

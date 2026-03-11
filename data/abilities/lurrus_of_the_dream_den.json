@@ -1,22 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "MayPlayLimit": "1",
-        "AffectedZone": "Graveyard",
-        "EffectZone": "Battlefield",
-        "MayPlay": "True",
-        "ValidAfterStack": "Spell.cmcLE2",
-        "Affected": "Permanent.nonLand+YouOwn+cmcLE2",
-        "Description": "During each of your turns, you may cast one permanent spell with mana value 2 or less from your graveyard."
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During each of your turns, you may cast one permanent spell with mana value 2 or less from your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

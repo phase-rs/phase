@@ -2,50 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "If a source you control would deal noncombat damage to a permanent or player this turn, it deals that much damage plus X instead.",
-          "SetChosenNumber": "X",
-          "ReplacementEffects": "RepDamage"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If a source you control would deal noncombat damage to a permanent or player this turn, it deals that much damage plus X instead.",
-        "SetChosenNumber": "X",
-        "ReplacementEffects": "RepDamage"
-      }
+      "description": "If a source you control would deal noncombat damage to a permanent or player this turn, it deals that much damage plus X instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source you control deals noncombat damage to a creature equal to that creature's toughness, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "DamageAmount": "EQTargetToughness",
-        "TriggerDescription": "Whenever a source you control deals noncombat damage to a creature equal to that creature's toughness, draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature",
-        "CombatDamage": "False"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Emblem.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

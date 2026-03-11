@@ -1,30 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Taps",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a permanent becomes tapped, put a wind counter on it.",
-        "TriggerZones": "Battlefield"
+      "description": "If a permanent with a wind counter on it would untap during its controller's untap step, remove all wind counters from it instead.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "If a permanent with a wind counter on it would untap during its controller's untap step, remove all wind counters from it instead.",
-        "ReplaceWith": "RepRemoveCounter",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Permanent.counters_GE1_WIND",
-        "ValidStepTurnToController": "You"
-      }
+      "description": "Whenever a permanent becomes tapped, put a wind counter on it.",
+      "mode": "Taps",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

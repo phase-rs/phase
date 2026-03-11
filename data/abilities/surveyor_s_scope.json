@@ -2,38 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "X",
-        "SpellDescription": "Search your library for up to X basic land cards, where X is the number of players who control at least two more lands than you. Put those lands onto the battlefield, then shuffle.",
-        "ChangeType": "Land.Basic",
-        "ChangeTypeDesc": "basic land"
-      }
+      "description": "Search your library for up to X basic land cards, where X is the number of players who control at least two more lands than you. Put those lands onto the battlefield, then shuffle.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

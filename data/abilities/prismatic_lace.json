@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SubAbility": "Animate",
-          "SpellDescription": "Target permanent becomes the color or colors of your choice. (This effect lasts indefinitely.)",
-          "OrColors": "True",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "Animate",
-        "SpellDescription": "Target permanent becomes the color or colors of your choice. (This effect lasts indefinitely.)",
-        "OrColors": "True",
-        "Defined": "You"
-      }
+      "description": "Target permanent becomes the color or colors of your choice. (This effect lasts indefinitely.)",
+      "effect": {
+        "description": "Target permanent becomes the color or colors of your choice. (This effect lasts indefinitely.)",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

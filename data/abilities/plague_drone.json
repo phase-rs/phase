@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "GainLife",
-      "params": {
-        "ReplaceWith": "RLoseLife",
-        "AILogic": "LoseLife",
-        "ValidPlayer": "Opponent",
-        "ActiveZones": "Battlefield",
-        "Description": "Rot Fly — If an opponent would gain life, that player loses that much life instead."
-      }
+      "description": "Rot Fly — If an opponent would gain life, that player loses that much life instead.",
+      "event": "GainLife"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

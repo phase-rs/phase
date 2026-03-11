@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, CARDNAME deals damage to that player equal to the number of artifacts they control.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals damage to that player equal to the number of artifacts they control.",
-        "ValidPlayer": "Player"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

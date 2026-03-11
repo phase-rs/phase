@@ -2,68 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "OIL",
-        "count": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl,Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put two oil counters on target artifact or creature you control. Draw a card. Activate only as a sorcery.",
+      "effect": {
+        "count": 2,
+        "counter_type": "OIL",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Creature.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put two oil counters on target artifact or creature you control. Draw a card. Activate only as a sorcery.",
-        "SubAbility": "DBDraw",
-        "TgtPrompt": "Select target artifact or creature you control",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target artifact or creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

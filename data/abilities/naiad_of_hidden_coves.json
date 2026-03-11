@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Type": "Spell",
-        "Activator": "You",
-        "Condition": "NotPlayerTurn",
-        "Description": "As long as it's not your turn, spells you cast cost {1} less to cast."
-      }
+      "description": "As long as it's not your turn, spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

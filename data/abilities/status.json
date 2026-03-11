@@ -1,57 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 1,
-            "toughness": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "Deathtouch",
-            "SpellDescription": "Target creature gets +1/+1 and gains deathtouch until end of turn."
-          }
+          "description": "Target creature gets +1/+1 and gains deathtouch until end of turn.",
+          "effect": {
+            "power": 1,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 1,
+            "type": "Pump"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact,Creature,Enchantment"
-            }
-          },
           "cost": null,
+          "description": "Destroy target artifact, creature or enchantment.",
+          "effect": {
+            "target": {
+              "card_type": "Artifact,Creature,Enchantment",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy target artifact, creature or enchantment.",
-            "TgtPrompt": "Select target artifact, creature or enchantment"
-          }
+          "target_prompt": "Select target artifact, creature or enchantment"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature.Blue",
-          "SpellDescription": "Tap all blue creatures."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.Blue",
-        "SpellDescription": "Tap all blue creatures."
-      }
+      "description": "Tap all blue creatures.",
+      "effect": {
+        "description": "Tap all blue creatures.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

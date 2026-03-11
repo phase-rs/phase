@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you roll a die, put a number of luck counters on CARDNAME equal to the result. Then if there are 100 or more luck counters on CARDNAME, you win the game.",
       "mode": "RolledDie",
-      "params": {
-        "TriggerDescription": "Whenever you roll a die, put a number of luck counters on CARDNAME equal to the result. Then if there are 100 or more luck counters on CARDNAME, you win the game.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounters"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

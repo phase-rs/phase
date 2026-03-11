@@ -2,55 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "G W",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 4/4 green and white Insect Monk creature with first strike until end of turn. It's still a land. Activate only if there are seven or more cards in your graveyard.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Insect",
           "Monk"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "G W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Activation": "Threshold",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME becomes a 4/4 green and white Insect Monk creature with first strike until end of turn. It's still a land. Activate only if there are seven or more cards in your graveyard.",
-        "Colors": "Green,White",
-        "PrecostDesc": "Threshold —",
-        "OverwriteColors": "True",
-        "Keywords": "First Strike"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

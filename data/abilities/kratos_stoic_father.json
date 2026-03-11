@@ -1,40 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "God.YouCtrl",
-        "Execute": "TrigExperience",
-        "TriggerDescription": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "God",
-        "TriggerDescription": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter.",
-        "Secondary": "True",
-        "Execute": "TrigExperience"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "God",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, put a number of +1/+1 counters on target creature equal to the number of experience counters you have.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, put a number of +1/+1 counters on target creature equal to the number of experience counters you have.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,47 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B G"
+            "cost": "1 B G",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "You gain 1 life and draw a card."
-      }
+      "description": "You gain 1 life and draw a card.",
+      "effect": {
+        "amount": 1,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice an artifact or creature, put a +1/+1 counter on CARDNAME.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "ValidCard": "Artifact.YouCtrl,Creature.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you sacrifice an artifact or creature, put a +1/+1 counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Creature.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

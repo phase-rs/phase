@@ -1,33 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this creature enters, draw a card.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw"
+      "description": "As long as you have one or fewer cards in hand, if you would draw one or more cards, you draw that many cards plus one instead.",
+      "event": {
+        "Other": "DrawCards"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "DrawCards"
-      },
-      "params": {
-        "Description": "As long as you have one or fewer cards in hand, if you would draw one or more cards, you draw that many cards plus one instead.",
-        "SVarCompare": "LE1",
-        "ActiveZones": "Battlefield",
-        "CheckSVar": "X",
-        "ReplaceWith": "DrawPlusOne",
-        "ValidPlayer": "You"
+      "description": "When this creature enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

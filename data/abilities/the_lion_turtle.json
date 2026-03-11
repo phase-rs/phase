@@ -2,50 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color.",
-          "Amount": "1"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color.",
-        "Amount": "1"
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "condition": {
+        "compare": "LT3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack or block unless there are three or more Lesson cards in your graveyard.",
+      "mode": {
+        "Other": "CantAttack,CantBlock"
       }
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you gain 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you gain 3 life.",
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "SVarCompare": "LT3",
-        "Description": "CARDNAME can't attack or block unless there are three or more Lesson cards in your graveyard.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

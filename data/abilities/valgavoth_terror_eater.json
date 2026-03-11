@@ -1,31 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.ExiledWithSource",
-        "AffectedZone": "Exile",
-        "Condition": "PlayerTurn",
-        "MayPlay": "True",
-        "MayPlayAltManaCost": "PayLife<ConvertedManaCost>",
-        "Description": "During your turn, you may play cards exiled with NICKNAME. If you cast a spell this way, pay life equal to its mana value rather than pay its mana cost."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "ActiveZones": "Battlefield",
-        "ValidLKI": "Card.!token+YouDontCtrl+OppOwn",
-        "Description": "If a card you didn't control would be put into an opponent's graveyard from anywhere, exile it instead.",
-        "ReplaceWith": "Exile"
-      }
+      "description": "If a card you didn't control would be put into an opponent's graveyard from anywhere, exile it instead.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "During your turn, you may play cards exiled with NICKNAME. If you cast a spell this way, pay life equal to its mana value rather than pay its mana cost.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

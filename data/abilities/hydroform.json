@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target land becomes a 3/3 Elemental creature with flying until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Elemental"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "SpellDescription": "Target land becomes a 3/3 Elemental creature with flying until end of turn. It's still a land."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "PairedWith"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack or block unless it's paired with a creature with soulbond.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "CARDNAME can't attack or block unless it's paired with a creature with soulbond.",
-        "ValidCard": "Creature.Self",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Creature.PairedWith+withSoulbond"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,63 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P0",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MaxFromEffect": "4",
-        "PlayerTurn": "True",
-        "UpTo": "True",
-        "SpellDescription": "Put up to X +1/+0 counters on CARDNAME. This ability can't cause the total number of +1/+0 counters on CARDNAME to be greater than four. Activate only during your upkeep.",
-        "Defined": "Self",
-        "ActivationPhases": "Upkeep"
+      "description": "Put up to X +1/+0 counters on CARDNAME. This ability can't cause the total number of +1/+0 counters on CARDNAME to be greater than four. Activate only during your upkeep.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P0",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked by artifact creatures.",
+      "mode": {
+        "Other": "CantBlockBy"
       }
     }
   ],
   "triggers": [
     {
+      "description": "At end of combat, if CARDNAME attacked or blocked this combat, remove a +1/+0 counter from it.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At end of combat, if CARDNAME attacked or blocked this combat, remove a +1/+0 counter from it.",
-        "Phase": "EndCombat",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+attackedThisCombat,Card.Self+blockedThisCombat",
-        "ValidPlayer": "Player",
-        "Execute": "TrigSubCounter"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Artifact.Creature",
-        "Description": "CARDNAME can't be blocked by artifact creatures."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

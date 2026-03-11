@@ -1,53 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create a 4/4 white and blue Golem artifact creature token.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, create a 4/4 white and blue Golem artifact creature token.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Execute": "TrigToken"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "wu_4_4_a_golem",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "CheckSVar": "Count$ThisTurnEntered_Battlefield_Card.Self+YouCtrl,Artifact.YouCtrl+Other",
-            "SpellDescription": "Create a 4/4 white and blue Golem artifact creature token. Activate only if CARDNAME or another artifact entered the battlefield under your control this turn."
-          }
+          "description": "Create a 4/4 white and blue Golem artifact creature token. Activate only if CARDNAME or another artifact entered the battlefield under your control this turn.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "wu_4_4_a_golem",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

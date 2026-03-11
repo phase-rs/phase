@@ -2,33 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain X life."
-      }
+      "description": "You gain X life.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile a green card with mana value X from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Announce": "X",
-        "Description": "You may exile a green card with mana value X from your hand rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Cost": "ExileFromHand<1/Card.Green+Other+cmcEQX/green card>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

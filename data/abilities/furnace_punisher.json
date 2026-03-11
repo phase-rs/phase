@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, CARDNAME deals 2 damage to that player unless they control two or more basic lands.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals 2 damage to that player unless they control two or more basic lands.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "Execute": "TrigDealDamage"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

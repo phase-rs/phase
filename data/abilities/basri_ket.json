@@ -2,82 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Put a +1/+1 counter on up to one target creature. It gains indestructible until end of turn.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on up to one target creature. It gains indestructible until end of turn.",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "Planeswalker": "True",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "TrigAttack",
-          "SpellDescription": "Whenever one or more nontoken creatures attack this turn, create that many 1/1 white Soldier creature tokens that are tapped and attacking.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "TrigAttack",
-        "SpellDescription": "Whenever one or more nontoken creatures attack this turn, create that many 1/1 white Soldier creature tokens that are tapped and attacking.",
-        "Planeswalker": "True"
-      }
+      "description": "Whenever one or more nontoken creatures attack this turn, create that many 1/1 white Soldier creature tokens that are tapped and attacking.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "EffPhase",
-          "Name": "Emblem — Basri Ket",
-          "Duration": "Permanent",
-          "Image": "emblem_basri_ket",
-          "Planeswalker": "True",
-          "SpellDescription": "You get an emblem with \"At the beginning of combat on your turn, create a 1/1 white Soldier creature token, then put a +1/+1 counter on each creature you control.\"",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "EffPhase",
-        "Name": "Emblem — Basri Ket",
-        "Duration": "Permanent",
-        "Image": "emblem_basri_ket",
-        "Planeswalker": "True",
-        "SpellDescription": "You get an emblem with \"At the beginning of combat on your turn, create a 1/1 white Soldier creature token, then put a +1/+1 counter on each creature you control.\"",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"At the beginning of combat on your turn, create a 1/1 white Soldier creature token, then put a +1/+1 counter on each creature you control.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

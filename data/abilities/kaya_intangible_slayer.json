@@ -2,67 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent loses 3 life and you gain 3 life.",
-        "Defined": "Opponent",
-        "SubAbility": "DBGainLife",
-        "Planeswalker": "True"
-      }
+      "description": "Each opponent loses 3 life and you gain 3 life.",
+      "effect": {
+        "amount": 3,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBScry",
-        "Planeswalker": "True",
-        "SpellDescription": "You draw two cards."
-      }
+      "description": "You draw two cards.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Exile target creature or enchantment.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Enchantment"
-        }
+          "card_type": "Creature,Enchantment",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RememberLKI": "True",
-        "SpellDescription": "Exile target creature or enchantment.",
-        "TgtPrompt": "Select target creature or enchantment",
-        "SubAbility": "DBCopy"
-      }
+      "target_prompt": "Select target creature or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

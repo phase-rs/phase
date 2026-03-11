@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "AlwaysReplace": "True",
-        "Description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters it, then give each player a rad counter for each +1/+1 counter removed this way.",
-        "ValidTarget": "Card.Self+counters_GE1_P1P1",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True"
-      }
+      "description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters it, then give each player a rad counter for each +1/+1 counter removed this way.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

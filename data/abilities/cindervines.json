@@ -2,50 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy target artifact or enchantment. CARDNAME deals 2 damage to that permanent's controller.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDealTwoDamage",
-        "SpellDescription": "Destroy target artifact or enchantment. CARDNAME deals 2 damage to that permanent's controller.",
-        "TgtPrompt": "Select target artifact or enchantment"
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a noncreature spell, CARDNAME deals 1 damage to that player.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent casts a noncreature spell, CARDNAME deals 1 damage to that player.",
-        "Execute": "TrigDealOneDamage",
-        "ValidCard": "Card.nonCreature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

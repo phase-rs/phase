@@ -1,46 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, this Room deals 6 damage to target creature an opponent controls. You gain life equal to the excess damage dealt this way.",
           "mode": "UnlockDoor",
-          "params": {
-            "TriggerDescription": "When you unlock this door, this Room deals 6 damage to target creature an opponent controls. You gain life equal to the excess damage dealt this way.",
-            "ValidPlayer": "You",
-            "Execute": "TrigDealDamage",
-            "ThisDoor": "True",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AffectedZone": "Hand",
-            "MayPlayAltManaCost": "PayLife<ConvertedManaCost>",
-            "Affected": "Card.YouCtrl+nonLand",
-            "MayPlayLimit": "1",
-            "MayPlayDontGrantZonePermissions": "True",
-            "Condition": "PlayerTurn",
-            "Description": "Once during each of your turns, you may cast a spell from your hand by paying life equal to its mana value rather than paying its mana cost.",
-            "MayPlay": "True"
-          }
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "NonType",
+                "value": "Land"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Hand",
+          "description": "Once during each of your turns, you may cast a spell from your hand by paying life equal to its mana value rather than paying its mana cost.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

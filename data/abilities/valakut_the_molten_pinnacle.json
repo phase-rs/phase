@@ -2,51 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}."
-      }
+      "description": "Add {R}.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Mountain.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Mountain you control enters, if you control at least five other Mountains, you may have CARDNAME deal 3 damage to any target.",
-        "Execute": "TrigDamage",
-        "PresentCompare": "GE6",
-        "ValidCard": "Mountain.YouCtrl",
-        "NoResolvingCheck": "True",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "ReplaceWith": "ETBTapped"
+      "description": "Whenever a Mountain you control enters, if you control at least five other Mountains, you may have CARDNAME deal 3 damage to any target.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Mountain",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

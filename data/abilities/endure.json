@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Prevent all damage that would be dealt to you and permanents you control this turn.",
-          "ReplacementEffects": "RPrevent",
-          "AILogic": "Fog"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all damage that would be dealt to you and permanents you control this turn.",
-        "ReplacementEffects": "RPrevent",
-        "AILogic": "Fog"
-      }
+      "description": "Prevent all damage that would be dealt to you and permanents you control this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

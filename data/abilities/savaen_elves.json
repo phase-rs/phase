@@ -2,35 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Aura.AttachedTo Land"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G G"
+            "cost": "G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy target Aura attached to a land.",
+      "effect": {
+        "target": {
+          "card_type": "Aura",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedTo Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target Aura attached to a land.",
-        "TgtPrompt": "Select target Aura attached to a land"
-      }
+      "target_prompt": "Select target Aura attached to a land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

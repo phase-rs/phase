@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes the target of a spell or ability for the first time each turn, counter that spell or ability.",
       "mode": "BecomesTarget",
-      "params": {
-        "FirstTime": "True",
-        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability for the first time each turn, counter that spell or ability.",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "Execute": "GlasskiteCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

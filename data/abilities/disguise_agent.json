@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Commanders you own have disguise. Their disguise cost is equal to their mana cost.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Commanders you own have disguise. Their disguise cost is equal to their mana cost.",
-        "AffectedZone": "All",
-        "Affected": "Card.YouOwn+IsCommander",
-        "AddKeyword": "Disguise:CardManaCost"
-      }
+      "modifications": [
+        {
+          "keyword": "Disguise:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

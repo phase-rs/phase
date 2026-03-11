@@ -1,17 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "If you would flip a coin, instead flip two coins and ignore one.",
       "mode": "Continuous",
-      "params": {
-        "Description": "If you would flip a coin, instead flip two coins and ignore one.",
-        "AddKeyword": "If you would flip a coin, instead flip two coins and ignore one.",
-        "Affected": "You"
-      }
+      "modifications": [
+        {
+          "keyword": "If",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "you",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "would",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "flip",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "a",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "coin,",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "instead",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "flip",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "two",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "coins",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "and",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "ignore",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "one.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

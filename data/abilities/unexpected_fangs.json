@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterTypes": "P1P1,Lifelink",
-        "SpellDescription": "Put a +1/+1 counter and a lifelink counter on target creature."
-      }
+      "description": "Put a +1/+1 counter and a lifelink counter on target creature.",
+      "effect": {
+        "count": 1,
+        "counter_type": "",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

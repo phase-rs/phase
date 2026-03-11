@@ -2,55 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 U U",
+        "type": "Mana"
+      },
+      "description": "Shuffle enchanted creature into its owner's library, then manifest dread. Activate only as a sorcery.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Library",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Shuffle enchanted creature into its owner's library, then manifest dread. Activate only as a sorcery.",
-        "SubAbility": "DBDread",
-        "Defined": "Enchanted",
-        "Shuffle": "True"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "Origin": "Any"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.EnchantedBy"
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

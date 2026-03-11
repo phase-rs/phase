@@ -1,19 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each noncreature spell you cast has conspire. (As you cast a noncreature spell, you may tap two untapped creatures you control that share a color with it. When you do, copy it and you may choose new targets for the copy. A copy of a permanent spell becomes a token.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each noncreature spell you cast has conspire. (As you cast a noncreature spell, you may tap two untapped creatures you control that share a color with it. When you do, copy it and you may choose new targets for the copy. A copy of a permanent spell becomes a token.)",
-        "Affected": "Card.nonCreature+YouCtrl+wasCast",
-        "AddKeyword": "Conspire",
-        "AffectedZone": "Stack",
-        "EffectZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "keyword": "Conspire",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

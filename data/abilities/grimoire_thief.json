@@ -2,62 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "SubAbility": "DBCounter",
-          "SpellDescription": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
-          "Defined": "ExiledWithSource",
-          "Mode": "TurnFaceUp"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCounter",
-        "SpellDescription": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
-        "Defined": "ExiledWithSource",
-        "Mode": "TurnFaceUp"
-      }
+      "description": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
+      "effect": {
+        "description": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may look at cards exiled with CARDNAME.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes tapped, exile the top three cards of target opponent's library face down.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, exile the top three cards of target opponent's library face down."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.ExiledWithSource",
-        "MayLookAt": "You",
-        "AffectedZone": "Exile",
-        "Description": "You may look at cards exiled with CARDNAME."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

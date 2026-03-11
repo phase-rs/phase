@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures named Rock Lobster can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "Description": "Creatures named Rock Lobster can't attack or block.",
-        "ValidCard": "Creature.namedRock Lobster"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

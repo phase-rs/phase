@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Goblin"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 R"
+            "cost": "2 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target Goblin creature gets +2/+2 and has haste for as long as CARDNAME remains tapped.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Goblin"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilUntaps",
-        "KW": "Haste",
-        "AILogic": "ContinuousBonus",
-        "SpellDescription": "Target Goblin creature gets +2/+2 and has haste for as long as CARDNAME remains tapped.",
-        "TgtPrompt": "Select target Goblin creature"
-      }
+      "target_prompt": "Select target Goblin creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

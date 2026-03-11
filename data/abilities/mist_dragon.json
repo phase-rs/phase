@@ -2,74 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "0",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains flying. (This effect lasts indefinitely.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "0"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "KW": "Flying",
-        "Duration": "Permanent",
-        "SpellDescription": "CARDNAME gains flying. (This effect lasts indefinitely.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "Duration": "Permanent",
-          "SpellDescription": "CARDNAME loses flying. (This effect lasts indefinitely.)",
-          "Keywords": "Flying",
-          "Defined": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "CARDNAME loses flying. (This effect lasts indefinitely.)",
-        "Keywords": "Flying",
-        "Defined": "Self"
-      }
+      "description": "CARDNAME loses flying. (This effect lasts indefinitely.)",
+      "duration": "Permanent",
+      "effect": {
+        "description": "CARDNAME loses flying. (This effect lasts indefinitely.)",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "Defined": "Self",
-          "SpellDescription": "CARDNAME phases out."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U U"
+        "cost": "3 U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME phases out."
-      }
+      "description": "CARDNAME phases out.",
+      "effect": {
+        "description": "CARDNAME phases out.",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

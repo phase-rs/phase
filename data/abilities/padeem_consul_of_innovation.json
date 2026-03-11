@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "CheckSVar": "X",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, if you control the artifact with the highest mana value or tied for the highest mana value, draw a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Artifacts you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.YouCtrl",
-        "AddKeyword": "Hexproof",
-        "Description": "Artifacts you control have hexproof."
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, if you control the artifact with the highest mana value or tied for the highest mana value, draw a card.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

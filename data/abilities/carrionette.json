@@ -2,32 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield,Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.inZoneBattlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 B B"
+        "cost": "2 B B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "2",
-        "ThisDefinedAndTgts": "Self",
-        "UnlessPayer": "TargetedController",
-        "SpellDescription": "Exile CARDNAME and target creature unless that creature's controller pays {2}. Activate only if CARDNAME is in your graveyard.",
-        "ActivationZone": "Graveyard"
-      }
+      "description": "Exile CARDNAME and target creature unless that creature's controller pays {2}. Activate only if CARDNAME is in your graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield,Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

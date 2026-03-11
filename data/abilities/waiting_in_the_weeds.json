@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "ChangeZoneTable": "True",
-          "RepeatSubAbility": "DBToken",
-          "RepeatPlayers": "Player",
-          "SpellDescription": "Each player creates a 1/1 green Cat creature token for each untapped Forest they control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeZoneTable": "True",
-        "RepeatSubAbility": "DBToken",
-        "RepeatPlayers": "Player",
-        "SpellDescription": "Each player creates a 1/1 green Cat creature token for each untapped Forest they control."
-      }
+      "description": "Each player creates a 1/1 green Cat creature token for each untapped Forest they control.",
+      "effect": {
+        "description": "Each player creates a 1/1 green Cat creature token for each untapped Forest they control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

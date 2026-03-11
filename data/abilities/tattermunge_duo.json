@@ -1,29 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a red spell, CARDNAME gets +1/+1 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPump11",
-        "ValidCard": "Card.Red",
-        "TriggerDescription": "Whenever you cast a red spell, CARDNAME gets +1/+1 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a green spell, CARDNAME gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a green spell, CARDNAME gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)",
-        "ValidCard": "Card.Green",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPumpKW"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

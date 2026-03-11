@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Incubate Dark Confidant 1. (Create an Incubator Dark Confidant token with a +1/+1 counter on it and \"{2}: Transform this artifact.\" It transforms into Dark Confidant, except it's also a Phyrexian.)",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "incubator_dark_confidant",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "WithCountersType": "P1P1",
-        "SpellDescription": "Incubate Dark Confidant 1. (Create an Incubator Dark Confidant token with a +1/+1 counter on it and \"{2}: Transform this artifact.\" It transforms into Dark Confidant, except it's also a Phyrexian.)",
-        "WithCountersAmount": "1"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

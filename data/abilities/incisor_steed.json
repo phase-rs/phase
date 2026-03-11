@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Corrupted Metalcraft — As long as you control three or more artifacts and an opponent has three or more poison counters, CARDNAME gets +3/+0.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE3",
-        "Condition": "Metalcraft",
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "AddPower": "3",
-        "Description": "Corrupted Metalcraft — As long as you control three or more artifacts and an opponent has three or more poison counters, CARDNAME gets +3/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

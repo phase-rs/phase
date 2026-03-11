@@ -2,33 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "GainControl": "True",
-        "Hidden": "True",
-        "ChangeNum": "1",
-        "StackDescription": "{p:You} chooses a creature card at random from {p:Targeted}'s graveyard. {p:You} puts that card onto the battlefield under their control.",
-        "SpellDescription": "Choose a creature card at random from target opponent's graveyard. Put that card onto the battlefield under your control.",
-        "AtRandom": "True",
-        "ChangeType": "Creature.OppOwn"
-      }
+      "description": "Choose a creature card at random from target opponent's graveyard. Put that card onto the battlefield under your control.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

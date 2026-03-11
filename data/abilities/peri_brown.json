@@ -1,20 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "The first historic spell you cast each turn has convoke. (Your creatures can help cast it. Each creature you tap while casting it pays for {1} or one mana of that creature's color.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Historic+YouCtrl",
-        "AffectedZone": "Stack",
-        "AddKeyword": "Convoke",
-        "Description": "The first historic spell you cast each turn has convoke. (Your creatures can help cast it. Each creature you tap while casting it pays for {1} or one mana of that creature's color.)",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ0"
-      }
+      "modifications": [
+        {
+          "keyword": "Convoke",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

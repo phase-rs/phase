@@ -2,35 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl+faceDown",
-          "Mode": "TurnFaceUp",
-          "StackDescription": "Turn {c:Targeted} face up.",
-          "SubAbility": "DBPump",
-          "TgtPrompt": "Select target face-down creature you control",
-          "SpellDescription": "Turn target face-down creature you control face up."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Turn target face-down creature you control face up.",
+      "effect": {
+        "description": "Turn target face-down creature you control face up.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl+faceDown",
-        "Mode": "TurnFaceUp",
-        "StackDescription": "Turn {c:Targeted} face up.",
-        "SubAbility": "DBPump",
-        "TgtPrompt": "Select target face-down creature you control",
-        "SpellDescription": "Turn target face-down creature you control face up."
-      }
+      "target_prompt": "Select target face-down creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

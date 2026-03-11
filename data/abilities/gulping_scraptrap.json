@@ -1,30 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or dies, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigProliferate",
-        "TriggerDescription": "When CARDNAME enters or dies, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or dies, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigProliferate",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerDescription": "When CARDNAME enters or dies, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

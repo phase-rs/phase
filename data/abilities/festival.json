@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "OpponentTurn": "True",
-          "SpellDescription": "Creatures can't attack this turn.",
-          "ActivationPhases": "Upkeep",
-          "StaticAbilities": "CantAttack"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "OpponentTurn": "True",
-        "SpellDescription": "Creatures can't attack this turn.",
-        "ActivationPhases": "Upkeep",
-        "StaticAbilities": "CantAttack"
-      }
+      "description": "Creatures can't attack this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

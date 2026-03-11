@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "RepeatSubAbility": "ResetCheck",
-          "RepeatSVarCompare": "LTTotalPlayer",
-          "RepeatCheckSVar": "NumPlayerGiveup",
-          "StackDescription": "SpellDescription",
-          "SubAbility": "FinalReset",
-          "SpellDescription": "Starting with you, each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield. Repeat this process until no one puts a card onto the battlefield."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "ResetCheck",
-        "RepeatSVarCompare": "LTTotalPlayer",
-        "RepeatCheckSVar": "NumPlayerGiveup",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "FinalReset",
-        "SpellDescription": "Starting with you, each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield. Repeat this process until no one puts a card onto the battlefield."
-      }
+      "description": "Starting with you, each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield. Repeat this process until no one puts a card onto the battlefield.",
+      "effect": {
+        "description": "Starting with you, each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield. Repeat this process until no one puts a card onto the battlefield.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

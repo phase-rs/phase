@@ -1,28 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attached",
-      "params": {
-        "ValidTarget": "Creature",
-        "ValidSource": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigTap",
-        "TriggerDescription": "Whenever CARDNAME becomes attached to a creature, tap that creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +4/+0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +4/+0.",
-        "AddPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes attached to a creature, tap that creature.",
+      "mode": "Attached",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

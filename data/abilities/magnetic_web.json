@@ -2,57 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "MAGNET",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a magnet counter on target creature."
+      "description": "Put a magnet counter on target creature.",
+      "effect": {
+        "count": 1,
+        "counter_type": "MAGNET",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "If a creature with a magnet counter on it attacks, all creatures with magnet counters on them attack if able.",
+      "mode": {
+        "Other": "AttackRequirement"
       }
     }
   ],
   "triggers": [
     {
+      "description": "Whenever a creature with a magnet counter on it attacks, all creatures with magnet counters on them block that creature if able.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a creature with a magnet counter on it attacks, all creatures with magnet counters on them block that creature if able.",
-        "Execute": "TrigLure",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.counters_GE1_MAGNET"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "AttackRequirement"
-      },
-      "params": {
-        "Description": "If a creature with a magnet counter on it attacks, all creatures with magnet counters on them attack if able.",
-        "ValidCard": "Card.counters_GE1_MAGNET",
-        "ValidAttacker": "Card.counters_GE1_MAGNET"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

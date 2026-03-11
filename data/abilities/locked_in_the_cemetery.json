@@ -1,35 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTap",
-        "IsPresent": "Card.YouCtrl",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "PresentZone": "Graveyard",
-        "PresentCompare": "GE5",
-        "TriggerDescription": "When CARDNAME enters, if there are five or more cards in your graveyard, tap enchanted creature."
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.AttachedBy",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield"
+      "description": "When CARDNAME enters, if there are five or more cards in your graveyard, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

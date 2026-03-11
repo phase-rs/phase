@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Multi-threat Eliminator — CARDNAME can't be blocked except by six or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Description": "Multi-threat Eliminator — CARDNAME can't be blocked except by six or more creatures.",
-        "ValidCard": "Creature.Self",
-        "Min": "6"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,96 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "DBCantAttackBlock",
-          "RememberObjects": "Targeted",
-          "Planeswalker": "True",
-          "IsCurse": "True",
-          "StackDescription": "{c:Targeted} can't attack or block until your next turn.",
-          "SpellDescription": "Up to one target creature can't attack or block until your next turn.",
-          "TargetMax": "1",
-          "TargetMin": "0",
-          "Duration": "UntilYourNextTurn",
-          "TgtPrompt": "Select up to one target creature",
-          "ForgetOnMoved": "Battlefield",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Up to one target creature can't attack or block until your next turn.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "DBCantAttackBlock",
-        "RememberObjects": "Targeted",
-        "Planeswalker": "True",
-        "IsCurse": "True",
-        "StackDescription": "{c:Targeted} can't attack or block until your next turn.",
-        "SpellDescription": "Up to one target creature can't attack or block until your next turn.",
-        "TargetMax": "1",
-        "TargetMin": "0",
-        "Duration": "UntilYourNextTurn",
-        "TgtPrompt": "Select up to one target creature",
-        "ForgetOnMoved": "Battlefield",
-        "ValidTgts": "Creature"
-      }
+      "target_prompt": "Select up to one target creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 colorless Drone artifact creature token with deathtouch and \"When this creature leaves the battlefield, each opponent loses 2 life and you gain 2 life.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_2_2_a_drone_deathtouch_leavedrain",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 2/2 colorless Drone artifact creature token with deathtouch and \"When this creature leaves the battlefield, each opponent loses 2 life and you gain 2 life.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, you may return one of them to its owner's hand. If you do, you may activate loyalty abilities of NICKNAME twice this turn rather than only once.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, you may return one of them to its owner's hand. If you do, you may activate loyalty abilities of NICKNAME twice this turn rather than only once.",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.YouCtrl",
-        "CombatDamage": "True",
-        "Execute": "TrigLoyalty"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

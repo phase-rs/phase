@@ -1,32 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Planeswalker",
+        "type": "Typed"
+      },
+      "description": "Each planeswalker with one or more loyalty counters on it loses all abilities and is a creature with power and toughness each equal to the number of loyalty counters on it.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature",
-        "Description": "Each planeswalker with one or more loyalty counters on it loses all abilities and is a creature with power and toughness each equal to the number of loyalty counters on it.",
-        "SetToughness": "AffectedX",
-        "SetPower": "AffectedX",
-        "Affected": "Planeswalker.counters_GE1_LOYALTY",
-        "RemoveAllAbilities": "True",
-        "RemoveCardTypes": "True"
-      }
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

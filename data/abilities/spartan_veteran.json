@@ -2,38 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has first strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "During your turn, CARDNAME has first strike.",
-        "AddKeyword": "First Strike",
-        "Affected": "Card.Self",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

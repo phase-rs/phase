@@ -2,39 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "LOYALTY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Planeswalker.Gideon"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W"
+        "cost": "3 W",
+        "type": "Mana"
       },
+      "description": "Put a loyalty counter on target Gideon planeswalker.",
+      "effect": {
+        "count": 1,
+        "counter_type": "LOYALTY",
+        "target": {
+          "card_type": "Planeswalker",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Gideon"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a loyalty counter on target Gideon planeswalker.",
-        "TgtPrompt": "Select target Gideon planeswalker."
-      }
+      "target_prompt": "Select target Gideon planeswalker."
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, you put two +1/+1 counters on CARDNAME.",
       "mode": "LifeGained",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you gain life, you put two +1/+1 counters on CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

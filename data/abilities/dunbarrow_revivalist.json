@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get a one-time boon with \"When one or more creatures you control enter, create a Wicked Role token attached to one of them.\" Then if CARDNAME was bargained, return a creature card from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you get a one-time boon with \"When one or more creatures you control enter, create a Wicked Role token attached to one of them.\" Then if CARDNAME was bargained, return a creature card from your graveyard to your hand.",
-        "Execute": "TrigBoon",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

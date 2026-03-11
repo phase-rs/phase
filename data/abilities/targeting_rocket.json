@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, target creature blocks this turn if able.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, target creature blocks this turn if able."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,38 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create a 6/12 colorless Construct artifact creature token with trample. Exile it at the beginning of your next end step.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_6_12_a_construct_trample",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 6/12 colorless Construct artifact creature token with trample. Exile it at the beginning of your next end step.",
-        "TokenOwner": "You",
-        "AtEOT": "YourExile"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast for each attacking creature.",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Amount": "X"
-      }
+      "description": "This spell costs {1} less to cast for each attacking creature.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LE1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +1/+2 as long as you have one or fewer cards in hand.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "CheckSVar": "X",
-        "SVarCompare": "LE1",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "Description": "CARDNAME gets +1/+2 as long as you have one or fewer cards in hand."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

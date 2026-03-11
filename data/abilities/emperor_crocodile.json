@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you control no other creatures, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "Execute": "TrigSac",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Creature.Other+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When you control no other creatures, sacrifice CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

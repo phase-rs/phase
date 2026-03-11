@@ -2,39 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Dragon you control enters, it deals X damage to any target, where X is the number of Dragons you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Dragon.Other+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another Dragon you control enters, it deals X damage to any target, where X is the number of Dragons you control.",
-        "Origin": "Any",
-        "Execute": "TrigDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Dragon.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

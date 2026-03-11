@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Return any number of target creature cards with total power 10 or less from your graveyard to the battlefield. Exile CARDNAME.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select any number of creature cards with total power 10 or less",
-        "TargetMin": "0",
-        "TargetMax": "X",
-        "SubAbility": "DBExile",
-        "MaxTotalTargetPower": "10",
-        "SpellDescription": "Return any number of target creature cards with total power 10 or less from your graveyard to the battlefield. Exile CARDNAME."
-      }
+      "target_prompt": "Select any number of creature cards with total power 10 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

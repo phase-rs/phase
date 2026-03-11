@@ -2,93 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Untap up to one target creature and up to one target land.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBUntap",
-        "TargetMax": "1",
-        "TargetMin": "0",
-        "SpellDescription": "Untap up to one target creature and up to one target land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigMultiple",
-        "params": {
-          "DigNum": "4",
-          "ChangeValid": "Creature,Land",
-          "Reveal": "True",
-          "Optional": "True",
-          "DestinationZone2": "Graveyard",
-          "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "DigNum": "4",
-        "ChangeValid": "Creature,Land",
-        "Reveal": "True",
-        "Optional": "True",
-        "DestinationZone2": "Graveyard",
-        "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
-        "Planeswalker": "True"
-      }
+      "description": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+      "effect": {
+        "description": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+        "name": "DigMultiple",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "AILogic": "Always",
-          "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may have it fight target creature.\" Then create three 8/8 blue Octopus creature tokens.",
-          "Triggers": "TrigFight",
-          "Image": "emblem_kiora_master_of_the_depths",
-          "Duration": "Permanent",
-          "Ultimate": "True",
-          "Name": "Emblem — Kiora, Master of the Depths",
-          "SubAbility": "DBToken"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "AILogic": "Always",
-        "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may have it fight target creature.\" Then create three 8/8 blue Octopus creature tokens.",
-        "Triggers": "TrigFight",
-        "Image": "emblem_kiora_master_of_the_depths",
-        "Duration": "Permanent",
-        "Ultimate": "True",
-        "Name": "Emblem — Kiora, Master of the Depths",
-        "SubAbility": "DBToken"
-      }
+      "description": "You get an emblem with \"Whenever a creature you control enters, you may have it fight target creature.\" Then create three 8/8 blue Octopus creature tokens.",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

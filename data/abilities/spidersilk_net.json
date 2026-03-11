@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+2 and has reach.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Reach",
-        "Description": "Equipped creature gets +0/+2 and has reach.",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

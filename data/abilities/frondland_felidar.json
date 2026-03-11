@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with vigilance have \"{1}, {T}: Tap target creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "ABTap",
-        "Affected": "Creature.YouCtrl+withVigilance",
-        "Description": "Creatures you control with vigilance have \"{1}, {T}: Tap target creature.\""
-      }
+      "modifications": [
+        {
+          "ability": "ABTap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

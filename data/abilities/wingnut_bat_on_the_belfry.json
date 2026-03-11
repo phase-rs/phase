@@ -1,29 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Alliance — Whenever another creature you control enters, NICKNAME gains your choice of flying, menace, or haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Creature.Other+YouCtrl",
-        "Origin": "Any",
-        "TriggerDescription": "Alliance — Whenever another creature you control enters, NICKNAME gains your choice of flying, menace, or haste until end of turn.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, each other attacking creature gets +1/+0 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "Whenever CARDNAME attacks, each other attacking creature gets +1/+0 until end of turn.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

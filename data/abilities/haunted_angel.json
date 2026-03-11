@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, exile CARDNAME and each other player creates a 3/3 black Angel creature token with flying.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME dies, exile CARDNAME and each other player creates a 3/3 black Angel creature token with flying.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

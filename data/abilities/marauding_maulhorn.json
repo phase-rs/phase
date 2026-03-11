@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME attacks each combat if able unless you control a creature named Advocate of the Beast.",
-        "IsPresent": "Card.namedAdvocate of the Beast+YouCtrl",
-        "ValidCreature": "Card.Self"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME attacks each combat if able unless you control a creature named Advocate of the Beast.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

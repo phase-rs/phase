@@ -1,31 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your end step, if you didn't cast a spell this turn, create a 2/2 green Wolf creature token.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "SVarCompare": "EQ0",
-        "Phase": "End of Turn",
-        "CheckSVar": "X"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Wolf",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Werewolf.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Wolves and Werewolves you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
-        "AddToughness": "1",
-        "Description": "Other Wolves and Werewolves you control get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you didn't cast a spell this turn, create a 2/2 green Wolf creature token.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

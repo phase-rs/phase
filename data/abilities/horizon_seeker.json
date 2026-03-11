@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
+      "description": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeTypeDesc": "basic land",
-        "SpellDescription": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
-        "ChangeType": "Land.Basic",
-        "Boast": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control two or more tapped creatures, you gain 2 life.",
       "mode": "Phase",
-      "params": {
-        "IsPresent": "Creature.YouCtrl+tapped",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, you gain 2 life.",
-        "PresentCompare": "GE2",
-        "Execute": "TrigGainLife",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

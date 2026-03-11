@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, CARDNAME deals damage equal to that creature's power to that player unless they sacrifice another creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, CARDNAME deals damage equal to that creature's power to that player unless they sacrifice another creature.",
-        "Phase": "Upkeep",
-        "Execute": "TrigDamage",
-        "ValidPlayer": "Player.EnchantedController"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,35 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Special EachColorAmong_Valid Permanent.YouCtrl",
-        "params": {
-          "SpellDescription": "For each color among permanents you control, add one mana of that color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each color among permanents you control, add one mana of that color."
-      }
+      "description": "For each color among permanents you control, add one mana of that color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +1/+1 for each color among permanents you control.",
-        "AddPower": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each color among permanents you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

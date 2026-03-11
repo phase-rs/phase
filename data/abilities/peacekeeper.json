@@ -1,27 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{W}.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUpkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "Creatures can't attack.",
-        "ValidCard": "Creature"
-      }
+      "description": "Creatures can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{W}.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

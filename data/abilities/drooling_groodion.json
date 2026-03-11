@@ -2,41 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B G"
+            "cost": "2 B G",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature gets +2/+2 until end of turn. Another target creature gets -2/-2 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets +2/+2 until end of turn. Another target creature gets -2/-2 until end of turn.",
-        "TgtPrompt": "Select target creature to get +2/+2",
-        "SubAbility": "DBPump"
-      }
+      "target_prompt": "Select target creature to get +2/+2"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

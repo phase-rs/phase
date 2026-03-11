@@ -1,52 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
           "mode": "AttackerBlocked",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigPump",
-            "TriggerDescription": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
           "mode": "AttackerBlocked",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPump"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever a creature blocking CARDNAME dies, that creature's controller loses 1 life.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "Whenever a creature blocking CARDNAME dies, that creature's controller loses 1 life.",
-            "Destination": "Graveyard",
-            "ValidCard": "Creature.blockingSource",
-            "Execute": "TrigLoseLife",
-            "Origin": "Battlefield",
-            "TriggerZones": "Battlefield"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

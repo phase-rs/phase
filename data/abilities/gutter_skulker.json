@@ -1,55 +1,78 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "condition": {
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Card",
+                  "properties": [
+                    {
+                      "type": "Attacking"
+                    }
+                  ],
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "IsPresent"
+          },
+          "description": "CARDNAME can't be blocked as long as it's attacking alone.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "ValidAttacker": "Card.Self+attacking",
-            "IsPresent": "Card.Other+attacking",
-            "Description": "CARDNAME can't be blocked as long as it's attacking alone.",
-            "PresentCompare": "EQ0"
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": {
-            "Other": "CantBlockBy"
-          },
-          "params": {
-            "Description": "Enchanted creature can't be blocked as long as it's attacking alone.",
-            "IsPresent": "Card.attacking",
-            "ValidAttacker": "Creature.EnchantedBy+attacking",
-            "PresentCompare": "EQ1"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ValidCard": "Card.Self",
-            "Destination": "Graveyard",
-            "ReplaceWith": "Exile"
+          "condition": {
+            "filter": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Attacking"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "IsPresent"
+          },
+          "description": "Enchanted creature can't be blocked as long as it's attacking alone.",
+          "mode": {
+            "Other": "CantBlockBy"
           }
         }
-      ]
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

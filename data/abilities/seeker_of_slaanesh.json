@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Allure of Slaanesh — Each opponent must attack with at least one creature each combat if able.",
       "mode": {
         "Other": "PlayerMustAttack"
-      },
-      "params": {
-        "Description": "Allure of Slaanesh — Each opponent must attack with at least one creature each combat if able.",
-        "ValidPlayer": "Opponent"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

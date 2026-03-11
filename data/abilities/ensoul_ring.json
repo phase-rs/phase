@@ -1,23 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is a Sol Ring. (It's no longer anything else.)",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "SolMana",
-        "Affected": "Permanent.EnchantedBy",
-        "SetColor": "Colorless",
-        "RemoveCardTypes": "True",
-        "RemoveAllAbilities": "True",
-        "AddType": "Artifact",
-        "RemoveArtifactTypes": "True",
-        "SetName": "Sol Ring",
-        "Description": "Enchanted permanent is a Sol Ring. (It's no longer anything else.)"
-      }
+      "modifications": [
+        {
+          "ability": "SolMana",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Artifact",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,29 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control with toughness greater than its power assigns combat damage equal to its toughness rather than its power.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "Description": "Each creature you control with toughness greater than its power assigns combat damage equal to its toughness rather than its power.",
-        "ValidCard": "Creature.powerLTtoughness+YouCtrl"
       }
     },
     {
+      "description": "Each creature you control with toughness greater than its power stations permanents using its toughness rather than its power.",
       "mode": {
         "Other": "TapPowerValue"
-      },
-      "params": {
-        "Value": "Toughness",
-        "ValidSA": "Activated.Station",
-        "ValidCard": "Creature.powerLTtoughness+YouCtrl",
-        "Description": "Each creature you control with toughness greater than its power stations permanents using its toughness rather than its power."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

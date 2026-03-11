@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDealtOnce",
-      "params": {
-        "ValidSource": "Card.Self",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME deals damage, you lose that much life.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Card.Self",
-        "Description": "CARDNAME attacks each combat if able."
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME deals damage, you lose that much life.",
+      "mode": "DamageDealtOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

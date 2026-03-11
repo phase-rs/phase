@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose target spell. You get {E}{E} (two energy counters), then you may pay any amount of {E}.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "ENERGY",
         "count": 2,
+        "counter_type": "ENERGY",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP Choose target spell. You get_{p:You} chooses {s:Targeted}. {p:You} gets & then you_then {p:You}",
-        "Defined": "You",
-        "SpellDescription": "Choose target spell. You get {E}{E} (two energy counters), then you may pay any amount of {E}.",
-        "SubAbility": "DBChooseNumber",
-        "AILogic": "PayEnergy"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

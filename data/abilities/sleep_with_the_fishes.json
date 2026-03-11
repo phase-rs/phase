@@ -1,32 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature and you create a 1/1 blue Fish creature token with \"This creature can't be blocked.\""
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step."
+      "description": "When CARDNAME enters, tap enchanted creature and you create a 1/1 blue Fish creature token with \"This creature can't be blocked.\"",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

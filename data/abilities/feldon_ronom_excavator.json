@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever NICKNAME is dealt damage, exile that many cards from the top of your library. Choose one of them. Until the end of your next turn, you may play that card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever NICKNAME is dealt damage, exile that many cards from the top of your library. Choose one of them. Until the end of your next turn, you may play that card.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

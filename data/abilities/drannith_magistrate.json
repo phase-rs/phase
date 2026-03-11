@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.!wasCastFromTheirHand",
-        "Description": "Your opponents can't cast spells from anywhere other than their hands.",
-        "Caster": "Opponent"
-      }
+      "description": "Your opponents can't cast spells from anywhere other than their hands.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

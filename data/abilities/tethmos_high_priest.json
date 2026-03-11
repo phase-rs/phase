@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, return target creature card with mana value 2 or less from your graveyard to the battlefield.",
       "mode": "SpellCast",
-      "params": {
-        "TargetsValid": "Card.Self",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigChange",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, return target creature card with mana value 2 or less from your graveyard to the battlefield."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

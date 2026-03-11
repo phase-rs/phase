@@ -1,29 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a noncreature spell, creatures you control get +1/+1 until end of turn. Untap those creatures.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a noncreature spell, creatures you control get +1/+1 until end of turn. Untap those creatures.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.nonCreature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPumpAll"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a noncreature spell, you may draw a card. If you do, discard a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.nonCreature",
-        "Execute": "TrigLoot",
-        "TriggerDescription": "Whenever you cast a noncreature spell, you may draw a card. If you do, discard a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

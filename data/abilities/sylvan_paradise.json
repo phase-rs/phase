@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "One or more target creatures become green until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creatures",
-        "Colors": "Green",
-        "OverwriteColors": "True",
-        "TargetMin": "1",
-        "SpellDescription": "One or more target creatures become green until end of turn.",
-        "TargetMax": "MaxTgts"
-      }
+      "target_prompt": "Select target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

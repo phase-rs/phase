@@ -1,61 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast an instant, sorcery, or Wizard spell, CARDNAME gains flying until end of turn.",
           "mode": "SpellCast",
-          "params": {
-            "Execute": "TrigFlying",
-            "ValidCard": "Instant,Sorcery,Wizard",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever you cast an instant, sorcery, or Wizard spell, CARDNAME gains flying until end of turn."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery,Wizard",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "SpellDescription": "Add {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {U}."
+          "description": "Add {U}.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "ReplaceWith": "ETBTapped",
-            "Description": "CARDNAME enters tapped.",
-            "ReplacementResult": "Updated"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped, create a Lander token. (It's an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever this creature becomes tapped, create a Lander token. (It's an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
-        "Origin": "Any",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

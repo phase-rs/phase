@@ -1,32 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on CARDNAME.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from CARDNAME.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "PreventionEffect": "True",
-        "AlwaysReplace": "True",
-        "ValidTarget": "Card.Self+counters_GE1_P1P1",
-        "Description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from CARDNAME.",
-        "ReplaceWith": "DBRemoveCounters",
-        "ActiveZones": "Battlefield"
+      "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

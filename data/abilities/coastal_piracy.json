@@ -1,21 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to an opponent, you may draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Opponent",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to an opponent, you may draw a card.",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "CombatDamage": "True"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

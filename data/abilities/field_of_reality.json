@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 U",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return CARDNAME to its owner's hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked by Spirits.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "Enchanted creature can't be blocked by Spirits.",
-        "ValidBlocker": "Creature.Spirit",
-        "ValidAttacker": "Creature.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,39 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile target spell with mana value 4 or less.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, exile target spell with mana value 4 or less.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, the exiled card's owner may cast that card without paying its mana cost.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigPlay",
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, the exiled card's owner may cast that card without paying its mana cost."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Destination": "Any",
-        "Origin": "Exile",
-        "ValidCard": "Card.IsRemembered+ExiledWithSource",
-        "Execute": "DBForget"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

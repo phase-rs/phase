@@ -1,27 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has hexproof unless it's attacking or blocking.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+!attacking+!blocking",
-        "AddKeyword": "Hexproof",
-        "Description": "CARDNAME has hexproof unless it's attacking or blocking."
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "CARDNAME can't be blocked unless all creatures defending player controls block it. (If any creature that player controls doesn't block this creature, it can't be blocked.)",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't be blocked unless all creatures defending player controls block it. (If any creature that player controls doesn't block this creature, it can't be blocked.)",
-        "Min": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

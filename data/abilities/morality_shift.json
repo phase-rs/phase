@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Library",
-        "destination": "Graveyard",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "ChangeType": "Card.YouCtrl",
-        "SubAbility": "GraveShift",
-        "SpellDescription": "Exchange your graveyard and library. Then shuffle your library."
-      }
+      "description": "Exchange your graveyard and library. Then shuffle your library.",
+      "effect": {
+        "destination": "Graveyard",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

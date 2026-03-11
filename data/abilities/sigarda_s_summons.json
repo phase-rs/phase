@@ -1,20 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with +1/+1 counters on them have base power and toughness 4/4, have flying, and are Angels in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
-        "SetToughness": "4",
-        "Description": "Creatures you control with +1/+1 counters on them have base power and toughness 4/4, have flying, and are Angels in addition to their other types.",
-        "AddType": "Angel",
-        "AddKeyword": "Flying",
-        "SetPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Angel",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

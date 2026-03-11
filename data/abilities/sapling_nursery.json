@@ -2,51 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME/this creature>"
+            "cost": "Exile<1/CARDNAME/this creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Indestructible",
-        "SpellDescription": "Treefolk and Forests you control gain indestructible until end of turn.",
-        "ValidCards": "Treefolk.YouCtrl,Forest.YouCtrl"
-      }
+      "description": "Treefolk and Forests you control gain indestructible until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, create a 3/4 green Treefolk creature token with reach.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Landfall — Whenever a land you control enters, create a 3/4 green Treefolk creature token with reach.",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

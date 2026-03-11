@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "EffectZone": "Graveyard",
-        "AffectedZone": "Graveyard",
-        "AddHiddenKeyword": "CARDNAME count as Flame Burst.",
-        "Description": "If CARDNAME is in a graveyard, effects from spells named Flame Burst count it as a card named Flame Burst."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "If CARDNAME is in a graveyard, effects from spells named Flame Burst count it as a card named Flame Burst.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

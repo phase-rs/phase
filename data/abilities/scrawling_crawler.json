@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, each player draws a card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "At the beginning of your upkeep, each player draws a card.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever an opponent draws a card, that player loses 1 life.",
       "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever an opponent draws a card, that player loses 1 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "ValidCard": "Card.OppOwn"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

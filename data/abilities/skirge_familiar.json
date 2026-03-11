@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

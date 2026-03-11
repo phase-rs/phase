@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have shroud. (You can't be the target of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "You have shroud. (You can't be the target of spells or abilities.)",
-        "Affected": "You",
-        "AddKeyword": "Shroud"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

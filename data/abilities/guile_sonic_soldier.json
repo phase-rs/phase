@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, put a charge counter on him or remove one from him. When you remove a counter this way, ABILITY",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigCharge",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a charge counter on him or remove one from him. When you remove a counter this way, ABILITY",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, put a charge counter on him or remove one from him. When you remove a counter this way, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigCharge",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a charge counter on him or remove one from him. When you remove a counter this way, ABILITY",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put an infection counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "OptionalDecider": "You",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may put an infection counter on CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, CARDNAME deals X damage to that player, where X is the number of infection counters on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, CARDNAME deals X damage to that player, where X is the number of infection counters on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.EnchantedController"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

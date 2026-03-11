@@ -1,150 +1,121 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "CARDNAME deals 3 damage to target creature. That creature deals damage equal to its power to him.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 3 damage to target creature. That creature deals damage equal to its power to him.",
-            "SubAbility": "DamageThis",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "Create a 2/2 green Wolf creature token.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_2_2_wolf",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "Planeswalker": "True",
-            "SpellDescription": "Create a 2/2 green Wolf creature token."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME has two or fewer loyalty counters on him, transform him.",
           "mode": "Always",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "IsPresent": "Card.Self+counters_LE2_LOYALTY",
-            "TriggerDescription": "When CARDNAME has two or fewer loyalty counters on him, transform him."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 1,
+            "type": "Loyalty"
+          },
+          "description": "Create a 1/1 black Wolf creature token with deathtouch.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "b_1_1_wolf_deathtouch",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 1/1 black Wolf creature token with deathtouch.",
-            "TokenOwner": "You",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -1,
+            "type": "Loyalty"
+          },
+          "description": "Sacrifice a creature. If you do, search your library for a creature card, reveal it, put it into your hand, then shuffle.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
             "destination": "Hand",
+            "origin": "Library",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "UnlessPayer": "You",
-            "ChangeType": "Creature",
-            "Planeswalker": "True",
-            "UnlessSwitched": "True",
-            "ChangeNum": "1",
-            "UnlessCost": "Sac<1/Creature>",
-            "SpellDescription": "Sacrifice a creature. If you do, search your library for a creature card, reveal it, put it into your hand, then shuffle."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -3
+            "amount": -3,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature.YouCtrl",
-            "KW": "Trample",
-            "Ultimate": "True",
-            "SpellDescription": "Creatures you control gain trample and get +X/+X until end of turn, where X is the number of creature cards in your graveyard.",
-            "Planeswalker": "True"
-          }
+          "description": "Creatures you control gain trample and get +X/+X until end of turn, where X is the number of creature cards in your graveyard.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,50 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 U U",
+        "type": "Mana"
+      },
+      "description": "Target permanent becomes an artifact in addition to its other types. (This effect lasts indefinitely.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "Target permanent becomes an artifact in addition to its other types. (This effect lasts indefinitely.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target artifact. (This effect lasts indefinitely.)"
-      }
+      "description": "Gain control of target artifact. (This effect lasts indefinitely.)",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

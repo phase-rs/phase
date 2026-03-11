@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield with two +1/+1 counters on it instead of putting it into your graveyard.",
       "event": "Moved",
-      "params": {
-        "Description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield with two +1/+1 counters on it instead of putting it into your graveyard.",
-        "ValidCard": "Card.Self",
-        "ValidCause": "SpellAbility.OppCtrl",
-        "EffectOnly": "True",
-        "Discard": "True",
-        "ReplaceWith": "SurpriseETB",
-        "ActiveZones": "Hand"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

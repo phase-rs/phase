@@ -1,18 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Vampire"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has haste as long as you control another Vampire.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Permanent.YouCtrl+Vampire+Other",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has haste as long as you control another Vampire.",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

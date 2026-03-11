@@ -1,40 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Non-Horror creatures with slime counters on them lose all abilities and have base power and toughness 2/2.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        },
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature.",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.nonHorror+counters_GE1_SLIME",
-        "SetPower": "2",
-        "SetToughness": "2",
-        "Description": "Non-Horror creatures with slime counters on them lose all abilities and have base power and toughness 2/2.",
-        "RemoveAllAbilities": "True"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

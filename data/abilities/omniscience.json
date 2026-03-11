@@ -1,19 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayWithoutManaCost": "True",
-        "Description": "You may cast spells from your hand without paying their mana costs.",
-        "Affected": "Card.nonLand+YouOwn",
-        "MayPlay": "True",
-        "AffectedZone": "Hand"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "You may cast spells from your hand without paying their mana costs.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

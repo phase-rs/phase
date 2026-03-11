@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player or battle, transform up to one target Incubator token you control.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidTarget": "Player,Battle",
-        "Execute": "TrigTransform",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or battle, transform up to one target Incubator token you control.",
-        "ValidSource": "Card.Self"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Player,Battle",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

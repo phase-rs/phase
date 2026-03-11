@@ -2,34 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "Permanent",
-          "SpellDescription": "Lands target player controls don't untap during their next untap step.",
-          "SubAbility": "DBCleanup",
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "DontUntap",
-          "ValidTgts": "Player",
-          "Triggers": "RemoveEffect"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "Lands target player controls don't untap during their next untap step.",
-        "SubAbility": "DBCleanup",
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "DontUntap",
-        "ValidTgts": "Player",
-        "Triggers": "RemoveEffect"
-      }
+      "description": "Lands target player controls don't untap during their next untap step.",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3 B G",
+            "type": "Mana"
+          },
+          {
+            "cost": "ExileFromGrave<1/Creature>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 1/2 green Spider creature token with reach, then each opponent loses 1 life for each Spider you control.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_2_spider_reach",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3 B G"
-          },
-          {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Creature>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/2 green Spider creature token with reach, then each opponent loses 1 life for each Spider you control.",
-        "TokenOwner": "You",
-        "SubAbility": "DBLoseLife"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

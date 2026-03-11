@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME's echo cost is paid, each opponent may draw up to three cards.",
       "mode": "PayEcho",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME's echo cost is paid, each opponent may draw up to three cards.",
-        "ValidCard": "Card.Self",
-        "Paid": "True"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

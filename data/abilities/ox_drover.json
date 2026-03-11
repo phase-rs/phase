@@ -1,38 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked by Oxen.",
+      "mode": {
+        "Other": "CantBlockBy"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by Oxen.",
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Creature.Ox"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,21 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 4
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBBreakthroughDiscard",
-        "SpellDescription": "Draw four cards, then choose X cards in your hand and discard the rest from it."
-      }
+      "description": "Draw four cards, then choose X cards in your hand and discard the rest from it.",
+      "effect": {
+        "count": 4,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

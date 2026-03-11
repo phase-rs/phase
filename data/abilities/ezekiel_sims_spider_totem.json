@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, target Spider you control gets +2/+2 until end of turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, target Spider you control gets +2/+2 until end of turn.",
-        "Execute": "TrigPump"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy target nonblack creature. It can't be regenerated. You lose life equal to that creature's toughness.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "TgtPrompt": "Select target nonblack creature",
-        "NoRegen": "True",
-        "AITgts": "Card.toughnessLTY",
-        "SpellDescription": "Destroy target nonblack creature. It can't be regenerated. You lose life equal to that creature's toughness."
-      }
+      "target_prompt": "Select target nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

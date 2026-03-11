@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, you gain 1 life.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, you gain 1 life."
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

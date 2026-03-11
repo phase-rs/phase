@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Black creatures you control have wither. (They deal damage to creatures in the form of -1/-1 counters.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Black+YouCtrl",
-        "Description": "Black creatures you control have wither. (They deal damage to creatures in the form of -1/-1 counters.)",
-        "AddKeyword": "Wither"
-      }
+      "modifications": [
+        {
+          "keyword": "Wither",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

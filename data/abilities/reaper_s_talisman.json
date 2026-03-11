@@ -1,26 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, it gains deathtouch until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature attacks, it gains deathtouch until end of turn.",
-        "Execute": "TripPump"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever equipped creature attacks alone, defending player loses 2 life and you gain 2 life.",
       "mode": "Attacks",
-      "params": {
-        "Alone": "True",
-        "ValidCard": "Card.EquippedBy",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever equipped creature attacks alone, defending player loses 2 life and you gain 2 life."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

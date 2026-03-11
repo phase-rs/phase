@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, you may search your library for a card, put it into your hand, then shuffle.",
       "mode": "Exploited",
-      "params": {
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSearch",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME exploits a creature, you may search your library for a card, put it into your hand, then shuffle.",
-        "ValidSource": "Card.Self"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control explores a land card, you may put a land card from your hand onto the battlefield tapped.",
       "mode": "Explored",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "Whenever a creature you control explores a land card, you may put a land card from your hand onto the battlefield tapped.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl",
-        "ValidExplored": "Land"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature you control explores a nonland card, put a +1/+1 counter on CARDNAME.",
       "mode": "Explored",
-      "params": {
-        "ValidExplored": "Card.nonLand",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever a creature you control explores a nonland card, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

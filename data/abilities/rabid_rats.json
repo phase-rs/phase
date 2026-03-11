@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -1,
-        "toughness": -1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.blocking"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target blocking creature gets -1/-1 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target blocking creature gets -1/-1 until end of turn.",
-        "TgtPrompt": "Select target blocking creature",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

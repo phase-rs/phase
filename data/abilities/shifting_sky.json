@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.nonLand",
-        "SetColor": "ChosenColor",
-        "Description": "All nonland permanents are the chosen color."
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All nonland permanents are the chosen color.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

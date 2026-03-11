@@ -1,29 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Prince of Chaos — When CARDNAME enters, you draw X cards and you lose X life, where X is the number of Demons you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Prince of Chaos — When CARDNAME enters, you draw X cards and you lose X life, where X is the number of Demons you control.",
-        "Execute": "TrigDraw"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Lord of Torment — Whenever another Demon you control enters, it deals damage equal to its power to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Demon.YouCtrl+Other",
-        "Destination": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Lord of Torment — Whenever another Demon you control enters, it deals damage equal to its power to any target."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Demon",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

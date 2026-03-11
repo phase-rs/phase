@@ -2,38 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Gift of Tiamat — When CARDNAME dies, if its power is greater than 0, note its power. You get a boon with \"When you cast your next creature spell, it perpetually gets +X/+0, where X is the noted number.\"",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigNote",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Gift of Tiamat — When CARDNAME dies, if its power is greater than 0, note its power. You get a boon with \"When you cast your next creature spell, it perpetually gets +X/+0, where X is the noted number.\"",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

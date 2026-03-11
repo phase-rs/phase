@@ -2,26 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack+attacking"
-        }
-      },
       "cost": null,
+      "description": "Cast CARDNAME only during the declare attackers step and only if you've been attacked this step. Destroy target nonblack attacking creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target nonblack attacking creature",
-        "ActivationPhases": "Declare Attackers",
-        "SpellDescription": "Cast CARDNAME only during the declare attackers step and only if you've been attacked this step. Destroy target nonblack attacking creature.",
-        "CheckSVar": "X"
-      }
+      "target_prompt": "Select target nonblack attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

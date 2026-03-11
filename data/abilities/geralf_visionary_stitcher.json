@@ -2,51 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "u_x_x_zombie",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create an X/X blue Zombie creature token, where X is the sacrificed creature's toughness."
-      }
+      "description": "Create an X/X blue Zombie creature token, where X is the sacrificed creature's toughness.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "u_x_x_zombie",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Zombie",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Zombies you control have flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Zombie.YouCtrl",
-        "Description": "Zombies you control have flying.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

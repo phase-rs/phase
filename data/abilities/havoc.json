@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a white spell, they lose 2 life.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever an opponent casts a white spell, they lose 2 life.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "Opponent",
-        "ValidCard": "Card.White"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

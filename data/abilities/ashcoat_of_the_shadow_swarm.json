@@ -1,36 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, other Rats you control get +X/+X where X is the number of Rats you control.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, other Rats you control get +X/+X where X is the number of Rats you control.",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, other Rats you control get +X/+X where X is the number of Rats you control.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, other Rats you control get +X/+X where X is the number of Rats you control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, you may mill four cards. If you do, return up to two Rat creature cards from your graveyard to your hand. (To mill a card, put the top card of your library into your graveyard.)",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, you may mill four cards. If you do, return up to two Rat creature cards from your graveyard to your hand. (To mill a card, put the top card of your library into your graveyard.)",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChange"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

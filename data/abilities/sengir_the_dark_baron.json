@@ -1,29 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature dies, put two +1/+1 counters on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever another creature dies, put two +1/+1 counters on CARDNAME.",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.Other",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever another player loses the game, you gain life equal to that player's life total as the turn began.",
       "mode": "LosesGame",
-      "params": {
-        "TriggerDescription": "Whenever another player loses the game, you gain life equal to that player's life total as the turn began.",
-        "Execute": "TrigGainLife",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.Other"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

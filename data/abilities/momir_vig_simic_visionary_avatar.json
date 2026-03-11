@@ -2,51 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Create a token that's a copy of a creature card with mana value X chosen at random. Activate only as a sorcery and only once each turn.",
-          "RandomNum": "1",
-          "RandomCopied": "True",
-          "ActivationZone": "Command",
-          "ValidSupportedCopy": "Creature.cmcEQX",
-          "AILogic": "MomirAvatar",
-          "SorcerySpeed": "True",
-          "ActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Create a token that's a copy of a creature card with mana value X chosen at random. Activate only as a sorcery and only once each turn.",
-        "RandomNum": "1",
-        "RandomCopied": "True",
-        "ActivationZone": "Command",
-        "ValidSupportedCopy": "Creature.cmcEQX",
-        "AILogic": "MomirAvatar",
-        "SorcerySpeed": "True",
-        "ActivationLimit": "1"
-      }
+      "description": "Create a token that's a copy of a creature card with mana value X chosen at random. Activate only as a sorcery and only once each turn.",
+      "effect": {
+        "description": "Create a token that's a copy of a creature card with mana value X chosen at random. Activate only as a sorcery and only once each turn.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

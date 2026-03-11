@@ -1,27 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, attach it to target legendary creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME enters, attach it to target legendary creature you control.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigAttach",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever equipped creature attacks, tap target creature defending player controls and put a stun counter on it. Then NICKNAME deals damage to each opponent equal to the number of tapped creatures that opponent controls.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigTap",
-        "TriggerDescription": "Whenever equipped creature attacks, tap target creature defending player controls and put a stun counter on it. Then NICKNAME deals damage to each opponent equal to the number of tapped creatures that opponent controls."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

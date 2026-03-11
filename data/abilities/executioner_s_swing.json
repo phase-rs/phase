@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": -5,
-        "toughness": -5,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.dealtDamageThisTurn"
-        }
-      },
       "cost": null,
+      "description": "Target creature that dealt damage this turn gets -5/-5 until end of turn.",
+      "effect": {
+        "power": -5,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -5,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature that dealt damage this turn gets -5/-5 until end of turn.",
-        "IsCurse": "True",
-        "TgtPrompt": "Select target creature that dealt damage this turn"
-      }
+      "target_prompt": "Select target creature that dealt damage this turn"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

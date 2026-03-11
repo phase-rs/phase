@@ -1,19 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 and has \"Whenever this creature attacks, draw a card, then discard a card.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddTrigger": "TrigAttack",
-        "AddPower": "1",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature gets +1/+1 and has \"Whenever this creature attacks, draw a card, then discard a card.\""
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

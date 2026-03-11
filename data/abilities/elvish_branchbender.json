@@ -2,32 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Creature",
-          "Treefolk"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Forest"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Until end of turn, target Forest becomes an X/X Treefolk creature in addition to its other types, where X is the number of Elves you control.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Forest",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Creature",
+          "Treefolk"
+        ]
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Forest",
-        "SpellDescription": "Until end of turn, target Forest becomes an X/X Treefolk creature in addition to its other types, where X is the number of Elves you control."
-      }
+      "target_prompt": "Select target Forest"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

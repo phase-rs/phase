@@ -1,25 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All Sliver creatures have haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Description": "All Sliver creatures have haste.",
-        "Affected": "Creature.Sliver"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"{1}, Sacrifice this permanent: Target Sliver creature gets +2/+2 until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver",
-        "AddAbility": "Pump",
-        "Description": "All Slivers have \"{1}, Sacrifice this permanent: Target Sliver creature gets +2/+2 until end of turn.\""
-      }
+      "modifications": [
+        {
+          "ability": "Pump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

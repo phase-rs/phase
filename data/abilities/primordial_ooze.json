@@ -1,27 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME. Then you may pay {X}, where X is the number of +1/+1 counters on it. If you don't, tap CARDNAME and it deals X damage to you."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME. Then you may pay {X}, where X is the number of +1/+1 counters on it. If you don't, tap CARDNAME and it deals X damage to you.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

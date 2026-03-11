@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an instant or sorcery card leaves your graveyard, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Instant.YouOwn,Sorcery.YouOwn",
-        "Origin": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an instant or sorcery card leaves your graveyard, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Any"
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn,Sorcery.YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

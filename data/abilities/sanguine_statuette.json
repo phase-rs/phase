@@ -1,29 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you sacrifice a Blood token, you may have CARDNAME become a 3/3 Vampire artifact creature with haste until end of turn.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you sacrifice a Blood token, you may have CARDNAME become a 3/3 Vampire artifact creature with haste until end of turn.",
-        "ValidCard": "Blood.token+YouCtrl"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Blood",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

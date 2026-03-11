@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Metalcraft — Whenever CARDNAME deals combat damage to a player, if you control three or more artifacts, that player mills four cards.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMill",
-        "TriggerDescription": "Metalcraft — Whenever CARDNAME deals combat damage to a player, if you control three or more artifacts, that player mills four cards.",
-        "Metalcraft": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

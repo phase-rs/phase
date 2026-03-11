@@ -1,42 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME deals damage to an opponent, flip it.",
           "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Card.Self",
-            "Execute": "TrigFlip",
-            "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, flip it.",
-            "ValidTarget": "Opponent"
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [],
-      "replacements": [
-        {
-          "event": "DamageDone",
-          "params": {
-            "ValidTarget": "Player",
-            "ValidSource": "Card.RedSource",
-            "ActiveZones": "Battlefield",
-            "ReplaceWith": "DmgPlus1",
-            "Description": "If a red source would deal damage to a player, it deals that much damage plus 1 to that player instead."
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If a red source would deal damage to a player, it deals that much damage plus 1 to that player instead.",
+          "event": "DamageDone"
+        }
+      ],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

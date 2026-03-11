@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ExchangeControl",
-        "params": {
-          "ValidTgts": "Permanent",
-          "TgtPrompt": "Select target permanents that share a permanent type",
-          "TargetsWithSameCardType": "True",
-          "SpellDescription": "Exchange control of two target permanents that share a card type. (Artifact, battle, creature, enchantment, kindred, land, and planeswalker are card types.)",
-          "TargetMin": "2",
-          "TargetMax": "2"
-        }
-      },
       "cost": null,
+      "description": "Exchange control of two target permanents that share a card type. (Artifact, battle, creature, enchantment, kindred, land, and planeswalker are card types.)",
+      "effect": {
+        "description": "Exchange control of two target permanents that share a card type. (Artifact, battle, creature, enchantment, kindred, land, and planeswalker are card types.)",
+        "name": "ExchangeControl",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent",
-        "TgtPrompt": "Select target permanents that share a permanent type",
-        "TargetsWithSameCardType": "True",
-        "SpellDescription": "Exchange control of two target permanents that share a card type. (Artifact, battle, creature, enchantment, kindred, land, and planeswalker are card types.)",
-        "TargetMin": "2",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select target permanents that share a permanent type"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,51 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CastWithFlash",
-          "params": {
-            "ValidSA": "Spell",
-            "Description": "You may cast sorcery spells and Dragon spells as though they had flash.",
-            "EffectZone": "Battlefield",
-            "Caster": "You",
-            "ValidCard": "Sorcery,Dragon"
-          }
+          "description": "You may cast sorcery spells and Dragon spells as though they had flash.",
+          "effect_zone": "Battlefield",
+          "mode": "CastWithFlash"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 3,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Put three +1/+1 counters on target creature you control. (Then shuffle this card into its owner's library.)",
+          "effect": {
+            "count": 3,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put three +1/+1 counters on target creature you control. (Then shuffle this card into its owner's library.)",
-            "TgtPrompt": "Select target creature you control"
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

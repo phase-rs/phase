@@ -1,30 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an enchanted creature attacks one of your opponents, it gets +2/+0 and gains trample until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever an enchanted creature attacks one of your opponents, it gets +2/+0 and gains trample until end of turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.enchanted",
-        "Attacked": "Player.Opponent"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an Aura you control is put into your graveyard from the battlefield, exile it. Until the end of your next turn, you may cast that card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Aura.YouCtrl+YouOwn",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever an Aura you control is put into your graveyard from the battlefield, exile it. Until the end of your next turn, you may cast that card."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Aura",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

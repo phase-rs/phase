@@ -1,30 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDiscover",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, discover 3."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted artifact is a Golem creature with base power and toughness 5/4 in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature & Golem",
-        "SetToughness": "4",
-        "Description": "Enchanted artifact is a Golem creature with base power and toughness 5/4 in addition to its other types.",
-        "SetPower": "5",
-        "Affected": "Artifact.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "core_type": "Creature & Golem",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, discover 3.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

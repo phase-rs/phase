@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, destroy all Auras attached to target land.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDestroyAll",
-        "TriggerDescription": "Whenever CARDNAME attacks, destroy all Auras attached to target land.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

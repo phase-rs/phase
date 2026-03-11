@@ -2,79 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDealDamage",
-        "SpellDescription": "Scry 1. CARDNAME deals 1 damage to each opponent."
-      }
+      "description": "Scry 1. CARDNAME deals 1 damage to each opponent.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Planeswalker": "True",
-          "TgtPrompt": "Select target artifact or creature you control",
-          "SpellDescription": "Create a token that's a copy of target artifact or creature you control, except it's an artifact in addition to its other types. That token gains haste. Exile it at the beginning of the next end step.",
-          "ValidTgts": "Creature.YouCtrl,Artifact.YouCtrl",
-          "AddTypes": "Artifact",
-          "AtEOT": "Exile",
-          "PumpKeywords": "Haste"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
+      "description": "Create a token that's a copy of target artifact or creature you control, except it's an artifact in addition to its other types. That token gains haste. Exile it at the beginning of the next end step.",
+      "effect": {
+        "description": "Create a token that's a copy of target artifact or creature you control, except it's an artifact in addition to its other types. That token gains haste. Exile it at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target artifact or creature you control",
-        "SpellDescription": "Create a token that's a copy of target artifact or creature you control, except it's an artifact in addition to its other types. That token gains haste. Exile it at the beginning of the next end step.",
-        "ValidTgts": "Creature.YouCtrl,Artifact.YouCtrl",
-        "AddTypes": "Artifact",
-        "AtEOT": "Exile",
-        "PumpKeywords": "Haste"
-      }
+      "target_prompt": "Select target artifact or creature you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -7,
+        "type": "Loyalty"
+      },
+      "description": "Search your library for up to three artifact cards with different names, put them onto the battlefield, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -7
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "DifferentNames": "True",
-        "ChangeType": "Artifact",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "ChangeNum": "3",
-        "SpellDescription": "Search your library for up to three artifact cards with different names, put them onto the battlefield, then shuffle."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

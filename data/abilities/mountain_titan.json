@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Self",
-          "SpellDescription": "Until end of turn, whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
-          "Triggers": "TrigSpellCast"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R R"
+        "cost": "1 R R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Self",
-        "SpellDescription": "Until end of turn, whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
-        "Triggers": "TrigSpellCast"
-      }
+      "description": "Until end of turn, whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

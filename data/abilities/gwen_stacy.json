@@ -1,101 +1,88 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "AILogic": "Always",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-              "Mode": "Transform",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 U R W"
+            "cost": "2 U R W",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "AILogic": "Always",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-            "Mode": "Transform",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, exile the top card of your library. You may play that card for as long as you control this creature.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigExile",
-            "ValidCard": "Card.Self",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, exile the top card of your library. You may play that card for as long as you control this creature."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 1,
-            "destination": "Exile"
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "RemoveAnyCounter<2/Any/NICKNAME>"
+            "cost": "RemoveAnyCounter<2/Any/NICKNAME>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBEffect",
-            "RememberChanged": "True",
-            "SpellDescription": "Exile the top card of your library. You may play that card this turn.",
-            "ChangeNum": "All"
-          }
+          "description": "Exile the top card of your library. You may play that card this turn.",
+          "effect": {
+            "count": 1,
+            "destination": "Exile",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you play a land from exile or cast a spell from exile, put a +1/+1 counter on CARDNAME.",
           "mode": "LandPlayed",
-          "params": {
-            "ValidCard": "Land.YouCtrl",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPutCounter",
-            "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, put a +1/+1 counter on CARDNAME.",
-            "Origin": "Exile"
+          "origin": "Exile",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Land",
+            "controller": "You",
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever you play a land from exile or cast a spell from exile, put a +1/+1 counter on CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "Execute": "TrigPutCounter",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, put a +1/+1 counter on CARDNAME.",
-            "ValidCard": "Card.wasCastFromExile",
-            "Secondary": "True"
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

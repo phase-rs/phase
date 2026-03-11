@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "Description": "NICKNAME's power is equal to your devotion to green."
-      }
+      "characteristic_defining": true,
+      "description": "NICKNAME's power is equal to your devotion to green.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

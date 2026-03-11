@@ -1,59 +1,123 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Domain — This spell costs {2} less to cast for each basic land type among lands you control.",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "X",
-        "EffectZone": "All"
-      }
+      "description": "Domain — This spell costs {2} less to cast for each basic land type among lands you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control gains vigilance if it's white.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control gains vigilance if it's white.",
-        "Affected": "Creature.White+YouCtrl",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control gains hexproof if it's blue.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Description": "Each creature you control gains hexproof if it's blue.",
-        "Affected": "Creature.Blue+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control gains lifelink if it's black.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control gains lifelink if it's black.",
-        "AddKeyword": "Lifelink",
-        "Affected": "Creature.Black+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control gains first strike if it's red.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Red+YouCtrl",
-        "AddKeyword": "First Strike",
-        "Description": "Each creature you control gains first strike if it's red."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control gains trample if it's green.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control gains trample if it's green.",
-        "AddKeyword": "Trample",
-        "Affected": "Creature.Green+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

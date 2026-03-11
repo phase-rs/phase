@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "M1M1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Remove a -1/-1 counter from target creature. If you do, you gain 2 life.",
-        "SubAbility": "DBGainLife",
-        "RememberRemoved": "True",
-        "AITgts": "Creature.counters_GE1_M1M1"
-      }
+      "description": "Remove a -1/-1 counter from target creature. If you do, you gain 2 life.",
+      "effect": {
+        "count": 1,
+        "counter_type": "M1M1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "RemoveCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you exile the top creature card of your graveyard.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigUpkeep",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you exile the top creature card of your graveyard."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

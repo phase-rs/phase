@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddTurn",
-        "params": {
-          "SubAbility": "DBToken",
-          "NumTurns": "1",
-          "SpellDescription": "Take an extra turn after this one. If this spell was foretold, create two 1/1 blue Bird creature tokens with flying. Exile CARDNAME.",
-          "StackDescription": "None"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "NumTurns": "1",
-        "SpellDescription": "Take an extra turn after this one. If this spell was foretold, create two 1/1 blue Bird creature tokens with flying. Exile CARDNAME.",
-        "StackDescription": "None"
-      }
+      "description": "Take an extra turn after this one. If this spell was foretold, create two 1/1 blue Bird creature tokens with flying. Exile CARDNAME.",
+      "effect": {
+        "description": "Take an extra turn after this one. If this spell was foretold, create two 1/1 blue Bird creature tokens with flying. Exile CARDNAME.",
+        "name": "AddTurn",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

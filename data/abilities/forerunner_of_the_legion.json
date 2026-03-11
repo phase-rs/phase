@@ -1,31 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for a Vampire card, reveal it, then shuffle and put that card on top.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for a Vampire card, reveal it, then shuffle and put that card on top.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another Vampire you control enters, target creature gets +1/+1 until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever another Vampire you control enters, target creature gets +1/+1 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigPump",
-        "ValidCard": "Vampire.Other+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Vampire",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

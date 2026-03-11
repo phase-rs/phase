@@ -2,30 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature you control gets +1/+1 and gains haste until end of turn. Activate only as a sorcery.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Haste",
-        "SpellDescription": "Target creature you control gets +1/+1 and gains haste until end of turn. Activate only as a sorcery.",
-        "TgtPrompt": "Select target creature you control",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

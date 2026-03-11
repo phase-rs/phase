@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Dinosaur",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control a Dinosaur.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self",
-        "IsPresent": "Dinosaur.YouCtrl",
-        "Description": "CARDNAME has flying as long as you control a Dinosaur."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

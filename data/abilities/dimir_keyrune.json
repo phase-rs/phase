@@ -2,54 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U B",
-        "params": {
-          "SpellDescription": "Add {U} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U} or {B}."
-      }
+      "description": "Add {U} or {B}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 2/2 blue and black Horror artifact creature until end of turn and can't be blocked this turn.",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature",
           "Horror"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "RemoveCreatureTypes": "True",
-        "SubAbility": "DBUnblockable",
-        "Colors": "Blue,Black",
-        "OverwriteColors": "True",
-        "SpellDescription": "CARDNAME becomes a 2/2 blue and black Horror artifact creature until end of turn and can't be blocked this turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

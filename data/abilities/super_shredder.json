@@ -1,20 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another permanent leaves the battlefield, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever another permanent leaves the battlefield, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "Destination": "Any",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "ValidCard": "Permanent.Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

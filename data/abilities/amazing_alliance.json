@@ -1,28 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Creature.Legendary+YouCtrl",
-        "TriggerDescription": "Whenever you attack with one or more legendary creatures, you gain that much life.",
-        "Execute": "TrigGainLife"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Creatures you control get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you attack with one or more legendary creatures, you gain that much life.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

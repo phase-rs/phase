@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Assassin",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Assassins you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Assassin.Other+YouCtrl",
-        "Description": "Other Assassins you control get +2/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

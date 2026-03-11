@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, each player reveals the top card of their library.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, each player reveals the top card of their library.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReveal"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

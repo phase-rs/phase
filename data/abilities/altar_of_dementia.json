@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "target": {
+          "type": "None"
+        },
+        "type": "Sacrifice"
+      },
+      "description": "Target player mills cards equal to the sacrificed creature's power.",
       "effect": {
-        "type": "Mill",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "None"
-        }
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills cards equal to the sacrificed creature's power."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,44 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SubAbility": "DestroyAll",
-          "Defined": "You",
-          "SpellDescription": "Destroy all enchantments of the color of your choice."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 G"
+            "cost": "2 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DestroyAll",
-        "Defined": "You",
-        "SpellDescription": "Destroy all enchantments of the color of your choice."
-      }
+      "description": "Destroy all enchantments of the color of your choice.",
+      "effect": {
+        "description": "Destroy all enchantments of the color of your choice.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

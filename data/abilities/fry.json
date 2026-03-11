@@ -2,38 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 5 damage to target creature or planeswalker that's white or blue.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 5
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.White,Planeswalker.White,Creature.Blue,Planeswalker.Blue"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White,Planeswalker.White,Creature.Blue,Planeswalker.Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker that's white or blue",
-        "SpellDescription": "CARDNAME deals 5 damage to target creature or planeswalker that's white or blue."
-      }
+      "target_prompt": "Select target creature or planeswalker that's white or blue"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

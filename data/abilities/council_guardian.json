@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Will of the Council — When CARDNAME enters, starting with you, each player votes for blue, black, red, or green. CARDNAME gains protection from each color with the most votes or tied for most votes.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigVote",
-        "TriggerDescription": "Will of the Council — When CARDNAME enters, starting with you, each player votes for blue, black, red, or green. CARDNAME gains protection from each color with the most votes or tied for most votes.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,21 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Reveal the first card you draw each turn. Whenever you reveal a basic land card this way, draw a card.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "Execute": "DBReveal",
-        "ForReveal": "True",
-        "TriggerDescription": "Reveal the first card you draw each turn. Whenever you reveal a basic land card this way, draw a card.",
-        "ValidCard": "Card.YouOwn",
-        "Number": "1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

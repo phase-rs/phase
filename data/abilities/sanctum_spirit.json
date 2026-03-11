@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card.Historic/historic card>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains indestructible until end of turn. (Artifacts, legendaries, and Sagas are historic.)",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card.Historic/historic card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains indestructible until end of turn. (Artifacts, legendaries, and Sagas are historic.)",
-        "Defined": "Self",
-        "KW": "Indestructible"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

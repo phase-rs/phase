@@ -1,31 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature you control with base power 1 enters, it gains haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Creature.Other+YouCtrl+basePowerEQ1",
-        "TriggerDescription": "Whenever another creature you control with base power 1 enters, it gains haste until end of turn."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever another creature you control enters, if it wasn't cast, put a +1/+1 counter on CARDNAME and CARDNAME can't be blocked this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another creature you control enters, if it wasn't cast, put a +1/+1 counter on CARDNAME and CARDNAME can't be blocked this turn.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.Other+!wasCast+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

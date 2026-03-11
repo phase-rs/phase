@@ -2,36 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy all creatures. They can't be regenerated. Draw a card for each creature destroyed this way.",
-        "RememberDestroyed": "True",
-        "ValidCards": "Creature",
-        "NoRegen": "True",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Destroy all creatures. They can't be regenerated. Draw a card for each creature destroyed this way.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, all creatures get -2/-2 until end of turn.",
       "mode": "Cycled",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "When you cycle CARDNAME, all creatures get -2/-2 until end of turn.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

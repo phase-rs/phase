@@ -2,52 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 R",
+            "type": "Mana"
+          },
+          {
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "It deals 3 damage to target creature or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 R"
-          },
-          {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Hand",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "It deals 3 damage to target creature or planeswalker."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, discover 5.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, discover 5.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDiscover",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

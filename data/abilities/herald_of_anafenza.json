@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you activate CARDNAME's outlast ability, create a 1/1 white Warrior creature token.",
       "mode": "AbilityCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you activate CARDNAME's outlast ability, create a 1/1 white Warrior creature token.",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Activated.Outlast",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

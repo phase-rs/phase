@@ -2,61 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ActivationZone": "Hand",
-          "RememberObjects": "Targeted & Self",
-          "SpellDescription": "Target land gains \"{T}: Add {G}, {W}, or {U}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
-          "ValidTgts": "Land",
-          "StaticAbilities": "Land,MayPlay",
-          "Duration": "Permanent",
-          "Triggers": "Cast",
-          "ForgetOnMoved": "Exile",
-          "ImprintCards": "Self"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromHand<1/CARDNAME>"
+            "cost": "ExileFromHand<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Hand",
-        "RememberObjects": "Targeted & Self",
-        "SpellDescription": "Target land gains \"{T}: Add {G}, {W}, or {U}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
-        "ValidTgts": "Land",
-        "StaticAbilities": "Land,MayPlay",
-        "Duration": "Permanent",
-        "Triggers": "Cast",
-        "ForgetOnMoved": "Exile",
-        "ImprintCards": "Self"
-      }
+      "description": "Target land gains \"{T}: Add {G}, {W}, or {U}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target creature an opponent controls can't attack or block until your next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPump",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, target creature an opponent controls can't attack or block until your next turn.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

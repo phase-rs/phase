@@ -1,61 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Land.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Destroy target land you control and target land you don't control.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Land",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "AILogic": "Destroy",
-            "StackDescription": "None",
-            "IsCurse": "True",
-            "SpellDescription": "Destroy target land you control and target land you don't control.",
-            "SubAbility": "DestroyOpp",
-            "TgtPrompt": "Choose target land you control to destroy"
-          }
+          "target_prompt": "Choose target land you control to destroy"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "DestroyAll",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Land",
-            "SpellDescription": "Destroy all lands."
-          }
+          "description": "Destroy all lands.",
+          "effect": {
+            "target": {
+              "type": "Any"
+            },
+            "type": "DestroyAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,34 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, add {R} for each attacking creature.",
-        "Execute": "TrigMana",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Dog",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Dogs you control have unleash.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Unleash",
-        "Description": "Other Dogs you control have unleash.",
-        "Affected": "Dog.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Unleash",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control with counters on them have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+HasCounters",
-        "AddKeyword": "Haste",
-        "Description": "Creatures you control with counters on them have haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, add {R} for each attacking creature.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

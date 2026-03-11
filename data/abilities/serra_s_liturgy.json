@@ -2,52 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy up to X target artifacts and/or enchantments, where X is the number of verse counters on CARDNAME.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TgtPrompt": "Select target artifact or enchantment",
-        "TargetMax": "X",
-        "SpellDescription": "Destroy up to X target artifacts and/or enchantments, where X is the number of verse counters on CARDNAME."
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

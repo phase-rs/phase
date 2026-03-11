@@ -1,39 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may play lands and cast spells from among cards you own in exile with croak counters on them.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a Frog you control attacks, mill three cards.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a Frog you control attacks, mill three cards.",
-        "Execute": "TrigMill",
-        "ValidCard": "Frog.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Frog",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a permanent card is put into your graveyard from your library, exile it with a croak counter on it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever a permanent card is put into your graveyard from your library, exile it with a croak counter on it.",
-        "Origin": "Library",
-        "ValidCard": "Permanent.YouOwn",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Library",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may play lands and cast spells from among cards you own in exile with croak counters on them.",
-        "MayPlay": "True",
-        "AffectedZone": "Exile",
-        "Affected": "Card.YouOwn+counters_GE1_CROAK"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

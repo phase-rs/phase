@@ -2,43 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Stack",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "TgtZone": "Stack",
-        "TargetType": "Spell",
-        "TargetMin": "0",
-        "SpellDescription": "Exile any number of target spells.",
-        "TargetMax": "MaxTgts"
-      }
+      "description": "Exile any number of target spells.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Stack",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "OppCastThisTurn"
+      },
+      "description": "If an opponent cast three or more spells this turn, you may pay {0} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "If an opponent cast three or more spells this turn, you may pay {0} rather than pay this spell's mana cost.",
-        "EffectZone": "All",
-        "Cost": "0",
-        "CheckSVar": "OppCastThisTurn",
-        "ValidSA": "Spell.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

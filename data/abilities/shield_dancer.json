@@ -2,39 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "IsCurse": "True",
-          "ReplacementEffects": "DamageShielded",
-          "AILogic": "Fog",
-          "ExileOnMoved": "Battlefield",
-          "ValidTgts": "Creature.attacking",
-          "SpellDescription": "The next time target attacking creature would deal combat damage to CARDNAME this turn, that creature deals that damage to itself instead.",
-          "RememberObjects": "Targeted",
-          "TgtPrompt": "Select target attacking creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
+      "description": "The next time target attacking creature would deal combat damage to CARDNAME this turn, that creature deals that damage to itself instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "ReplacementEffects": "DamageShielded",
-        "AILogic": "Fog",
-        "ExileOnMoved": "Battlefield",
-        "ValidTgts": "Creature.attacking",
-        "SpellDescription": "The next time target attacking creature would deal combat damage to CARDNAME this turn, that creature deals that damage to itself instead.",
-        "RememberObjects": "Targeted",
-        "TgtPrompt": "Select target attacking creature"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

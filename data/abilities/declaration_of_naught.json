@@ -2,28 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.NamedCard"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
+      "description": "Counter target spell with the chosen name.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "NamedCard"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target spell with the chosen name.",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell with the chosen name"
-      }
+      "target_prompt": "Select target spell with the chosen name"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

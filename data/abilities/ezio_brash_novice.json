@@ -1,29 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GT1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as NICKNAME has two or more counters on it, it has first strike and is an Assassin in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "First Strike",
-        "Description": "As long as NICKNAME has two or more counters on it, it has first strike and is an Assassin in addition to its other types.",
-        "AddType": "Assassin",
-        "CheckSVar": "X",
-        "SVarCompare": "GT1"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Assassin",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, put a +1/+1 counter on it.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

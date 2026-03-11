@@ -1,30 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Amount": "X",
-        "Description": "This spell costs {1} less to cast for each counter among players and permanents."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "This spell costs {1} less to cast for each counter among players and permanents.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

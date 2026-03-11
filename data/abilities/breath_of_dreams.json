@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Green creatures have \"Cumulative upkeep {1}.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Green creatures have \"Cumulative upkeep {1}.\"",
-        "Affected": "Creature.Green",
-        "AddKeyword": "Cumulative upkeep:1"
-      }
+      "modifications": [
+        {
+          "keyword": "Cumulative",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "upkeep:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

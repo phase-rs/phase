@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant,Sorcery"
-        }
-      },
       "cost": null,
+      "description": "Exile target instant or sorcery card from a graveyard. Copy that card three times. You may cast the copies without paying their mana costs. Exile CARDNAME.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Instant,Sorcery",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target instant or sorcery card in a graveyard",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile target instant or sorcery card from a graveyard. Copy that card three times. You may cast the copies without paying their mana costs. Exile CARDNAME.",
-        "SubAbility": "DBPlay"
-      }
+      "target_prompt": "Select target instant or sorcery card in a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

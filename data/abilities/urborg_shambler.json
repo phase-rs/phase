@@ -1,18 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Black"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other black creatures get -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Black+Other",
-        "AddPower": "-1",
-        "AddToughness": "-1",
-        "Description": "Other black creatures get -1/-1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

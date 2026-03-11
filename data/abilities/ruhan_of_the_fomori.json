@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, choose an opponent at random. CARDNAME attacks that player this combat if able.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigChoose",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, choose an opponent at random. CARDNAME attacks that player this combat if able."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

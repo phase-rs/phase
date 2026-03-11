@@ -2,32 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "AILogic": "Fog",
-          "ReplacementEffects": "ChannelHarmRep",
-          "ValidTgts": "Creature",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have CARDNAME deal that much damage to target creature."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "AILogic": "Fog",
-        "ReplacementEffects": "ChannelHarmRep",
-        "ValidTgts": "Creature",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have CARDNAME deal that much damage to target creature."
-      }
+      "description": "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have CARDNAME deal that much damage to target creature.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

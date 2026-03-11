@@ -1,27 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigDmg",
-        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, it deals 1 damage to target opponent for each Swamp you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if you cast it from your hand, it deals 1 damage to target opponent for each Swamp you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

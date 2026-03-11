@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Wall creatures can attack as though they didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Description": "Wall creatures can attack as though they didn't have defender.",
-        "ValidCard": "Creature.Wall"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

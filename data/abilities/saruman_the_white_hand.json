@@ -1,28 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a noncreature spell, amass Orcs X, where X is that spell's mana value. (Put X +1/+1 counters on an Army you control. It's also an Orc. If you don't control an Army, create a 0/0 black Orc Army creature token first.)",
-        "ValidCard": "Card.nonCreature",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigAmass"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Goblin",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Orc.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Goblins and Orcs you control have ward {2}.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Goblins and Orcs you control have ward {2}.",
-        "Affected": "Goblin.YouCtrl,Orc.YouCtrl",
-        "AddKeyword": "Ward:2"
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a noncreature spell, amass Orcs X, where X is that spell's mana value. (Put X +1/+1 counters on an Army you control. It's also an Orc. If you don't control an Army, create a 0/0 black Orc Army creature token first.)",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

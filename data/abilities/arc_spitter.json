@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{1}: This creature deals 1 damage to target creature that's blocking it.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "ABDealDamage",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has \"{1}: This creature deals 1 damage to target creature that's blocking it.\""
-      }
+      "modifications": [
+        {
+          "ability": "ABDealDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

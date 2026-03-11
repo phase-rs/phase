@@ -1,59 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player mills eight cards.",
           "effect": {
-            "type": "Mill",
             "count": 8,
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target player mills eight cards."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Put a creature card from a graveyard onto the battlefield under your control. It gains haste until end of turn.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
             "destination": "Battlefield",
+            "origin": "Graveyard",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberChanged": "True",
-            "ChangeType": "Creature",
-            "SubAbility": "DBPump",
-            "SpellDescription": "Put a creature card from a graveyard onto the battlefield under your control. It gains haste until end of turn.",
-            "GainControl": "True",
-            "Hidden": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

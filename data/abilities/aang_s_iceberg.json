@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Waterbend<3>",
+        "type": "Mana"
+      },
+      "description": "Sacrifice this enchantment. If you do, scry 2.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Waterbend<3>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice this enchantment. If you do, scry 2.",
-        "RememberSacrificed": "True",
-        "SacValid": "Self",
-        "SubAbility": "DBScry"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this enchantment enters, exile up to one other target nonland permanent until this enchantment leaves the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When this enchantment enters, exile up to one other target nonland permanent until this enchantment leaves the battlefield."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

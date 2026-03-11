@@ -1,74 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals X damage divided as you choose among up to two target creatures and/or planeswalkers. If X is 6 or more, CARDNAME deals twice X damage divided as you choose among them instead.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Variable",
               "value": "Y"
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature,Planeswalker"
-            }
+              "card_type": "Creature,Planeswalker",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "DividedAsYouChoose": "Y",
-            "TargetMin": "0",
-            "TgtPrompt": "Select up to two target creatures and/or planeswalkers",
-            "TargetMax": "2",
-            "SpellDescription": "CARDNAME deals X damage divided as you choose among up to two target creatures and/or planeswalkers. If X is 6 or more, CARDNAME deals twice X damage divided as you choose among them instead."
-          }
+          "target_prompt": "Select up to two target creatures and/or planeswalkers"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "R",
-            "params": {
-              "SpellDescription": "Add {R}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {R}."
+          "description": "Add {R}.",
+          "effect": {
+            "produced": [
+              "Red"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "DBTap",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
-            "ReplacementResult": "Updated"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

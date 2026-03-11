@@ -2,77 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "ValidTgts": "Permanent.YouCtrl+Other",
-          "CounterType": "EachNotOn",
-          "Defined": "Self",
-          "TgtPrompt": "Select another target permanent you control",
-          "CounterNum": "1",
-          "SpellDescription": "Move a counter of each kind not on CARDNAME from another target permanent you control onto NICKNAME."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Move a counter of each kind not on CARDNAME from another target permanent you control onto NICKNAME.",
+      "effect": {
+        "description": "Move a counter of each kind not on CARDNAME from another target permanent you control onto NICKNAME.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent.YouCtrl+Other",
-        "CounterType": "EachNotOn",
-        "Defined": "Self",
-        "TgtPrompt": "Select another target permanent you control",
-        "CounterNum": "1",
-        "SpellDescription": "Move a counter of each kind not on CARDNAME from another target permanent you control onto NICKNAME."
-      }
+      "target_prompt": "Select another target permanent you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "ValidTgts": "Permanent.YouCtrl+Other",
-          "TgtPrompt": "Select another target permanent you control",
-          "CounterType": "Any",
-          "SpellDescription": "Move one or more counters from NICKNAME onto another target permanent you control. If you do, draw a card.",
-          "RememberPut": "True",
-          "NonZero": "True",
-          "SubAbility": "DBDraw",
-          "CounterNum": "Any",
-          "Source": "Self"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Move one or more counters from NICKNAME onto another target permanent you control. If you do, draw a card.",
+      "effect": {
+        "description": "Move one or more counters from NICKNAME onto another target permanent you control. If you do, draw a card.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent.YouCtrl+Other",
-        "TgtPrompt": "Select another target permanent you control",
-        "CounterType": "Any",
-        "SpellDescription": "Move one or more counters from NICKNAME onto another target permanent you control. If you do, draw a card.",
-        "RememberPut": "True",
-        "NonZero": "True",
-        "SubAbility": "DBDraw",
-        "CounterNum": "Any",
-        "Source": "Self"
-      }
+      "target_prompt": "Select another target permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

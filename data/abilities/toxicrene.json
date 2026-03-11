@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "Hypertoxic Miasma — All lands have \"{T}: Add one mana of any color\" and lose all other abilities.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Hypertoxic Miasma — All lands have \"{T}: Add one mana of any color\" and lose all other abilities.",
-        "AddAbility": "Mana",
-        "Affected": "Land",
-        "RemoveAllAbilities": "True"
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

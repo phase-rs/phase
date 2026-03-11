@@ -1,29 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of abilities your opponents control.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Activator": "Player.Opponent",
-        "Description": "CARDNAME can't be the target of abilities your opponents control.",
-        "ValidSA": "Activated,Triggered"
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "NICKNAME gets +1/+1 for each creature you control.",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "NICKNAME gets +1/+1 for each creature you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

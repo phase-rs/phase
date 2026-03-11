@@ -2,103 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "Planeswalker": "True",
-          "RevealValid": "Card.nonCreature+nonLand",
-          "SpellDescription": "Look at the top card of your library. If it's a noncreature, nonland card, you may reveal it and put it into your hand.",
-          "RememberRevealed": "True",
-          "RevealOptional": "True",
-          "SubAbility": "DBChangeZone",
-          "AILogic": "Main2",
-          "PeekAmount": "1"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RevealValid": "Card.nonCreature+nonLand",
-        "SpellDescription": "Look at the top card of your library. If it's a noncreature, nonland card, you may reveal it and put it into your hand.",
-        "RememberRevealed": "True",
-        "RevealOptional": "True",
-        "SubAbility": "DBChangeZone",
-        "AILogic": "Main2",
-        "PeekAmount": "1"
-      }
+      "description": "Look at the top card of your library. If it's a noncreature, nonland card, you may reveal it and put it into your hand.",
+      "effect": {
+        "description": "Look at the top card of your library. If it's a noncreature, nonland card, you may reveal it and put it into your hand.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "Stackable": "False",
-          "AILogic": "NarsetRebound",
-          "Execute": "AddRebound",
-          "Mode": "SpellCast",
-          "SpellDescription": "When you cast your next instant or sorcery spell from your hand this turn, it gains rebound. (Exile the spell as it resolves. At the beginning of your next upkeep, you may cast that card from exile without paying its mana cost.)",
-          "ValidActivatingPlayer": "You",
-          "ValidCard": "Instant.wasCastFromYourHand,Sorcery.wasCastFromYourHand",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Stackable": "False",
-        "AILogic": "NarsetRebound",
-        "Execute": "AddRebound",
-        "Mode": "SpellCast",
-        "SpellDescription": "When you cast your next instant or sorcery spell from your hand this turn, it gains rebound. (Exile the spell as it resolves. At the beginning of your next upkeep, you may cast that card from exile without paying its mana cost.)",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant.wasCastFromYourHand,Sorcery.wasCastFromYourHand",
-        "Planeswalker": "True"
-      }
+      "description": "When you cast your next instant or sorcery spell from your hand this turn, it gains rebound. (Exile the spell as it resolves. At the beginning of your next upkeep, you may cast that card from exile without paying its mana cost.)",
+      "effect": {
+        "description": "When you cast your next instant or sorcery spell from your hand this turn, it gains rebound. (Exile the spell as it resolves. At the beginning of your next upkeep, you may cast that card from exile without paying its mana cost.)",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Stackable": "False",
-          "StaticAbilities": "STNarset",
-          "AILogic": "Always",
-          "Name": "Emblem — Narset Transcendent",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "SpellDescription": "You get an emblem with \"Your opponents can't cast noncreature spells.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Stackable": "False",
-        "StaticAbilities": "STNarset",
-        "AILogic": "Always",
-        "Name": "Emblem — Narset Transcendent",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "SpellDescription": "You get an emblem with \"Your opponents can't cast noncreature spells.\""
-      }
+      "description": "You get an emblem with \"Your opponents can't cast noncreature spells.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

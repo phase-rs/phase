@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "DefenderNotNearestToYouInChosenDirection": "True",
-        "Description": "Each player may attack only the nearest opponent in the chosen direction and planeswalkers controller by that opponent."
-      }
+      "description": "Each player may attack only the nearest opponent in the chosen direction and planeswalkers controller by that opponent.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

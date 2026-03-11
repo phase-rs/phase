@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Creature.EnchantedBy",
-        "ValidSource": "Card.ChosenColor",
-        "Description": "Prevent all damage that would be dealt to enchanted creature by sources of the chosen color.",
-        "Prevent": "True"
-      }
+      "description": "Prevent all damage that would be dealt to enchanted creature by sources of the chosen color.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

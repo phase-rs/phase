@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Artifact creatures and Heroes you control get +1/+1 for each Artificer you control and each Artificer card in your graveyard.",
-        "Affected": "Creature.Artifact+YouCtrl,Creature.Hero+YouCtrl",
-        "AddToughness": "X",
-        "AddPower": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Creature.Hero"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Artifact creatures and Heroes you control get +1/+1 for each Artificer you control and each Artificer card in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

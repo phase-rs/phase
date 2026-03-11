@@ -2,20 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.) Target creature you control fights up to one target creature you don't control.",
       "effect": {
         "type": "Proliferate"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.) Target creature you control fights up to one target creature you don't control.",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

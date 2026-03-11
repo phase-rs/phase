@@ -1,18 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsRenowned"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is renowned, it has vigilance and \"{T}: Add one mana of any color.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+IsRenowned",
-        "AddKeyword": "Vigilance",
-        "AddAbility": "ManaTap",
-        "Description": "As long as CARDNAME is renowned, it has vigilance and \"{T}: Add one mana of any color.\""
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "ManaTap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "TrigRedistribute",
-        "TriggerDescription": "Whenever chaos ensues, redistribute any number of players' life totals. (Each of those players gets one life total back.)"
+      "description": "If a creature would die, instead exile it and that creature's controller loses 2 life.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Creature",
-        "Description": "If a creature would die, instead exile it and that creature's controller loses 2 life.",
-        "ActiveZones": "Command",
-        "Destination": "Graveyard",
-        "ReplaceWith": "Exile"
-      }
+      "description": "Whenever chaos ensues, redistribute any number of players' life totals. (Each of those players gets one life total back.)",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

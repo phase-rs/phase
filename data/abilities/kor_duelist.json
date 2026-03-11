@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is equipped, it has double strike. (It deals both first-strike and regular combat damage.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Description": "As long as CARDNAME is equipped, it has double strike. (It deals both first-strike and regular combat damage.)",
-        "Affected": "Card.Self+equipped"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability an opponent controls, exile CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Exile",
-        "Affected": "Card.Self",
-        "Description": "You may cast CARDNAME from exile.",
-        "MayPlay": "True",
-        "AffectedZone": "Exile"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Exile",
+      "description": "You may cast CARDNAME from exile.",
+      "effect_zone": "Exile",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME becomes the target of a spell or ability an opponent controls, exile CARDNAME.",
+      "mode": "BecomesTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

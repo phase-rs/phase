@@ -2,31 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant.YouOwn+cmcLEX"
-        }
-      },
       "cost": null,
+      "description": "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard this turn, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Graveyard",
-        "TgtPrompt": "Select target instant card in your graveyard with mana value X or less",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard this turn, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "SubAbility": "DBPump"
-      }
+      "target_prompt": "Select target instant card in your graveyard with mana value X or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

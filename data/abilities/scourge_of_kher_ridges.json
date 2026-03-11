@@ -2,56 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 2 damage to each creature without flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.withoutFlying",
-        "SpellDescription": "CARDNAME deals 2 damage to each creature without flying.",
-        "ValidDescription": "each creature and without flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 6 damage to each other creature with flying.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 6
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 6 damage to each other creature with flying.",
-        "ValidDescription": "each other creature with flying.",
-        "ValidCards": "Creature.withFlying+StrictlyOther"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

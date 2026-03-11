@@ -1,29 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigAttach",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever equipped creature dies, attach CARDNAME to target creature you control.",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+0 and has vigilance and trample.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "Description": "Equipped creature gets +3/+0 and has vigilance and trample.",
-        "AddKeyword": "Vigilance & Trample",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature dies, attach CARDNAME to target creature you control.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

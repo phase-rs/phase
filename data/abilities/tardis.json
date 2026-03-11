@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if you control a Time Lord, the next spell you cast this turn has cascade and you may planeswalk.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Card.Time Lord+YouCtrl",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Whenever CARDNAME attacks, if you control a Time Lord, the next spell you cast this turn has cascade and you may planeswalk.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

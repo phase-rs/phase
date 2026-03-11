@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "SetColor": "Red",
-          "ValidTgts": "Instant,Sorcery",
-          "SpellDescription": "Copy target instant or sorcery spell, except that the copy is red. You may choose new targets for the copy.",
-          "TargetType": "Spell",
-          "MayChooseTarget": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SetColor": "Red",
-        "ValidTgts": "Instant,Sorcery",
-        "SpellDescription": "Copy target instant or sorcery spell, except that the copy is red. You may choose new targets for the copy.",
-        "TargetType": "Spell",
-        "MayChooseTarget": "True"
-      }
+      "description": "Copy target instant or sorcery spell, except that the copy is red. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell, except that the copy is red. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

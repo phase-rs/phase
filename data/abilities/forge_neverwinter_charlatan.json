@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Sacrificed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more players sacrifice one or more creatures, you create a tapped Treasure token. This ability triggers only once each turn.",
-        "ValidCard": "Creature",
-        "ActivationLimit": "1",
-        "Execute": "TrigTreasure"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Description": "CARDNAME gets +2/+0 for each Treasure you control.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +2/+0 for each Treasure you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more players sacrifice one or more creatures, you create a tapped Treasure token. This ability triggers only once each turn.",
+      "mode": "Sacrificed",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

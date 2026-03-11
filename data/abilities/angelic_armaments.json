@@ -1,21 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2, has flying and is a white Angel in addition to its other colors and types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Angel",
-        "AddKeyword": "Flying",
-        "AddColor": "White",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +2/+2, has flying and is a white Angel in addition to its other colors and types."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Angel",
+          "type": "AddType"
+        },
+        {
+          "color": "White",
+          "type": "AddColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

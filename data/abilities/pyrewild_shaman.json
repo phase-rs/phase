@@ -2,55 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 3,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target attacking creature gets +3/+1 until end of turn.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking creature",
-        "PrecostDesc": "Bloodrush —",
-        "ActivationZone": "Hand",
-        "SpellDescription": "Target attacking creature gets +3/+1 until end of turn."
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, if CARDNAME is in your graveyard, you may pay {3}. If you do, return CARDNAME to your hand.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, if CARDNAME is in your graveyard, you may pay {3}. If you do, return CARDNAME to your hand.",
-        "PresentZone": "Graveyard",
-        "ValidTarget": "Player",
-        "IsPresent": "Card.StrictlySelf",
-        "PresentPlayer": "You",
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigChange"
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Multicolored creatures you control have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Multicolored creatures you control have vigilance.",
-        "Affected": "Creature.MultiColor+YouCtrl",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

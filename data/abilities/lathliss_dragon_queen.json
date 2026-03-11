@@ -2,41 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R"
+        "cost": "1 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Dragons you control get +1/+0 until end of turn.",
-        "ValidCards": "Dragon.YouCtrl"
-      }
+      "description": "Dragons you control get +1/+0 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another nontoken Dragon you control enters, create a 5/5 red Dragon creature token with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever another nontoken Dragon you control enters, create a 5/5 red Dragon creature token with flying.",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Dragon.YouCtrl+!token+Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Dragon",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

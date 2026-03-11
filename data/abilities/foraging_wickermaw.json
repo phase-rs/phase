@@ -2,43 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBMana",
-          "SpellDescription": "Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.",
-          "ActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBMana",
-        "SpellDescription": "Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.",
-        "ActivationLimit": "1"
-      }
+      "description": "Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.",
+      "effect": {
+        "description": "Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSurveil",
-        "TriggerDescription": "When this creature enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

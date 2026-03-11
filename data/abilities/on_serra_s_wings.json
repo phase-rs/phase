@@ -1,20 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature is legendary, gets +1/+1, and has flying, vigilance, and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddType": "Legendary",
-        "AddKeyword": "Flying & Vigilance & Lifelink",
-        "Description": "Enchanted creature is legendary, gets +1/+1, and has flying, vigilance, and lifelink.",
-        "Affected": "Card.EnchantedBy",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Legendary",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

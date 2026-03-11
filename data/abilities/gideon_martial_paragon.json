@@ -2,84 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "Planeswalker": "True",
-          "ValidCards": "Creature.YouCtrl",
-          "SubAbility": "DBPumpAll",
-          "SpellDescription": "Untap all creatures you control. Those creatures get +1/+1 until end of turn."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ValidCards": "Creature.YouCtrl",
-        "SubAbility": "DBPumpAll",
-        "SpellDescription": "Untap all creatures you control. Those creatures get +1/+1 until end of turn."
-      }
+      "description": "Untap all creatures you control. Those creatures get +1/+1 until end of turn.",
+      "effect": {
+        "description": "Untap all creatures you control. Those creatures get +1/+1 until end of turn.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 5/5 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
       "effect": {
-        "type": "Animate",
         "power": 5,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 5,
+        "type": "Animate",
         "types": [
           "Creature",
           "Human",
           "Soldier"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Keywords": "Indestructible",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 5/5 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
-        "SubAbility": "GideonPrevent",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBTapAll",
-        "SpellDescription": "Creatures you control get +2/+2 until end of turn. Tap all creatures your opponents control.",
-        "ValidCards": "Creature.YouCtrl",
-        "Planeswalker": "True",
-        "Ultimate": "True"
-      }
+      "description": "Creatures you control get +2/+2 until end of turn. Tap all creatures your opponents control.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 2,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

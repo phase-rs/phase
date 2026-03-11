@@ -1,18 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Merfolk",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control another Merfolk.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Merfolk.Other+YouCtrl",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying",
-        "Description": "CARDNAME has flying as long as you control another Merfolk."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

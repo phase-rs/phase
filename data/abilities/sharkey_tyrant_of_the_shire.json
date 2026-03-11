@@ -1,40 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "ValidSA": "Activated.!ManaAbility",
-        "ValidCard": "Land.OppCtrl",
-        "Description": "Activated abilities of lands your opponents control can't be activated unless they're mana abilities."
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of lands your opponents control can't be activated unless they're mana abilities.",
+      "mode": "CantBeActivated"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOf": "Land.OppCtrl",
-        "GainsValidAbilities": "Activated.!ManaAbility",
-        "EffectZone": "Battlefield",
-        "Description": "CARDNAME has all activated abilities of lands your opponents control except mana abilities.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of lands your opponents control except mana abilities.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     },
     {
+      "description": "Mana of any type can be spent to activate NICKNAME's abilities.",
       "mode": {
         "Other": "ManaConvert"
-      },
-      "params": {
-        "Description": "Mana of any type can be spent to activate NICKNAME's abilities.",
-        "ValidPlayer": "You",
-        "ValidSA": "Activated",
-        "ManaConversion": "AnyType->AnyType",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

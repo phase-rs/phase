@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a green or white spell, that player discards a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts a green or white spell, that player discards a card.",
-        "ValidCard": "Card.Green,Card.White",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green,Card.White"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "SpellDescription": "Target opponent reveals each nonland card in their hand. You choose one of those cards. Exile that card. Threshold — If there are seven or more cards in your graveyard, seek a Rat card. It perpetually gains \"This spell costs {1} less to cast.\" You gain 1 life for each Rat card in your hand.",
-          "RevealAllValid": "Card.nonLand+TargetedPlayerCtrl",
-          "ValidTgts": "Opponent",
-          "RememberRevealed": "True",
-          "SubAbility": "DBExile",
-          "StackDescription": "REP Target opponent_{p:Targeted} & You choose_{p:You} chooses & Exile_{p:You} exiles & your graveyard_{p:You}'s graveyard & seek_they seek"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent reveals each nonland card in their hand. You choose one of those cards. Exile that card. Threshold — If there are seven or more cards in your graveyard, seek a Rat card. It perpetually gains \"This spell costs {1} less to cast.\" You gain 1 life for each Rat card in your hand.",
-        "RevealAllValid": "Card.nonLand+TargetedPlayerCtrl",
-        "ValidTgts": "Opponent",
-        "RememberRevealed": "True",
-        "SubAbility": "DBExile",
-        "StackDescription": "REP Target opponent_{p:Targeted} & You choose_{p:You} chooses & Exile_{p:You} exiles & your graveyard_{p:You}'s graveyard & seek_they seek"
-      }
+      "description": "Target opponent reveals each nonland card in their hand. You choose one of those cards. Exile that card. Threshold — If there are seven or more cards in your graveyard, seek a Rat card. It perpetually gains \"This spell costs {1} less to cast.\" You gain 1 life for each Rat card in your hand.",
+      "effect": {
+        "description": "Target opponent reveals each nonland card in their hand. You choose one of those cards. Exile that card. Threshold — If there are seven or more cards in your graveyard, seek a Rat card. It perpetually gains \"This spell costs {1} less to cast.\" You gain 1 life for each Rat card in your hand.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

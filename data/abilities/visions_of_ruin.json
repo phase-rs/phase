@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each opponent sacrifices an artifact.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberSacrificed": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Each opponent sacrifices an artifact.",
-        "SacValid": "Artifact",
-        "Defined": "Player.Opponent",
-        "SubAbility": "DBToken"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

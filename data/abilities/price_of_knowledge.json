@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "Execute": "TrigDmg",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each opponent's upkeep, CARDNAME deals damage to that player equal to the number of cards in that player's hand.",
-        "Phase": "Upkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetMaxHandSize": "Unlimited",
-        "Description": "Players have no maximum hand size.",
-        "Affected": "Player"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Players have no maximum hand size.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each opponent's upkeep, CARDNAME deals damage to that player equal to the number of cards in that player's hand.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

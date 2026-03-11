@@ -2,48 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<4/CHARGE>"
+            "cost": "SubCounter<4/CHARGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 2 life and draw a card.",
-        "SubAbility": "DBDraw",
-        "Defined": "You"
-      }
+      "description": "You gain 2 life and draw a card.",
+      "effect": {
+        "amount": 2,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you're dealt damage, you may put that many charge counters on CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you're dealt damage, you may put that many charge counters on CARDNAME.",
-        "ValidTarget": "You",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

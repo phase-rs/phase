@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME or another Hero you control enters, it deals damage equal to the number of Heroes you control to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Hero.Other+YouCtrl",
-        "Destination": "Battlefield",
-        "Execute": "TrigDamage",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever NICKNAME or another Hero you control enters, it deals damage equal to the number of Heroes you control to any target."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Hero.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

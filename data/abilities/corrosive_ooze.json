@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "DelTrigAttacker",
-        "ValidCard": "Creature.equipped",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
-        "ValidBlocker": "Card.Self"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
-        "ValidBlocker": "Creature.equipped",
-        "Execute": "DelTrigBlocker",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on each other creature you control. Those creatures gain trample until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounterAll",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on each other creature you control. Those creatures gain trample until end of turn.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on each other creature you control. Those creatures gain trample until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on each other creature you control. Those creatures gain trample until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounterAll",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

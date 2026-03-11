@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle another card, put a +1/+1 counter on CARDNAME.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card.Other",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you cycle another card, put a +1/+1 counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

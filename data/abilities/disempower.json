@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Put target artifact or enchantment on top of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "0",
-        "TgtPrompt": "Select target artifact or enchantment",
-        "SpellDescription": "Put target artifact or enchantment on top of its owner's library."
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,76 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top two cards of your library. Put one of them into your graveyard.",
       "effect": {
-        "type": "Dig",
         "count": 2,
-        "destination": "Graveyard"
+        "destination": "Graveyard",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "NoReveal": "True",
-        "Defined": "You",
-        "SpellDescription": "Look at the top two cards of your library. Put one of them into your graveyard.",
-        "LibraryPosition2": "0",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Return another target nonland permanent to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other+nonLand"
-        }
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Land"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Select another target nonland permanent",
-        "SpellDescription": "Return another target nonland permanent to its owner's hand."
-      }
+      "target_prompt": "Select another target nonland permanent"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Hand,Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player shuffles their hand and graveyard into their library. You draw seven cards.",
-        "SubAbility": "DBDraw",
-        "ChangeType": "Card",
-        "UseAllOriginZones": "True",
-        "Shuffle": "True",
-        "Planeswalker": "True",
-        "Ultimate": "True"
-      }
+      "description": "Each player shuffles their hand and graveyard into their library. You draw seven cards.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Hand,Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

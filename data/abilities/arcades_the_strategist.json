@@ -1,40 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control with defender enters, draw a card.",
-        "ValidCard": "Creature.withDefender+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn't have defender.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "ValidCard": "Creature.withDefender+YouCtrl",
-        "Description": "Each creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn't have defender."
       }
     },
     {
+      "description": "Each creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Secondary": "True",
-        "Description": "Each creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn't have defender.",
-        "ValidCard": "Creature.withDefender+YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control with defender enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

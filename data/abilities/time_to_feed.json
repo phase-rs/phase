@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Choose target creature an opponent controls.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target creature an opponent controls",
-        "SpellDescription": "Choose target creature an opponent controls.",
-        "AILogic": "Fight",
-        "SubAbility": "DBDelayedTrigger",
-        "StackDescription": "When {c:ThisTargetedCard} dies this turn, {p:You} gains 3 life."
-      }
+      "target_prompt": "Choose target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if CARDNAME has one or more +1/+1 counters on it, you may remove a +1/+1 counter from it. If you do, draw a card.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME has one or more +1/+1 counters on it, you may remove a +1/+1 counter from it. If you do, draw a card.",
-        "IsPresent": "Card.Self+counters_GE1_P1P1"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

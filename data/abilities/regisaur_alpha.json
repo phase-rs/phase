@@ -1,27 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, create a 3/3 green Dinosaur creature token with trample.",
-        "Execute": "DBToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Dinosaur"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Dinosaurs you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Dinosaurs you control have haste.",
-        "Affected": "Creature.Dinosaur+Other+YouCtrl",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create a 3/3 green Dinosaur creature token with trample.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,79 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "PutCounterAll",
-            "params": {
-              "CounterNum": "1",
-              "ValidCards": "Creature.ThisTurnEntered+EnteredUnder You",
-              "CounterType": "P1P1",
-              "SpellDescription": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "CounterNum": "1",
-            "ValidCards": "Creature.ThisTurnEntered+EnteredUnder You",
-            "CounterType": "P1P1",
-            "SpellDescription": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn."
-          }
+          "description": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.",
+          "effect": {
+            "description": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.",
+            "name": "PutCounterAll",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.Other"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
+          "description": "Put a +1/+1 counter on another target creature, then CARDNAME deals 2 damage to that creature.",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "filters": [
+                {
+                  "card_type": "Creature",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put a +1/+1 counter on another target creature, then CARDNAME deals 2 damage to that creature.",
-            "SubAbility": "DBDmg",
-            "TgtPrompt": "Select another target creature"
-          }
+          "target_prompt": "Select another target creature"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a creature you control with a +1/+1 counter on it dies, draw a card.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it dies, draw a card.",
-            "Origin": "Battlefield",
-            "TriggerZones": "Battlefield",
-            "Destination": "Graveyard",
-            "Execute": "TrigDraw",
-            "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

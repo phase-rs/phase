@@ -2,75 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 2 life and draw a card.",
-        "Planeswalker": "True",
-        "SubAbility": "DBDraw",
-        "Defined": "You"
-      }
+      "description": "You gain 2 life and draw a card.",
+      "effect": {
+        "amount": 2,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Tap target creature. It doesn't untap during its controller's next untap step.",
       "effect": {
-        "type": "Tap",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature. It doesn't untap during its controller's next untap step.",
-        "SubAbility": "DovinPump",
-        "Planeswalker": "True",
-        "TgtPrompt": "Choose target creature to tap."
-      }
+      "target_prompt": "Choose target creature to tap."
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "ValidTgts": "Opponent",
-          "ValidCards": "Permanent",
-          "SpellDescription": "Tap all permanents target opponent controls. That player skips their next untap step.",
-          "SubAbility": "NoUntap"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "ValidTgts": "Opponent",
-        "ValidCards": "Permanent",
-        "SpellDescription": "Tap all permanents target opponent controls. That player skips their next untap step.",
-        "SubAbility": "NoUntap"
-      }
+      "description": "Tap all permanents target opponent controls. That player skips their next untap step.",
+      "effect": {
+        "description": "Tap all permanents target opponent controls. That player skips their next untap step.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

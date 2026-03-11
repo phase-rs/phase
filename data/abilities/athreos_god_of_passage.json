@@ -1,31 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever another creature you own dies, return it to your hand unless target opponent pays 3 life.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.YouOwn+Other",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigReturn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to white and black is less than seven, NICKNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT7",
-        "RemoveType": "Creature",
-        "CheckSVar": "X",
-        "Description": "As long as your devotion to white and black is less than seven, NICKNAME isn't a creature.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature you own dies, return it to your hand unless target opponent pays 3 life.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

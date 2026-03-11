@@ -1,36 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "NewGame",
-      "params": {
-        "Execute": "TrigPayLife",
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of the game, you may pay any amount of life."
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigDig",
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of your draw step, look at the top X cards of your library, where X is the amount of life paid with CARDNAME. Put one of them into your hand, then shuffle.",
-        "Phase": "Draw",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantDraw",
-      "params": {
-        "EffectZone": "Command",
-        "ValidPlayer": "You",
-        "Description": "You can't draw cards."
-      }
+      "description": "You can't draw cards.",
+      "effect_zone": "Command",
+      "mode": "CantDraw"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of the game, you may pay any amount of life.",
+      "mode": "NewGame",
+      "trigger_zones": [
+        "Command"
+      ]
+    },
+    {
+      "description": "At the beginning of your draw step, look at the top X cards of your library, where X is the amount of life paid with CARDNAME. Put one of them into your hand, then shuffle.",
+      "mode": "Phase",
+      "phase": "Draw",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

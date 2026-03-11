@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may exile it. If you do, return any number of target Spirit cards from your graveyard to your hand.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, you may exile it. If you do, return any number of target Spirit cards from your graveyard to your hand.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

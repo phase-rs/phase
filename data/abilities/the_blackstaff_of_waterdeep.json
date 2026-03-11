@@ -2,44 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": 4,
-        "toughness": 4,
-        "types": [
-          "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.Other+!token+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Another target nontoken artifact you control becomes a 4/4 artifact creature for as long as CARDNAME remains tapped. Activate only as a sorcery.",
+      "effect": {
+        "power": 4,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Artifact",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 4,
+        "type": "Animate",
+        "types": [
+          "Creature"
         ]
       },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Animate Walking Statue —",
-        "SpellDescription": "Another target nontoken artifact you control becomes a 4/4 artifact creature for as long as CARDNAME remains tapped. Activate only as a sorcery.",
-        "Duration": "UntilUntaps",
-        "StackDescription": "SpellDescription",
-        "TgtPrompt": "Select another target nontoken artifact you control",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select another target nontoken artifact you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

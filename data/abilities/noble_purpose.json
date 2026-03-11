@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage, you gain that much life.",
       "mode": "DamageDealtOnce",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever a creature you control deals combat damage, you gain that much life.",
-        "Execute": "TrigGain",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

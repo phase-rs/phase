@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigUpkeep",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

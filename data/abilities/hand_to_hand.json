@@ -1,25 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Instant",
-        "Description": "During combat, players can't cast instant spells or activate abilities that aren't mana abilities.",
-        "Phases": "BeginCombat->EndCombat"
-      }
+      "description": "During combat, players can't cast instant spells or activate abilities that aren't mana abilities.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidSA": "Activated.!ManaAbility",
-        "ValidCard": "Card",
-        "Phases": "BeginCombat->EndCombat"
-      }
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

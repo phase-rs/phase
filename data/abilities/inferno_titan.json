@@ -2,48 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, it deals 3 damage divided as you choose among one, two, or three targets.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DmgDistro",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, it deals 3 damage divided as you choose among one, two, or three targets.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, it deals 3 damage divided as you choose among one, two, or three targets.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DmgDistro",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, it deals 3 damage divided as you choose among one, two, or three targets."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

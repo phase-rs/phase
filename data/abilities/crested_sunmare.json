@@ -1,28 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of each end step, if you gained life this turn, create a 5/5 white Horse creature token.",
-        "CheckSVar": "YouLifeGained",
-        "Phase": "End of Turn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Horse",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Horses you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Horse.Other+YouCtrl",
-        "Description": "Other Horses you control have indestructible.",
-        "AddKeyword": "Indestructible"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each end step, if you gained life this turn, create a 5/5 white Horse creature token.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

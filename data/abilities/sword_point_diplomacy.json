@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SubAbility": "DBRepeat",
-          "StackDescription": "REP Reveal_{p:You} reveals & of your_of their & put_{p:You} puts & into your_into their & Then exile_Then {p:You} exiles",
-          "NoPeek": "True",
-          "SpellDescription": "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
-          "PeekAmount": "3",
-          "RememberRevealed": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBRepeat",
-        "StackDescription": "REP Reveal_{p:You} reveals & of your_of their & put_{p:You} puts & into your_into their & Then exile_Then {p:You} exiles",
-        "NoPeek": "True",
-        "SpellDescription": "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
-        "PeekAmount": "3",
-        "RememberRevealed": "True"
-      }
+      "description": "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
+      "effect": {
+        "description": "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

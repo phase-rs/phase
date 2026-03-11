@@ -1,19 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+0 and has \"When this creature dies, draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +2/+0 and has \"When this creature dies, draw a card.\"",
-        "AddTrigger": "TrigDraw",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "2",
-        "AddSVar": "InfernalDraw"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

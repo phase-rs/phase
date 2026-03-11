@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, create X 1/1 red Goblin creature tokens.",
       "mode": "TurnFaceUp",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME is turned face up, create X 1/1 red Goblin creature tokens.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

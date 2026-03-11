@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies or is put into the command zone, if it had one or more +1/+1 counters on it, you may put that many +1/+1 counters on target creature.",
+      "destination": "Graveyard,Command",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard,Command",
-        "TriggerDescription": "Whenever a creature you control dies or is put into the command zone, if it had one or more +1/+1 counters on it, you may put that many +1/+1 counters on target creature.",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1",
-        "Execute": "TrigPutCounter"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

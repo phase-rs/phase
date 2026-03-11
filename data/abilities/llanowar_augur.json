@@ -2,33 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 3,
-        "toughness": 3,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample",
-        "SpellDescription": "Target creature gets +3/+3 and gains trample until end of turn. Activate only during your upkeep.",
-        "PlayerTurn": "True",
-        "ActivationPhases": "Upkeep"
-      }
+      "description": "Target creature gets +3/+3 and gains trample until end of turn. Activate only during your upkeep.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 3,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

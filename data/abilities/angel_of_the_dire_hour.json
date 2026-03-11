@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it from your hand, exile all attacking creatures.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, exile all attacking creatures.",
-        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a spell, that player sacrifices a permanent unless they pay {1}.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigSac",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent casts a spell, that player sacrifices a permanent unless they pay {1}.",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

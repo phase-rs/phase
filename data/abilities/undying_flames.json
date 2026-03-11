@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "NoPutDesc": "True",
-          "RevealedDestination": "Exile",
-          "RememberFound": "True",
-          "FoundDestination": "Exile",
-          "Valid": "Card.nonLand",
-          "SubAbility": "UndyingDamage",
-          "ValidDescription": "nonland",
-          "SpellDescription": "Exile cards from the top of your library until you exile a nonland card. CARDNAME deals damage to any target equal to that card's mana value."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "NoPutDesc": "True",
-        "RevealedDestination": "Exile",
-        "RememberFound": "True",
-        "FoundDestination": "Exile",
-        "Valid": "Card.nonLand",
-        "SubAbility": "UndyingDamage",
-        "ValidDescription": "nonland",
-        "SpellDescription": "Exile cards from the top of your library until you exile a nonland card. CARDNAME deals damage to any target equal to that card's mana value."
-      }
+      "description": "Exile cards from the top of your library until you exile a nonland card. CARDNAME deals damage to any target equal to that card's mana value.",
+      "effect": {
+        "description": "Exile cards from the top of your library until you exile a nonland card. CARDNAME deals damage to any target equal to that card's mana value.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

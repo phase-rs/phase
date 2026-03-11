@@ -1,19 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "DefenderCtrl"
+            },
+            {
+              "type": "Other",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Each creature you control can't be blocked as long as defending player controls an artifact land.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "IsPresent": "Artifact.DefenderCtrl+Land",
-        "ValidAttacker": "Creature.YouCtrl",
-        "Description": "Each creature you control can't be blocked as long as defending player controls an artifact land."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

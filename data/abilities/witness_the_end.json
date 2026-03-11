@@ -2,33 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "2",
-        "Mandatory": "True",
-        "SpellDescription": "Target opponent exiles two cards from their hand and loses 2 life.",
-        "SubAbility": "DBLoseLife",
-        "DefinedPlayer": "Targeted",
-        "Chooser": "Targeted",
-        "ChangeType": "Card",
-        "IsCurse": "True"
-      }
+      "description": "Target opponent exiles two cards from their hand and loses 2 life.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)",
-        "AddKeyword": "Hexproof",
-        "Affected": "You"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

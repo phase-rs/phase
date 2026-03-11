@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, each player exiles cards from the top of their library until they exile a nonland card. An opponent choses a nonland card exiled this way. You may cast up to two spells from among the other cards exiled this way without paying their mana costs.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigDigUntil",
-        "TriggerDescription": "At the beginning of your upkeep, each player exiles cards from the top of their library until they exile a nonland card. An opponent choses a nonland card exiled this way. You may cast up to two spells from among the other cards exiled this way without paying their mana costs.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

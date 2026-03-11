@@ -2,41 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "ValidDescription": "creature",
-          "SubAbility": "DBImmediateTrigger",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
-          "RememberFound": "True",
-          "StackDescription": "REP Reveal_{p:You} reveals & of your_of their & you reveal_they reveal & Put_{p:You} puts & your hand_their hand & your library_their library",
-          "Valid": "Card.Creature",
-          "RevealedLibraryPosition": "-1",
-          "RevealedDestination": "Library",
-          "RevealRandomOrder": "True",
-          "FoundDestination": "Hand"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "creature",
-        "SubAbility": "DBImmediateTrigger",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
-        "RememberFound": "True",
-        "StackDescription": "REP Reveal_{p:You} reveals & of your_of their & you reveal_they reveal & Put_{p:You} puts & your hand_their hand & your library_their library",
-        "Valid": "Card.Creature",
-        "RevealedLibraryPosition": "-1",
-        "RevealedDestination": "Library",
-        "RevealRandomOrder": "True",
-        "FoundDestination": "Hand"
-      }
+      "description": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

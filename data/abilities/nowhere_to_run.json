@@ -1,38 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -3/-3 until end of turn.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "IgnoreHexproof",
-      "params": {
-        "Description": "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
-        "ValidEntity": "Creature.OppCtrl"
-      }
+      "description": "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
+      "mode": "IgnoreHexproof"
     },
     {
+      "description": "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
       "mode": {
         "Other": "DisableTriggers"
-      },
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Creature.OppCtrl+inZoneBattlefield",
-        "Description": "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
-        "ValidTrigger": "Triggered.Ward"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, target creature an opponent controls gets -3/-3 until end of turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

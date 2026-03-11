@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}. When you spend this mana to cast a Dragon creature spell, you gain 2 life.",
-          "TriggersWhenSpent": "TrigSpent"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}. When you spend this mana to cast a Dragon creature spell, you gain 2 life.",
-        "TriggersWhenSpent": "TrigSpent"
-      }
+      "description": "Add {G}. When you spend this mana to cast a Dragon creature spell, you gain 2 life.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

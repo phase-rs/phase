@@ -2,58 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create four 1/1 green Snake creature tokens.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_snake",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "4",
-        "TokenOwner": "You",
-        "StackDescription": "{p:You} creates four 1/1 green Snake creature tokens.",
-        "SpellDescription": "Create four 1/1 green Snake creature tokens."
+      "kind": "Spell",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "SetTrap"
+      },
+      "description": "If a noncreature permanent under your control was destroyed this turn by a spell or ability an opponent controlled, you may pay {G} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
+      "mode": {
+        "Other": "AlternativeCost"
       }
     }
   ],
   "triggers": [
     {
       "mode": "Destroyed",
-      "params": {
-        "ValidCauser": "Player.Opponent",
-        "Static": "True",
-        "Execute": "TrackValidDestroy",
-        "ValidCard": "Permanent.nonCreature+YouCtrl"
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Execute": "TrigReset",
-        "Static": "True"
-      }
+      "mode": "TurnBegin"
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "CheckSVar": "SetTrap",
-        "ValidSA": "Spell.Self",
-        "Description": "If a noncreature permanent under your control was destroyed this turn by a spell or ability an opponent controlled, you may pay {G} rather than pay this spell's mana cost.",
-        "Cost": "G"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

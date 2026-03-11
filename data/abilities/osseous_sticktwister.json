@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Delirium — At the beginning of your end step, if there are four or more card types among cards in your graveyard, each opponent may sacrifice a nonland permanent or discard a card. Then CARDNAME deals damage equal to its power to each opponent who didn't sacrifice a permanent or discard a card this way.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "Delirium — At the beginning of your end step, if there are four or more card types among cards in your graveyard, each opponent may sacrifice a nonland permanent or discard a card. Then CARDNAME deals damage equal to its power to each opponent who didn't sacrifice a permanent or discard a card this way.",
-        "Delirium": "True",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "Execute": "TrigMaySacorDiscard"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

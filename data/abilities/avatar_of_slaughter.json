@@ -1,24 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have double strike and attack each combat if able.",
       "mode": "Continuous",
-      "params": {
-        "Description": "All creatures have double strike and attack each combat if able.",
-        "Affected": "Creature",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "MustAttack",
-      "params": {
-        "Secondary": "True",
-        "ValidCreature": "Creature"
-      }
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

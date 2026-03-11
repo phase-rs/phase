@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "When CARDNAME is turned face up, return another target creature to its owner's hand.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by creatures with power 3 or greater.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by creatures with power 3 or greater.",
-        "ValidBlocker": "Creature.powerGE3",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME is turned face up, return another target creature to its owner's hand.",
+      "mode": "TurnFaceUp",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

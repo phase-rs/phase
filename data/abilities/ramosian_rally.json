@@ -2,39 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures you control get +1/+1 until end of turn.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Creatures you control get +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "tapXType<1/Creature/creature>",
-        "IsPresent": "Plains.YouCtrl",
-        "Description": "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

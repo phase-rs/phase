@@ -1,39 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Drawn",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on NICKNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "IsPresent": "Card.Self+powerEven",
-        "Description": "As long as NICKNAME's power is even, you may cast noncreature spells as though they had flash.",
-        "ValidCard": "Card.nonCreature",
-        "ValidSA": "Spell"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as NICKNAME's power is even, you may cast noncreature spells as though they had flash.",
+      "mode": "CastWithFlash"
     },
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "IsPresent": "Card.Self+powerOdd",
-        "ValidCard": "Creature",
-        "Caster": "You",
-        "Description": "As long as NICKNAME's power is odd, you may cast creature spells as though they had flash.",
-        "ValidSA": "Spell"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as NICKNAME's power is odd, you may cast creature spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you draw a card, put a +1/+1 counter on NICKNAME.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

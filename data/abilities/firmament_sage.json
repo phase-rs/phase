@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "DayTimeChanges",
-      "params": {
-        "Execute": "DBDraw",
-        "TriggerDescription": "Whenever day becomes night or night becomes day, draw a card.",
-        "TriggerZones": "Battlefield"
+      "description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "DoDay",
-        "ValidCard": "Card.Self",
-        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
-        "ReplacementResult": "Updated",
-        "DayTime": "Neither",
-        "Destination": "Battlefield"
-      }
+      "description": "Whenever day becomes night or night becomes day, draw a card.",
+      "mode": "DayTimeChanges",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

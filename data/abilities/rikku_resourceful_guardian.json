@@ -2,52 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Move a counter from target creature an opponent controls onto target creature you control. Activate only as a sorcery.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBMove",
-        "PrecostDesc": "Steal —",
-        "StackDescription": "SpellDescription",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Move a counter from target creature an opponent controls onto target creature you control. Activate only as a sorcery.",
-        "TgtPrompt": "Select target creature an opponent controls"
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you put one or more counters on a creature, until end of turn, that creature can't be blocked by creatures your opponents control.",
       "mode": "CounterPlayerAddedAll",
-      "params": {
-        "ValidSource": "You",
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Whenever you put one or more counters on a creature, until end of turn, that creature can't be blocked by creatures your opponents control.",
-        "ValidObject": "Creature.inRealZoneBattlefield",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

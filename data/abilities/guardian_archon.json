@@ -2,34 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "RevealChosen<Player>"
+        "cost": "RevealChosen<Player>",
+        "type": "Mana"
       },
+      "description": "You and target permanent you control each gain protection from the chosen player until end of turn. Activate only once.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "TgtPrompt": "Select target permanent you control",
-        "DefinedKW": "ChosenPlayer",
-        "StackDescription": "{p:You} and {c:Targeted} each gain protection from {p:ChosenPlayer} until end of turn.",
-        "KW": "Protection:Player.PlayerUID_ChosenPlayerUID:ChosenPlayerName",
-        "GameActivationLimit": "1",
-        "SpellDescription": "You and target permanent you control each gain protection from the chosen player until end of turn. Activate only once."
-      }
+      "target_prompt": "Select target permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

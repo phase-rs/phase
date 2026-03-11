@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "ThisTurn": "True",
-          "Execute": "EffTrigCopy",
-          "ValidCard": "Instant,Sorcery",
-          "Mode": "SpellCast",
-          "SubAbility": "DBEffect",
-          "ValidActivatingPlayer": "You",
-          "AILogic": "SpellCopy",
-          "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ThisTurn": "True",
-        "Execute": "EffTrigCopy",
-        "ValidCard": "Instant,Sorcery",
-        "Mode": "SpellCast",
-        "SubAbility": "DBEffect",
-        "ValidActivatingPlayer": "You",
-        "AILogic": "SpellCopy",
-        "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell."
-      }
+      "description": "When you cast your next instant or sorcery spell this turn, copy that spell.",
+      "effect": {
+        "description": "When you cast your next instant or sorcery spell this turn, copy that spell.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

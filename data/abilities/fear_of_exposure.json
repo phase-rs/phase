@@ -2,31 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PermanentCreature",
-        "params": {}
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 G"
+            "cost": "2 G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<2/Creature;Land/creatures and/or lands>"
+            "cost": "tapXType<2/Creature;Land/creatures and/or lands>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {}
+      "effect": {
+        "name": "PermanentCreature",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

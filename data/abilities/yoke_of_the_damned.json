@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a creature dies, destroy enchanted creature.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature",
-        "Destination": "Graveyard",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When a creature dies, destroy enchanted creature."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more other attacking legendary creatures you control die, untap all creatures you control. After this phase, there is an additional combat phase. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigUntapAll",
-        "ActivationLimit": "1",
-        "Origin": "Battlefield",
-        "ValidCards": "Creature.attacking+Legendary+Other+YouCtrl",
-        "TriggerDescription": "Whenever one or more other attacking legendary creatures you control die, untap all creatures you control. After this phase, there is an additional combat phase. This ability triggers only once each turn."
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

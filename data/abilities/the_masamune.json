@@ -1,25 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          },
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as equipped creature is attacking, it has first strike and must be blocked if able.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike & MustBeBlockedBy Creature",
-        "Description": "As long as equipped creature is attacking, it has first strike and must be blocked if able.",
-        "Affected": "Creature.EquippedBy+attacking"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "MustBeBlockedBy",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Creature",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddStaticAbility": "Masarmonicon",
-        "Description": "Equipped creature has \"If a creature dying causes a triggered ability of this creature or an emblem you own to trigger, that ability triggers an additional time.\"",
-        "Affected": "Creature.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"If a creature dying causes a triggered ability of this creature or an emblem you own to trigger, that ability triggers an additional time.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

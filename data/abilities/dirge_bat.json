@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, destroy target creature or planeswalker an opponent controls.",
       "mode": "Mutates",
-      "params": {
-        "TriggerDescription": "Whenever this creature mutates, destroy target creature or planeswalker an opponent controls.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy any number of target artifacts and/or enchantments.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact or enchantment",
-        "TargetMax": "MaxTargets",
-        "TargetMin": "0",
-        "SpellDescription": "Destroy any number of target artifacts and/or enchantments."
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

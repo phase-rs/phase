@@ -1,49 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature enters, destroy up to one target artifact or enchantment.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "Execute": "TrigDestroy",
-            "TriggerDescription": "When this creature enters, destroy up to one target artifact or enchantment."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.powerLE3"
-            }
-          },
           "cost": null,
+          "description": "Destroy target creature with power 3 or less. (Then shuffle this card into its owner's library.)",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target creature with power 3 or less.",
-            "SpellDescription": "Destroy target creature with power 3 or less. (Then shuffle this card into its owner's library.)"
-          }
+          "target_prompt": "Select target creature with power 3 or less."
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

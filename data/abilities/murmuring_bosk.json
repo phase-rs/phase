@@ -2,38 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W B",
-        "params": {
-          "SpellDescription": "Add {W} or {B}. CARDNAME deals 1 damage to you.",
-          "SubAbility": "DBPain"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {B}. CARDNAME deals 1 damage to you.",
-        "SubAbility": "DBPain"
-      }
+      "description": "Add {W} or {B}. CARDNAME deals 1 damage to you.",
+      "effect": {
+        "produced": [
+          "White",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may reveal a Treefolk card from your hand. If you don't, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "As CARDNAME enters, you may reveal a Treefolk card from your hand. If you don't, CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ReplaceWith": "DBTap",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

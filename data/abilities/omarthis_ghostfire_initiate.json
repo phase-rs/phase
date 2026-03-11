@@ -1,31 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you put one or more +1/+1 counters on another colorless creature, you may put a +1/+1 counter on NICKNAME.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you put one or more +1/+1 counters on another colorless creature, you may put a +1/+1 counter on NICKNAME.",
-        "CounterType": "P1P1",
-        "ValidSource": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Other+inZoneBattlefield+Colorless"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Colorless"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "When NICKNAME dies, manifest a number of cards from the top of your library equal to the number of counters on it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigManifest",
-        "TriggerDescription": "When NICKNAME dies, manifest a number of cards from the top of your library equal to the number of counters on it.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

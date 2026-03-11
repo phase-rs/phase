@@ -1,38 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Your opponents can't cast spells with the same name as the card exiled by CARDNAME.",
+      "mode": "CantBeCast"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile target spell.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, exile target spell.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, return the exiled card to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigBounce",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, return the exiled card to its owner's hand.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Your opponents can't cast spells with the same name as the card exiled by CARDNAME.",
-        "Caster": "Opponent",
-        "ValidCard": "Card.nonLand+sharesNameWith Remembered.ExiledWithSource"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

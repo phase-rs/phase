@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+0 and gains indestructible until end of turn. Tap it.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+0 and gains indestructible until end of turn. Tap it.",
-        "SubAbility": "DBTap",
-        "KW": "Indestructible",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

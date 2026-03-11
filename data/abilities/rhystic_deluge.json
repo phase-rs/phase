@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "UnlessPayer": "TargetedController",
-        "SpellDescription": "Tap target creature unless its controller pays {1}.",
-        "UnlessCost": "1"
-      }
+      "description": "Tap target creature unless its controller pays {1}.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

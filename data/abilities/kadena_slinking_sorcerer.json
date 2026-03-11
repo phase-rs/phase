@@ -1,32 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.faceDown+YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever a face-down creature you control enters, draw a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "ValidCard": "Creature.faceDown",
-        "Amount": "3",
-        "Description": "The first face-down creature spell you cast each turn costs {3} less to cast.",
-        "Type": "Spell",
-        "OnlyFirstSpell": "True"
-      }
+      "description": "The first face-down creature spell you cast each turn costs {3} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a face-down creature you control enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gains flying until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "NoResolvingCheck": "True",
-        "PresentCompare": "GE2",
-        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gains flying until end of turn.",
-        "Execute": "TrigBattalionPump",
-        "IsPresent": "Creature.attacking+Other"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,72 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "b_2_2_zombie_decayed",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 B B"
+            "cost": "4 B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "X",
-        "SpellDescription": "Create a 2/2 black Zombie token for each corpse counter on CARDNAME. (A creature with decayed can't block. When it attacks, sacrifice it at the end of combat.)"
-      }
+      "description": "Create a 2/2 black Zombie token for each corpse counter on CARDNAME. (A creature with decayed can't block. When it attacks, sacrifice it at the end of combat.)",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "b_2_2_zombie_decayed",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies, put a corpse counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature you control dies, put a corpse counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

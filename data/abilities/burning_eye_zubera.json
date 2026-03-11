@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, if 4 or more damage was dealt to it this turn, CARDNAME deals 3 damage to any target.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "CheckOnTriggeredCard": "X GE4",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "When CARDNAME dies, if 4 or more damage was dealt to it this turn, CARDNAME deals 3 damage to any target."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

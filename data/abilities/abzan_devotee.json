@@ -2,48 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W B G",
-        "params": {
-          "ActivationLimit": "1",
-          "SpellDescription": "Add {W}, {B}, or {G}. Activate only once each turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "Add {W}, {B}, or {G}. Activate only once each turn."
-      }
+      "description": "Add {W}, {B}, or {G}. Activate only once each turn.",
+      "effect": {
+        "produced": [
+          "White",
+          "Black",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 B",
+        "type": "Mana"
+      },
+      "description": "Return this card from your graveyard to your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return this card from your graveyard to your hand.",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

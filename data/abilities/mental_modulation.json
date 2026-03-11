@@ -2,37 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Tap target artifact or creature. Draw a card.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact or creature",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Tap target artifact or creature. Draw a card."
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast during your turn.",
-        "Amount": "1",
-        "EffectZone": "All",
-        "PlayerTurn": "You",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {1} less to cast during your turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

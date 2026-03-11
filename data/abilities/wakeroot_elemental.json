@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G G G G G"
+        "cost": "G G G G G",
+        "type": "Mana"
       },
+      "description": "Untap target land you control. It becomes a 5/5 Elemental creature with haste. It's still a land. (This effect lasts as long as that land remains on the battlefield.)",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap target land you control. It becomes a 5/5 Elemental creature with haste. It's still a land. (This effect lasts as long as that land remains on the battlefield.)",
-        "SubAbility": "DBAnimate",
-        "TgtPrompt": "Select target land you control"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

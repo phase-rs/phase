@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "The chosen player's maximum hand size is four.",
-        "SetMaxHandSize": "4",
-        "Affected": "Player.Chosen"
-      }
+      "affected": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Chosen"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "The chosen player's maximum hand size is four.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

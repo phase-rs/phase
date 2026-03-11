@@ -2,44 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "5",
+            "type": "Mana"
+          },
+          {
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
+          },
+          {
+            "cost": "Exile<4/Artifact.Creature+Other;Vehicle.Other/other artifact creatures and/or Vehicle>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create Mechtitan, a legendary 10/10 Construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "mechtitan",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "5"
-          },
-          {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
-          },
-          {
-            "type": "Mana",
-            "cost": "Exile<4/Artifact.Creature+Other;Vehicle.Other/other artifact creatures and/or Vehicle>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Create Mechtitan, a legendary 10/10 Construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors.",
-        "CostDesc": "{5}, Exile CARDNAME and four other artifact creatures and/or Vehicles you control:",
-        "RememberTokens": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

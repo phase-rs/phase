@@ -2,32 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to target creature. It can't be regenerated this turn. That creature can't block this combat. Activate only if CARDNAME is attacking.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "IsPresent": "Card.Self+attacking",
-        "SpellDescription": "CARDNAME deals 1 damage to target creature. It can't be regenerated this turn. That creature can't block this combat. Activate only if CARDNAME is attacking."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

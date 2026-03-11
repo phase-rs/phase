@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RemoveCounterAll",
-        "params": {
-          "ValidCards": "Permanent",
-          "AllCounterTypes": "True",
-          "StackDescription": "SpellDescription",
-          "SubAbility": "DBRemove",
-          "SpellDescription": "Remove all counters from all permanents and exile all tokens."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Permanent",
-        "AllCounterTypes": "True",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBRemove",
-        "SpellDescription": "Remove all counters from all permanents and exile all tokens."
-      }
+      "description": "Remove all counters from all permanents and exile all tokens.",
+      "effect": {
+        "description": "Remove all counters from all permanents and exile all tokens.",
+        "name": "RemoveCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

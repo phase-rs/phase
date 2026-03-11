@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, if you have the city's blessing, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if you have the city's blessing, draw a card.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "Blessing": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

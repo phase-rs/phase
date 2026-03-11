@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield. Activate only if a non-Skeleton creature died under your control this turn.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SVarCompare": "GT0",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield. Activate only if a non-Skeleton creature died under your control this turn.",
-        "CheckSVar": "X",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

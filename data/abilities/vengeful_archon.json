@@ -2,33 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X"
+        "cost": "X",
+        "type": "Mana"
       },
+      "description": "Prevent the next X damage that would be dealt to you this turn. If damage is prevented this way, CARDNAME deals that much damage to target player or planeswalker.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player or planeswalker damaged by shield effect",
-        "IsCurse": "True",
-        "SpellDescription": "Prevent the next X damage that would be dealt to you this turn. If damage is prevented this way, CARDNAME deals that much damage to target player or planeswalker.",
-        "AILogic": "Never",
-        "StackDescription": "None",
-        "SubAbility": "ArchonPrevention"
-      }
+      "target_prompt": "Select target player or planeswalker damaged by shield effect"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

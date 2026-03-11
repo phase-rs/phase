@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage, return it to its owner's hand.",
       "mode": "DamageDealtOnce",
-      "params": {
-        "Execute": "TrigBounce",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage, return it to its owner's hand.",
-        "ValidSource": "Card.Self"
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

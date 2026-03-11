@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As long as CARDNAME is enchanted, it can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "ValidCard": "Card.Self+enchanted",
-        "Description": "As long as CARDNAME is enchanted, it can attack as though it didn't have defender."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

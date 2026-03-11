@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Slivers can't be blocked except by Slivers.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.nonSliver",
-        "Description": "Slivers can't be blocked except by Slivers.",
-        "ValidAttacker": "Creature.Sliver"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

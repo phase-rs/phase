@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "The next time you would draw a card this turn, create a 2/2 green Bear creature token instead.",
-          "ReplacementEffects": "DrawReplace"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The next time you would draw a card this turn, create a 2/2 green Bear creature token instead.",
-        "ReplacementEffects": "DrawReplace"
-      }
+      "description": "The next time you would draw a card this turn, create a 2/2 green Bear creature token instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

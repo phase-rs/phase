@@ -1,30 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Enchantment",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast an enchantment spell, create a white Spirit Cleric creature token with \"This creature's power and toughness are each equal to the number of Spirits you control.\""
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Enchantment",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control seven or more enchantments, creatures you control have flying and vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Flying & Vigilance",
-        "IsPresent": "Enchantment.YouCtrl",
-        "Description": "As long as you control seven or more enchantments, creatures you control have flying and vigilance.",
-        "PresentCompare": "GE7"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast an enchantment spell, create a white Spirit Cleric creature token with \"This creature's power and toughness are each equal to the number of Spirits you control.\"",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "type": "Typed"
+      }
+    }
+  ]
 }

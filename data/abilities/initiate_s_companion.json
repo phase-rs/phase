@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, untap target creature or land.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, untap target creature or land.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

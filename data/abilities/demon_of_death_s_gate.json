@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay 6 life and sacrifice three black creatures rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Description": "You may pay 6 life and sacrifice three black creatures rather than pay this spell's mana cost.",
-        "EffectZone": "All",
-        "Cost": "PayLife<6> Sac<3/Creature.Black>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

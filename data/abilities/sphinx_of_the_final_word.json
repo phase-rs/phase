@@ -1,27 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "event": "Counter",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Description": "Instant and sorcery spells you control can't be countered.",
-        "ValidSA": "Spell.Instant+YouCtrl,Spell.Sorcery+YouCtrl",
-        "Layer": "CantHappen"
-      }
+      "description": "Instant and sorcery spells you control can't be countered.",
+      "event": "Counter"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

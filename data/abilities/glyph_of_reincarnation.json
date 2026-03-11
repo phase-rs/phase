@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Wall"
-        }
-      },
       "cost": null,
+      "description": "Cast this spell only after combat.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Wall",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "AILogic": "Pump",
-        "SubAbility": "DBDestroyAll",
-        "TgtPrompt": "Select target Wall",
-        "ActivationPhases": "Main2->Cleanup",
-        "SpellDescription": "Cast this spell only after combat."
-      }
+      "target_prompt": "Select target Wall"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

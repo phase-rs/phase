@@ -1,38 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.nonCreature",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME has four or more oil counters on it, it gets +2/+0 and can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Card.Self+counters_GE4_OIL",
-        "Description": "As long as CARDNAME has four or more oil counters on it, it gets +2/+0 and can't be blocked."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "description": "As long as CARDNAME has four or more oil counters on it, it gets +2/+0 and can't be blocked.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Card.Self+counters_GE4_OIL",
-        "Secondary": "True",
-        "Description": "As long as CARDNAME has four or more oil counters on it, it gets +2/+0 and can't be blocked."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

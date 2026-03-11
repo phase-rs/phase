@@ -1,32 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, you may pay {U}{R}. If you do, copy that spell. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigCopySpell",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, you may pay {U}{R}. If you do, copy that spell. You may choose new targets for the copy.",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever another nontoken creature you control enters, you may pay {G}{U}. If you do, create a token that's a copy of that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy",
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.!token+Other+YouCtrl",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever another nontoken creature you control enters, you may pay {G}{U}. If you do, create a token that's a copy of that creature."
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,88 +2,82 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Return up to one target historic card from your graveyard to your hand, then exile all graveyards.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
-          "type": "Filtered",
-          "filter": "Card.Historic+YouOwn"
-        }
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Historic"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "BestCard",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "SubAbility": "ExileAll",
-        "TgtPrompt": "Select target historic card in your graveyard",
-        "SpellDescription": "Return up to one target historic card from your graveyard to your hand, then exile all graveyards."
-      }
+      "target_prompt": "Select target historic card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

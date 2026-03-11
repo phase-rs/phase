@@ -2,29 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.YouOwn"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Put target card from your graveyard on the bottom of your library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target card in your graveyard",
-        "SpellDescription": "Put target card from your graveyard on the bottom of your library.",
-        "LibraryPosition": "-1"
-      }
+      "target_prompt": "Select target card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

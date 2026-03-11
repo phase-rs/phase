@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has first strike and gets +X/+0 where X is the number of instant and sorcery cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddKeyword": "First Strike",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has first strike and gets +X/+0 where X is the number of instant and sorcery cards in your graveyard."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

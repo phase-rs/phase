@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each opponent can't cast instant or sorcery spells during that player's next turn.",
-          "RepeatPlayers": "Player.Opponent",
-          "NextTurnForEachPlayer": "True",
-          "RepeatSubAbility": "DBEffect"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent can't cast instant or sorcery spells during that player's next turn.",
-        "RepeatPlayers": "Player.Opponent",
-        "NextTurnForEachPlayer": "True",
-        "RepeatSubAbility": "DBEffect"
-      }
+      "description": "Each opponent can't cast instant or sorcery spells during that player's next turn.",
+      "effect": {
+        "description": "Each opponent can't cast instant or sorcery spells during that player's next turn.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

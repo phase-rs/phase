@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "ValidSpell": "Activated.Loyalty",
-        "ValidCard": "Planeswalker.OppCtrl",
-        "Description": "Loyalty abilities of planeswalkers your opponents control cost {1} more to activate.",
-        "Amount": "1"
-      }
+      "description": "Loyalty abilities of planeswalkers your opponents control cost {1} more to activate.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

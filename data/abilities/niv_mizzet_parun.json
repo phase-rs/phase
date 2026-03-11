@@ -1,37 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Drawn",
-      "params": {
-        "ValidCard": "Card.YouOwn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever you draw a card, CARDNAME deals 1 damage to any target."
-      }
-    },
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerDescription": "Whenever a player casts an instant or sorcery spell, you draw a card."
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self"
+      "description": "Whenever you draw a card, CARDNAME deals 1 damage to any target.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever a player casts an instant or sorcery spell, you draw a card.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

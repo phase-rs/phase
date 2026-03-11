@@ -2,38 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.tapped"
-        }
-      },
       "cost": null,
+      "description": "Destroy target tapped creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target tapped creature",
-        "SpellDescription": "Destroy target tapped creature."
-      }
+      "target_prompt": "Select target tapped creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "Caster": "You",
-        "PresentCompare": "GE2",
-        "ValidSA": "Spell",
-        "Description": "Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may cast CARDNAME as though it had flash.",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "PresentZone": "Graveyard"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may cast CARDNAME as though it had flash.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

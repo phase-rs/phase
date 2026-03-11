@@ -1,40 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +2/+0.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.EquippedBy",
-            "AddPower": "2",
-            "Description": "Equipped creature gets +2/+0."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +3/+0 and has \"Whenever this creature attacks, you may sacrifice an artifact other than CARDNAME. When you do, this creature deals damage equal to its power to target creature.\"",
           "mode": "Continuous",
-          "params": {
-            "Description": "Equipped creature gets +3/+0 and has \"Whenever this creature attacks, you may sacrifice an artifact other than CARDNAME. When you do, this creature deals damage equal to its power to target creature.\"",
-            "AddPower": "3",
-            "AddTrigger": "AttacksTrig",
-            "Affected": "Creature.EquippedBy"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 3
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

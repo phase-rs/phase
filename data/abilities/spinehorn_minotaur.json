@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've drawn two or more cards this turn, CARDNAME has double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Double Strike",
-        "Description": "As long as you've drawn two or more cards this turn, CARDNAME has double strike.",
-        "CheckSVar": "X",
-        "SVarCompare": "GE2"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

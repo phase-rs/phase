@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a 1/1 red Elemental creature token, then attach CARDNAME to it.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"Sacrifice this creature: It deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has \"Sacrifice this creature: It deals 1 damage to any target.\"",
-        "AddAbility": "Damage"
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create a 1/1 red Elemental creature token, then attach CARDNAME to it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

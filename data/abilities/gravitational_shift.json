@@ -1,25 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures with flying get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Creature.withFlying",
-        "Description": "Creatures with flying get +2/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures without flying get -2/-0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.withoutFlying",
-        "AddPower": "-2",
-        "Description": "Creatures without flying get -2/-0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

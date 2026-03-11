@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Target creature becomes white until end of turn. Tap that creature. Draw a card.",
-        "OverwriteColors": "True",
-        "Colors": "White"
-      }
+      "description": "Target creature becomes white until end of turn. Tap that creature. Draw a card.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

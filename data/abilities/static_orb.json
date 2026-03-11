@@ -1,18 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "Player"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is untapped, players can't untap more than two permanents during their untap steps.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+untapped",
-        "Affected": "Player",
-        "AddKeyword": "UntapAdjust:Permanent:2",
-        "Description": "As long as CARDNAME is untapped, players can't untap more than two permanents during their untap steps."
-      }
+      "modifications": [
+        {
+          "keyword": "UntapAdjust:Permanent:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

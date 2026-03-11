@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U U"
+        "cost": "1 U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "ExileAndPlayUntilEOT",
-        "Defined": "You",
-        "ChangeNum": "All",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile the top card of your library. Until end of turn, you may play that card. (Reveal the card as you exile it.)",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Exile the top card of your library. Until end of turn, you may play that card. (Reveal the card as you exile it.)",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

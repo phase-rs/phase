@@ -1,40 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "RemoveType": "Creature",
-        "SVarCompare": "LT7",
-        "CheckSVar": "X",
-        "Description": "As long as your devotion to green and blue is less than seven, NICKNAME isn't a creature."
-      }
-    },
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "SetMaxHandSize": "Unlimited",
-        "Description": "You have no maximum hand size."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would lose unspent mana, that mana becomes colorless instead.",
       "event": {
         "Other": "LoseMana"
-      },
-      "params": {
-        "ReplaceWith": "ConvertMana",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "ReplacementResult": "Replaced",
-        "Description": "If you would lose unspent mana, that mana becomes colorless instead."
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to green and blue is less than seven, NICKNAME isn't a creature.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
+    },
+    {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have no maximum hand size.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

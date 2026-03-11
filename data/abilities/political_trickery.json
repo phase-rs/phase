@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Exchange control of target land you control and target land an opponent controls. (This effect lasts indefinitely.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target land you control",
-        "SpellDescription": "Exchange control of target land you control and target land an opponent controls. (This effect lasts indefinitely.)",
-        "SubAbility": "DBExchange"
-      }
+      "target_prompt": "Choose target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,37 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "ValidCard": "Plane.Self",
-        "Execute": "FurnaceDiscard",
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life."
+      "valid_card": {
+        "card_type": "Plane",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Command",
-        "ValidPlayer": "You",
-        "Execute": "FurnaceDiscard",
-        "Secondary": "True",
-        "Phase": "Upkeep",
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life."
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, you may destroy target nonland permanent.",
       "mode": "ChaosEnsues",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever chaos ensues, you may destroy target nonland permanent.",
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

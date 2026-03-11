@@ -1,26 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen type in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME is the chosen type in addition to its other types.",
-        "Affected": "Card.Self",
-        "AddType": "ChosenType"
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ChosenType"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control of the chosen type get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.ChosenType+Other+YouCtrl",
-        "AddToughness": "1",
-        "Description": "Other creatures you control of the chosen type get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

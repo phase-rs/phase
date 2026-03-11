@@ -2,54 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "SpellDescription": "Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.",
-          "PrecostDesc": "Sketch and Lore",
-          "Valid": "Instant,Sorcery,Creature",
-          "ValidTgts": "Opponent",
-          "ValidDescription": "instant, sorcery, or creature",
-          "RevealedDestination": "Exile",
-          "RememberFound": "True",
-          "IsCurse": "True",
-          "FoundDestination": "Exile",
-          "SorcerySpeed": "True",
-          "SubAbility": "DBPlay"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 R"
+            "cost": "2 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.",
-        "PrecostDesc": "Sketch and Lore",
-        "Valid": "Instant,Sorcery,Creature",
-        "ValidTgts": "Opponent",
-        "ValidDescription": "instant, sorcery, or creature",
-        "RevealedDestination": "Exile",
-        "RememberFound": "True",
-        "IsCurse": "True",
-        "FoundDestination": "Exile",
-        "SorcerySpeed": "True",
-        "SubAbility": "DBPlay"
-      }
+      "description": "Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.",
+      "effect": {
+        "description": "Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

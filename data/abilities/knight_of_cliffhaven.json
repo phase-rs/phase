@@ -1,31 +1,85 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-3 2/3 Flying",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE3_LEVEL",
-        "SetToughness": "3",
-        "Affected": "Card.Self",
-        "Description": "LEVEL 1-3 2/3 Flying",
-        "AddKeyword": "Flying",
-        "SetPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 4+ 4/4 Flying, vigilance",
       "mode": "Continuous",
-      "params": {
-        "Description": "LEVEL 4+ 4/4 Flying, vigilance",
-        "SetPower": "4",
-        "SetToughness": "4",
-        "AddKeyword": "Flying & Vigilance",
-        "IsPresent": "Card.Self+counters_GE4_LEVEL",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

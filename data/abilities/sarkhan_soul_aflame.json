@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "SarkanCopy",
-        "TriggerDescription": "Whenever a Dragon you control enters, you may have CARDNAME become a copy of it until end of turn, except its name is Sarkhan, Soul Aflame and it's legendary in addition to its other types.",
-        "ValidCard": "Dragon.YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Amount": "1",
-        "Activator": "You",
-        "Description": "Dragon spells you cast cost {1} less to cast.",
-        "ValidCard": "Dragon"
-      }
+      "description": "Dragon spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Dragon you control enters, you may have CARDNAME become a copy of it until end of turn, except its name is Sarkhan, Soul Aflame and it's legendary in addition to its other types.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Dragon",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

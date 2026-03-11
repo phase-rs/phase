@@ -1,27 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Spell",
-        "Caster": "Player",
-        "Description": "Any player may cast spells as though they had flash.",
-        "ValidCard": "Card"
-      }
+      "description": "Any player may cast spells as though they had flash.",
+      "mode": "CastWithFlash"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card",
-        "Caster": "Opponent",
-        "Description": "Your opponents can't cast spells during your turn.",
-        "Condition": "PlayerTurn"
-      }
+      "description": "Your opponents can't cast spells during your turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, draw two cards. You may play an additional land this turn.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerDescription": "When you set this scheme in motion, draw two cards. You may play an additional land this turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "DBDraw",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

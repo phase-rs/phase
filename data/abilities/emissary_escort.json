@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "X",
-        "Description": "This creature gets +X/+0, where X is the greatest mana value among other artifacts you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "This creature gets +X/+0, where X is the greatest mana value among other artifacts you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

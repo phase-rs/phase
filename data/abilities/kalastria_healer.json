@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Rally — Whenever CARDNAME or another Ally you control enters, each opponent loses 1 life and you gain 1 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, each opponent loses 1 life and you gain 1 life.",
-        "Destination": "Battlefield",
-        "Execute": "TrigDrain",
-        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Ally.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

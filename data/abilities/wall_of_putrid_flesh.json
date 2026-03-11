@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.enchanted",
-        "Prevent": "True",
-        "Description": "Prevent all damage that would be dealt to CARDNAME by enchanted creatures.",
-        "ValidTarget": "Creature.Self"
-      }
+      "description": "Prevent all damage that would be dealt to CARDNAME by enchanted creatures.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

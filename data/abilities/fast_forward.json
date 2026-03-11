@@ -2,36 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Goad",
-        "params": {
-          "SpellDescription": "Goad all creatures your opponents control. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
-          "Defined": "Valid Creature.OppCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Goad all creatures your opponents control. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
-        "Defined": "Valid Creature.OppCtrl"
-      }
+      "description": "Goad all creatures your opponents control. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
+      "effect": {
+        "description": "Goad all creatures your opponents control. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
+        "name": "Goad",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast for each opponent you attacked this turn.",
-        "Amount": "X",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {1} less to cast for each opponent you attacked this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

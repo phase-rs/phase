@@ -1,72 +1,92 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "3 G"
+            "cost": "3 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put a +1/+1 counter on target creature."
-          }
+          "description": "Put a +1/+1 counter on target creature.",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "3 G"
+            "cost": "3 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put a +1/+1 counter on target creature."
-          }
+          "description": "Put a +1/+1 counter on target creature.",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Wolf",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "YouCtrl,Werewolf.Other"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other Wolves and Werewolves you control have trample.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Trample",
-            "Affected": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
-            "Description": "Other Wolves and Werewolves you control have trample."
-          }
+          "modifications": [
+            {
+              "keyword": "Trample",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

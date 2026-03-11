@@ -2,37 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B",
+        "type": "Mana"
+      },
+      "description": "Enchanted creature gets +2/+2 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Enchanted",
-        "SpellDescription": "Enchanted creature gets +2/+2 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has first strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "First Strike",
-        "Description": "Enchanted creature has first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,47 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo B R",
-        "params": {
-          "SpellDescription": "Add {B} or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B} or {R}."
-      }
+      "description": "Add {B} or {R}.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, it deals 1 damage to target opponent.",
-        "Execute": "TrigDealDamage",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self"
+      "description": "When CARDNAME enters, it deals 1 damage to target opponent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

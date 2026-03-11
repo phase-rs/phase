@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, CARDNAME deals 2 damage to that player.",
       "mode": "AbilityCast",
-      "params": {
-        "TriggerDescription": "Whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, CARDNAME deals 2 damage to that player.",
-        "Execute": "TrigDmg",
-        "ValidSA": "SpellAbility.!ManaAbility",
-        "ValidCard": "Artifact.inZoneBattlefield,Creature.inZoneBattlefield,Land.inZoneBattlefield",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

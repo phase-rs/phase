@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DBReplace",
-        "Description": "If a source would deal damage to you, prevent 1 of that damage.",
-        "PreventionEffect": "True",
-        "ValidTarget": "You",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If a source would deal damage to you, prevent 1 of that damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

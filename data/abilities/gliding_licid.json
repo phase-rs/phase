@@ -2,56 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Enchantment",
-          "Aura"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Enchantment",
+          "Aura"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RevertCost": "U",
-        "RemoveEnchantmentTypes": "True",
-        "Defined": "Self",
-        "Keywords": "Enchant:Creature",
-        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
-        "SubAbility": "DBAttach",
-        "Duration": "Permanent",
-        "RemoveThisAbility": "True",
-        "RemoveCardTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has flying.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

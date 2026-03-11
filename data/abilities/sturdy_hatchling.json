@@ -2,50 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "GU",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains shroud until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "GU"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gains shroud until end of turn.",
-        "KW": "Shroud"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a green spell, remove a -1/-1 counter from CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "Whenever you cast a green spell, remove a -1/-1 counter from CARDNAME.",
-        "ValidCard": "Card.Green"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a blue spell, remove a -1/-1 counter from CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "Whenever you cast a blue spell, remove a -1/-1 counter from CARDNAME.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Blue",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

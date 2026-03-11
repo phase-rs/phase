@@ -1,29 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChoose",
-        "TriggerDescription": "When CARDNAME enters, you may choose a creature card in your hand. If you do, that card perpetually incorporates {W} and gains \"When you cast this spell, create a 2/2 white and blue Detective creature token.\"",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "MultiColor"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Multicolored creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Multicolored creatures you control get +1/+1.",
-        "Affected": "Creature.MultiColor+Other+YouCtrl",
-        "AddToughness": "1",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you may choose a creature card in your hand. If you do, that card perpetually incorporates {W} and gains \"When you cast this spell, create a 2/2 white and blue Detective creature token.\"",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

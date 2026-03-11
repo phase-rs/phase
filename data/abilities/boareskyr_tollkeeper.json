@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target opponent reveals all creature and land cards in their hand. Choose one of them. That card perpetually gains \"This permanent enters tapped.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, target opponent reveals all creature and land cards in their hand. Choose one of them. That card perpetually gains \"This permanent enters tapped.\"",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigReveal"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

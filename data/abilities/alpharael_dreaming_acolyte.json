@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME enters, draw two cards. Then discard two cards unless you discard an artifact card.",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, NICKNAME has deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "Condition": "PlayerTurn",
-        "Affected": "Card.Self",
-        "Description": "During your turn, NICKNAME has deathtouch."
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, draw two cards. Then discard two cards unless you discard an artifact card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

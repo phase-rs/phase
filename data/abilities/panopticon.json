@@ -1,35 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME, draw a card.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "PanopticonDraw",
-        "TriggerDescription": "When you planeswalk to CARDNAME, draw a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your draw step, draw an additional card.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Command",
-        "Phase": "Draw",
-        "ValidPlayer": "You",
-        "Execute": "PanopticonDraw",
-        "TriggerDescription": "At the beginning of your draw step, draw an additional card."
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, draw a card.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "PanopticonDraw",
-        "TriggerDescription": "Whenever chaos ensues, draw a card."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

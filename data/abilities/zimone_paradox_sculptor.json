@@ -2,51 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "MultiplyCounter",
-        "counter_type": "",
-        "multiplier": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl,Artifact.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G U"
+            "cost": "G U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Double the number of each kind of counter on up to two target creatures and/or artifacts you control.",
+      "effect": {
+        "counter_type": "",
+        "multiplier": 2,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Artifact.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "MultiplyCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or artifact you control",
-        "SpellDescription": "Double the number of each kind of counter on up to two target creatures and/or artifacts you control.",
-        "StackDescription": "SpellDescription",
-        "TargetMax": "2",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select target creature or artifact you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, put a +1/+1 counter on each of up to two target creatures you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, put a +1/+1 counter on each of up to two target creatures you control.",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

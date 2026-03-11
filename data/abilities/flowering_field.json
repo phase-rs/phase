@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Prevent the next 1 damage that would be dealt to any target this turn.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Pump",
-        "Description": "Enchanted land has \"{T}: Prevent the next 1 damage that would be dealt to any target this turn.\"",
-        "Affected": "Land.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "ability": "Pump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

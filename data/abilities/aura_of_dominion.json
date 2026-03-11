@@ -2,36 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<1/Creature>"
+            "cost": "tapXType<1/Creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{1}, Tap an untapped creature you control:",
-        "Defined": "Enchanted",
-        "SpellDescription": "Untap enchanted creature."
-      }
+      "description": "Untap enchanted creature.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

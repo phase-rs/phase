@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Creature.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, both creatures have protection from Zombies.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.PairedWith,Creature.Self+Paired",
-        "AddKeyword": "Protection:Zombie",
-        "Description": "As long as CARDNAME is paired with another creature, both creatures have protection from Zombies."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Zombie",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

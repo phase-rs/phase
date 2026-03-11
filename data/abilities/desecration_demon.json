@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, any opponent may sacrifice a creature. If a player does, tap CARDNAME and put a +1/+1 counter on it.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of each combat, any opponent may sacrifice a creature. If a player does, tap CARDNAME and put a +1/+1 counter on it."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

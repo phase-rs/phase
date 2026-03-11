@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may destroy target artifact or enchantment.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDestroy",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you may destroy target artifact or enchantment.",
-        "Destination": "Battlefield"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

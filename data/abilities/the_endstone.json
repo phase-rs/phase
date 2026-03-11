@@ -1,39 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you play a land or cast a spell, draw a card.",
       "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a land or cast a spell, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card.",
-        "ValidCard": "Card",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, your life total becomes half your starting life total, rounded up.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSetLife",
-        "TriggerDescription": "At the beginning of your end step, your life total becomes half your starting life total, rounded up.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

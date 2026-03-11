@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discover, discover again for the same value. This ability triggers only once each turn.",
       "mode": "Discover",
-      "params": {
-        "ActivationLimit": "1",
-        "Execute": "TrigDiscover",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you discover, discover again for the same value. This ability triggers only once each turn.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

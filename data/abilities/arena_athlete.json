@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, target creature an opponent controls can't block this turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCanNotBlock",
-        "TargetsValid": "Card.Self",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, target creature an opponent controls can't block this turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's draw step, that player draws an additional card.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's draw step, that player draws an additional card.",
-        "Phase": "Draw",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "Player"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

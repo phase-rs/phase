@@ -2,33 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+0 and gains flying. Its controller sacrifices it at the beginning of the next end step. Activate only once and only if you control a snow Mountain.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Flying",
-        "SpellDescription": "CARDNAME gets +2/+0 and gains flying. Its controller sacrifices it at the beginning of the next end step. Activate only once and only if you control a snow Mountain.",
-        "IsPresent": "Mountain.Snow+YouCtrl",
-        "Defined": "Self",
-        "Duration": "Permanent",
-        "GameActivationLimit": "1",
-        "AtEOT": "SacrificeCtrl"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

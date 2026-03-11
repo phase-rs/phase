@@ -2,59 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChooseCard",
-        "choices": [
-          "Land"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W W"
+            "cost": "2 W W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DestroyAll",
-        "SpellDescription": "Each player chooses six lands they control.",
-        "ChoiceTitle": "Choose six lands you control",
-        "ControlledByPlayer": "Chooser",
-        "Amount": "6",
-        "Defined": "Player",
-        "Mandatory": "True",
-        "SorcerySpeed": "True"
-      }
+      "description": "Each player chooses six lands they control.",
+      "effect": {
+        "choices": [
+          "Land"
+        ],
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChooseCard"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is put into exile from the battlefield, you may pay {2}. If you do, search your library for a planeswalker card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Exile",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigSearch",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME is put into exile from the battlefield, you may pay {2}. If you do, search your library for a planeswalker card, reveal it, put it into your hand, then shuffle.",
-        "Origin": "Battlefield",
-        "Destination": "Exile"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

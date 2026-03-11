@@ -1,41 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each Aura and Equipment attached to it.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME dies, if it was enchanted, create a Junk token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME dies, if it was enchanted, create a Junk token.",
-        "ValidCard": "Card.Self+enchanted"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies, if it was equipped, create a Junk token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self+equipped",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME dies, if it was equipped, create a Junk token."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +1/+1 for each Aura and Equipment attached to it."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

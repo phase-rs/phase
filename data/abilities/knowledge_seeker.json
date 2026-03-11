@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, put a +1/+1 counter on this creature.",
       "mode": "Drawn",
-      "params": {
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Number": "2",
-        "TriggerDescription": "Whenever you draw your second card each turn, put a +1/+1 counter on this creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "When this creature dies, create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerDescription": "When this creature dies, create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.)",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

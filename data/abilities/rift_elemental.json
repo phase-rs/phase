@@ -2,37 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/TIME/Permanent.inZoneBattlefield;Card.suspended/a permanent you control or suspended card you own/Battlefield,Exile>"
+            "cost": "SubCounter<1/TIME/Permanent.inZoneBattlefield;Card.suspended/a permanent you control or suspended card you own/Battlefield,Exile>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
-      }
+      "description": "CARDNAME gets +2/+0 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

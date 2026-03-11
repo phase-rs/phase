@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}. When you spend this mana to cast a spell with mana value 6 or greater, draw a card.",
-          "TriggersWhenSpent": "TrigSpent"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}. When you spend this mana to cast a spell with mana value 6 or greater, draw a card.",
-        "TriggersWhenSpent": "TrigSpent"
-      }
+      "description": "Add {G}. When you spend this mana to cast a spell with mana value 6 or greater, draw a card.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

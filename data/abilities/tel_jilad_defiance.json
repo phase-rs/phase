@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "SubAbility": "DBDraw",
-          "Gains": "Artifact",
-          "SpellDescription": "Target creature gains protection from artifacts until end of turn.",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "Gains": "Artifact",
-        "SpellDescription": "Target creature gains protection from artifacts until end of turn.",
-        "ValidTgts": "Creature"
-      }
+      "description": "Target creature gains protection from artifacts until end of turn.",
+      "effect": {
+        "description": "Target creature gains protection from artifacts until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

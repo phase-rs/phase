@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Human"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W"
+        "cost": "3 W",
+        "type": "Mana"
       },
+      "description": "Target Human gains double strike until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Human",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Human",
-        "KW": "Double Strike",
-        "SpellDescription": "Target Human gains double strike until end of turn."
-      }
+      "target_prompt": "Select target Human"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

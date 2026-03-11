@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked by a creature, put a -1/-1 counter on that creature.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, put a -1/-1 counter on that creature.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "ValidBlocker": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

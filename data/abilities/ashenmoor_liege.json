@@ -1,38 +1,97 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, that player loses 4 life.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Red"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other red creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other red creatures you control get +1/+1.",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Affected": "Creature.Red+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Black"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other black creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Other black creatures you control get +1/+1.",
-        "AddPower": "1",
-        "Affected": "Creature.Black+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, that player loses 4 life.",
+      "mode": "BecomesTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

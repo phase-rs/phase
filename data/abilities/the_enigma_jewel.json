@@ -1,76 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "C",
-            "params": {
-              "RestrictValid": "Activated",
-              "Amount": "2",
-              "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RestrictValid": "Activated",
-            "Amount": "2",
-            "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
+          "description": "Add {C}{C}. Spend this mana only to activate abilities.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplacementResult": "Updated",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Description": "CARDNAME enters tapped.",
-            "ReplaceWith": "ETBTapped"
-          }
-        }
-      ]
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "AbilityCast",
-          "params": {
-            "Execute": "TrigCopy",
-            "TriggerZones": "Battlefield",
-            "ValidActivatingPlayer": "You",
-            "TriggerDescription": "Whenever you activate an ability that isn't a mana ability, copy it. You may choose new targets for the copy.",
-            "ValidSA": "SpellAbility.!ManaAbility"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Card.Self",
-            "EffectZone": "Battlefield",
-            "GainsAbilitiesOfDefined": "ExiledWith",
-            "GainsAbilitiesLimitPerTurn": "1",
-            "Description": "CARDNAME has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn."
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "CARDNAME has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn.",
+          "effect_zone": "Battlefield",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever you activate an ability that isn't a mana ability, copy it. You may choose new targets for the copy.",
+          "mode": "AbilityCast",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

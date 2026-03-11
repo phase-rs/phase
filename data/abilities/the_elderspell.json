@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "Destroy any number of target planeswalkers. Choose a planeswalker you control. Put two loyalty counters on it for each planeswalker destroyed this way.",
+      "effect": {
+        "target": {
+          "card_type": "Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target planeswalker",
-        "SpellDescription": "Destroy any number of target planeswalkers. Choose a planeswalker you control. Put two loyalty counters on it for each planeswalker destroyed this way.",
-        "RememberDestroyed": "True",
-        "TargetMin": "0",
-        "TargetMax": "MaxTargets",
-        "SubAbility": "DBPutLoyalty"
-      }
+      "target_prompt": "Select target planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

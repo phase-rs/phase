@@ -2,35 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "For each permanent type, return up to one card of that type from your graveyard to the battlefield. You lose 3 life for each card returned this way. Exile CARDNAME.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Card.Permanent+YouOwn"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP return_{p:You} returns & from your_from their & You lose_{p:You} loses & Exile_{p:You} exiles",
-        "SubAbility": "DBReturn",
-        "SpellDescription": "For each permanent type, return up to one card of that type from your graveyard to the battlefield. You lose 3 life for each card returned this way. Exile CARDNAME.",
-        "RememberChosen": "True",
-        "MinAmount": "0",
-        "ControlledByPlayer": "Chooser",
-        "ChoiceZone": "Graveyard",
-        "Defined": "You",
-        "ChooseEach": "Artifact & Battle & Creature & Enchantment & Land & Planeswalker",
-        "Amount": "1",
-        "Reveal": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

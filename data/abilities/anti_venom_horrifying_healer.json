@@ -1,31 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReturn",
-        "ValidCard": "Card.Self+wasCast",
-        "Origin": "Any",
-        "TriggerDescription": "When NICKNAME enters, if he was cast, return target creature card from your graveyard to the battlefield.",
-        "Destination": "Battlefield"
-      }
+      "description": "If damage would be dealt to NICKNAME, prevent that damage and put that many +1/+1 counters on him.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If damage would be dealt to NICKNAME, prevent that damage and put that many +1/+1 counters on him.",
-        "ValidTarget": "Card.Self",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True",
-        "AlwaysReplace": "True"
+      "description": "When NICKNAME enters, if he was cast, return target creature card from your graveyard to the battlefield.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,42 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigUntap",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player may pay {4}. If the player does, untap the creature.",
-        "ValidPlayer": "Player.EnchantedController",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidCard": "Creature.EnchantedBy",
-        "ValidStepTurnToController": "You",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen"
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
+    },
+    {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, that player may pay {4}. If the player does, untap the creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

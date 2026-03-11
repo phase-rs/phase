@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 R"
+            "cost": "3 R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card/card>"
+            "cost": "Discard<1/Card/card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "As an additional cost to cast this spell, discard a card.",
-        "SubAbility": "DBToken",
-        "SpellDescription": "Draw two cards and create two Treasure tokens. (They're artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
-        "StackDescription": "SpellDescription",
-        "Defined": "You"
-      }
+      "description": "Draw two cards and create two Treasure tokens. (They're artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

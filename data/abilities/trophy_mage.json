@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for an artifact card with mana value 3, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for an artifact card with mana value 3, reveal it, put it into your hand, then shuffle.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

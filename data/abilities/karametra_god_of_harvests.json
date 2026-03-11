@@ -1,31 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a creature spell, you may search your library for a Forest or Plains card, put it onto the battlefield tapped, then shuffle.",
-        "OptionalDecider": "You",
-        "Execute": "TrigSearch"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to green and white is less than seven, NICKNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT7",
-        "RemoveType": "Creature",
-        "Description": "As long as your devotion to green and white is less than seven, NICKNAME isn't a creature.",
-        "Affected": "Card.Self",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a creature spell, you may search your library for a Forest or Plains card, put it onto the battlefield tapped, then shuffle.",
+      "mode": "SpellCast",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

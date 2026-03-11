@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures lose flying.",
       "mode": "Continuous",
-      "params": {
-        "RemoveKeyword": "Flying",
-        "Description": "All creatures lose flying.",
-        "Affected": "Creature"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

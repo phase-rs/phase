@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has protection from that player. (This creature can't be blocked, targeted, dealt damage, or enchanted by anything controlled by that player.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has protection from that player. (This creature can't be blocked, targeted, dealt damage, or enchanted by anything controlled by that player.)",
-        "AddKeyword": "Protection:Player.PlayerUID_ChosenPlayerUID:ChosenPlayerName"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Player.PlayerUID_ChosenPlayerUID:ChosenPlayerName",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,36 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature.",
-        "SubAbility": "DBSurveil"
-      }
+      "description": "Destroy target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "CARDNAME costs {2} less to cast if it targets a legendary creature.",
-        "Type": "Spell",
-        "ValidTarget": "Creature.Legendary",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Amount": "2"
-      }
+      "description": "CARDNAME costs {2} less to cast if it targets a legendary creature.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

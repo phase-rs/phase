@@ -1,29 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "NICKNAME can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Max": "1",
-        "Description": "NICKNAME can't be blocked by more than one creature.",
-        "ValidCard": "Card.Self"
       }
     },
     {
+      "description": "Boars you control can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Max": "1",
-        "ValidCard": "Boar.YouCtrl",
-        "Description": "Boars you control can't be blocked by more than one creature."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

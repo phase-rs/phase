@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Descend 4 — Whenever CARDNAME attacks, if there are four or more permanent cards in your graveyard, put a +1/+1 counter on target creature.",
       "mode": "Attacks",
-      "params": {
-        "CheckSVar": "X",
-        "TriggerDescription": "Descend 4 — Whenever CARDNAME attacks, if there are four or more permanent cards in your graveyard, put a +1/+1 counter on target creature.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.Self",
-        "SVarCompare": "GE4"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

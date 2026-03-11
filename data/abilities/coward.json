@@ -1,69 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target creature can't block this turn and becomes a Coward in addition to its other types until end of turn.",
           "effect": {
-            "type": "Animate",
             "power": null,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
             "toughness": null,
+            "type": "Animate",
             "types": [
               "Coward"
-            ],
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+            ]
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "StackDescription": "REP Target creature_{c:Targeted}",
-            "SpellDescription": "Target creature can't block this turn and becomes a Coward in addition to its other types until end of turn.",
-            "HiddenKeywords": "CARDNAME can't block.",
-            "SubAbility": "DBTimeTravel",
-            "IsCurse": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 3 damage to target creature and each other creature that shares a creature type with it.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 3 damage to target creature and each other creature that shares a creature type with it.",
-            "StackDescription": "REP target creature_{c:Targeted}",
-            "DamageMap": "True",
-            "SubAbility": "DamageSame"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

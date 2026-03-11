@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ControlSpell",
-        "params": {
-          "TargetType": "Spell",
-          "ValidTgts": "Card",
-          "SpellDescription": "Gain control of target spell. You may choose new targets for it. (If that spell becomes a permanent, it enters under your control.)",
-          "Mode": "Gain",
-          "SubAbility": "DBChooseTargets"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "ValidTgts": "Card",
-        "SpellDescription": "Gain control of target spell. You may choose new targets for it. (If that spell becomes a permanent, it enters under your control.)",
-        "Mode": "Gain",
-        "SubAbility": "DBChooseTargets"
-      }
+      "description": "Gain control of target spell. You may choose new targets for it. (If that spell becomes a permanent, it enters under your control.)",
+      "effect": {
+        "description": "Gain control of target spell. You may choose new targets for it. (If that spell becomes a permanent, it enters under your control.)",
+        "name": "ControlSpell",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

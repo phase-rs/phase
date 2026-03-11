@@ -1,20 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "EnchantedPlayerCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Nonlegendary creatures enchanted player controls have base power and toughness 3/3 and lose all creature types.",
       "mode": "Continuous",
-      "params": {
-        "RemoveCreatureTypes": "True",
-        "Description": "Nonlegendary creatures enchanted player controls have base power and toughness 3/3 and lose all creature types.",
-        "Affected": "Creature.nonlegendary+EnchantedPlayerCtrl",
-        "SetPower": "3",
-        "SetToughness": "3",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

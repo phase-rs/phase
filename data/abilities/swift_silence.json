@@ -2,25 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Counter all other spells. Draw a card for each spell countered this way.",
       "effect": {
-        "type": "Counter",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Counter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberCountered": "True",
-        "SpellDescription": "Counter all other spells. Draw a card for each spell countered this way.",
-        "Defined": "ValidStack Spell.Other",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

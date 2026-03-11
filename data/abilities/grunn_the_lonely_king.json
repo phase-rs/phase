@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME attacks alone, double its power and toughness until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever NICKNAME attacks alone, double its power and toughness until end of turn.",
-        "ValidCard": "Card.Self",
-        "Alone": "True",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

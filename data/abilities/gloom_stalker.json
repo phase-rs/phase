@@ -1,18 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've completed a dungeon, CARDNAME has double strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as you've completed a dungeon, CARDNAME has double strike.",
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "AffectedZone": "Graveyard",
-        "Affected": "Land.YouCtrl",
-        "Description": "You may play lands from your graveyard."
-      }
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may play lands from your graveyard.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "If a land entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "ValidCause": "Land",
-        "ValidCard": "Permanent.YouCtrl"
-      }
+      "description": "If a land entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

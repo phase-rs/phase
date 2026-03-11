@@ -1,39 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, create a red Aura enchantment token named Mark of the Rani attached to another target creature. That token has enchant creature and \"Enchanted creature gets +2/+2 and is goaded.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a red Aura enchantment token named Mark of the Rani attached to another target creature. That token has enchant creature and \"Enchanted creature gets +2/+2 and is goaded.\"",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, create a red Aura enchantment token named Mark of the Rani attached to another target creature. That token has enchant creature and \"Enchanted creature gets +2/+2 and is goaded.\"",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a red Aura enchantment token named Mark of the Rani attached to another target creature. That token has enchant creature and \"Enchanted creature gets +2/+2 and is goaded.\""
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever a goaded creature deals combat damage to one of your opponents, investigate.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.IsGoaded",
-        "ValidTarget": "Opponent",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigInvestigate",
-        "TriggerDescription": "Whenever a goaded creature deals combat damage to one of your opponents, investigate."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsGoaded"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

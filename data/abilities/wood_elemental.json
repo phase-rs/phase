@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to the number of Forests sacrificed as it entered.",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of Forests sacrificed as it entered.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,32 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RemoveFromCombat",
-        "params": {
-          "TgtPrompt": "Select target attacking creature you control.",
-          "SpellDescription": "Remove target attacking creature you control from combat and untap it.",
-          "SubAbility": "DBUntap",
-          "ValidTgts": "Creature.attacking+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
+      "description": "Remove target attacking creature you control from combat and untap it.",
+      "effect": {
+        "description": "Remove target attacking creature you control from combat and untap it.",
+        "name": "RemoveFromCombat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking creature you control.",
-        "SpellDescription": "Remove target attacking creature you control from combat and untap it.",
-        "SubAbility": "DBUntap",
-        "ValidTgts": "Creature.attacking+YouCtrl"
-      }
+      "target_prompt": "Select target attacking creature you control."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,86 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature",
-          "StaticAbilities": "MustAttack",
-          "Duration": "UntilYourNextTurn",
-          "TargetMin": "0",
-          "TargetMax": "1",
-          "Planeswalker": "True",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "Until your next turn, up to one target creature attacks a player each combat if able."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature",
-        "StaticAbilities": "MustAttack",
-        "Duration": "UntilYourNextTurn",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "Planeswalker": "True",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "Until your next turn, up to one target creature attacks a player each combat if able."
-      }
+      "description": "Until your next turn, up to one target creature attacks a player each combat if able.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Discard a card, then draw a card.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Discard a card, then draw a card.",
-        "Planeswalker": "True",
-        "SubAbility": "DBDraw",
-        "Mode": "TgtChoose"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+cmcLTX,Equipment.YouCtrl+cmcLTX"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
+      "description": "Exile target creature or Equipment card with mana value less than NICKNAME's loyalty from your graveyard. Create a token that's a copy of it. That token gains haste. Exile it at the beginning of the next end step.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creature or equipment in your graveyard",
-        "SpellDescription": "Exile target creature or Equipment card with mana value less than NICKNAME's loyalty from your graveyard. Create a token that's a copy of it. That token gains haste. Exile it at the beginning of the next end step.",
-        "SubAbility": "DBCopy",
-        "RememberChanged": "True"
-      }
+      "target_prompt": "Select target creature or equipment in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

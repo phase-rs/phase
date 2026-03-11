@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, return another target permanent you control to its owner's hand and put a +1/+1 counter on CARDNAME.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "When CARDNAME is turned face up, return another target permanent you control to its owner's hand and put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

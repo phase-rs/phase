@@ -1,17 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Knight",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YourTeamCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Knights your team controls have flying and haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Knight.YourTeamCtrl",
-        "AddKeyword": "Flying & Haste",
-        "Description": "Knights your team controls have flying and haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

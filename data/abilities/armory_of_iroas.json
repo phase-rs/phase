@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, put a +1/+1 counter on it.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever equipped creature attacks, put a +1/+1 counter on it."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell during an opponent's turn, put a -1/-1 counter on up to one target creature.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "OpponentTurn": "True",
-        "TriggerDescription": "Whenever you cast a spell during an opponent's turn, put a -1/-1 counter on up to one target creature.",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,97 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Draw two cards. Then discard two cards unless you discard an artifact card.",
-        "SubAbility": "DBDiscard"
-      }
+      "description": "Draw two cards. Then discard two cards unless you discard an artifact card.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Target artifact becomes an artifact creature. If it isn't a vehicle, it has base power and toughness 4/4.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Creature",
           "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Target artifact becomes an artifact creature. If it isn't a vehicle, it has base power and toughness 4/4.",
-        "Duration": "Permanent",
-        "SubAbility": "NonVehicle"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You get an emblem with \"Whenever an artifact you control becomes tapped, draw a card.\"",
-          "Duration": "Permanent",
-          "Planeswalker": "True",
-          "Triggers": "ArtifactDraw",
-          "Ultimate": "True",
-          "AILogic": "Always",
-          "Name": "Emblem — Tezzeret, Betrayer of Flesh",
-          "Image": "emblem_tezzeret_betrayer_of_flesh"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You get an emblem with \"Whenever an artifact you control becomes tapped, draw a card.\"",
-        "Duration": "Permanent",
-        "Planeswalker": "True",
-        "Triggers": "ArtifactDraw",
-        "Ultimate": "True",
-        "AILogic": "Always",
-        "Name": "Emblem — Tezzeret, Betrayer of Flesh",
-        "Image": "emblem_tezzeret_betrayer_of_flesh"
-      }
+      "description": "You get an emblem with \"Whenever an artifact you control becomes tapped, draw a card.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "CheckSVar": "ArtAct",
-        "SVarCompare": "LE1",
-        "Amount": "2",
-        "ValidSpell": "Activated.YouCtrl",
-        "Description": "The first activated ability of an artifact you activate each turn costs {2} less to activate.",
-        "ValidCard": "Artifact.inZoneBattlefield",
-        "Type": "Ability",
-        "AffectedZone": "Battlefield"
-      }
+      "affected_zone": "Battlefield",
+      "condition": {
+        "compare": "LE1",
+        "type": "CheckSVar",
+        "var": "ArtAct"
+      },
+      "description": "The first activated ability of an artifact you activate each turn costs {2} less to activate.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

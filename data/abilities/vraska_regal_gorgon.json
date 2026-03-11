@@ -2,79 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Put a +1/+1 counter on up to one target creature. That creature gains menace until end of turn.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Put a +1/+1 counter on up to one target creature. That creature gains menace until end of turn.",
-        "SubAbility": "DBPump",
-        "TargetMin": "0",
-        "TargetMax": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature.",
-        "Planeswalker": "True"
-      }
+      "description": "Destroy target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "For each creature card in your graveyard, put a +1/+1 counter on each creature you control.",
-          "CounterNum": "X",
-          "Planeswalker": "True",
-          "CounterType": "P1P1",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "For each creature card in your graveyard, put a +1/+1 counter on each creature you control.",
-        "CounterNum": "X",
-        "Planeswalker": "True",
-        "CounterType": "P1P1",
-        "Ultimate": "True"
-      }
+      "description": "For each creature card in your graveyard, put a +1/+1 counter on each creature you control.",
+      "effect": {
+        "description": "For each creature card in your graveyard, put a +1/+1 counter on each creature you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

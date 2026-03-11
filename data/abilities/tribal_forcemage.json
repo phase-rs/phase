@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, creatures of the creature type of your choice get +2/+2 and gain trample until end of turn.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "When CARDNAME is turned face up, creatures of the creature type of your choice get +2/+2 and gain trample until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChooseType",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

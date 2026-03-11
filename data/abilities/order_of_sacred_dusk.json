@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Vampire",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Vampires you control have exalted.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Vampire.Other+YouCtrl",
-        "AddKeyword": "Exalted",
-        "Description": "Other Vampires you control have exalted."
-      }
+      "modifications": [
+        {
+          "keyword": "Exalted",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

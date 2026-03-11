@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.DefendingPlayerCtrl"
-        }
-      },
       "cost": null,
+      "description": "Cast CARDNAME only during combat before blockers are declared. Target creature defending player controls can block any number of creatures this turn. It blocks each attacking creature this turn if able.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "DefendingPlayerCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "GoingDownInStyle",
-        "SpellDescription": "Cast CARDNAME only during combat before blockers are declared. Target creature defending player controls can block any number of creatures this turn. It blocks each attacking creature this turn if able.",
-        "ActivationPhases": "BeginCombat->Declare Attackers",
-        "TgtPrompt": "Select target creature defending player controls",
-        "StackDescription": "{c:Targeted} can block any number of creatures this turn. It blocks each attacking creature this turn if able.",
-        "CanBlockAny": "True"
-      }
+      "target_prompt": "Select target creature defending player controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

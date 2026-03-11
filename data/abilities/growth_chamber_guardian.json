@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 G",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Adapt": "2"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on CARDNAME, you may search your library for a card named Growth-Chamber Guardian, reveal it, put it into your hand, then shuffle.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, you may search your library for a card named Growth-Chamber Guardian, reveal it, put it into your hand, then shuffle.",
-        "Execute": "TrigSearch",
-        "ValidCard": "Card.Self",
-        "CounterType": "P1P1"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

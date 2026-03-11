@@ -1,41 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "Origin": "Any"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has \"{6}: Untap this creature.\"",
-        "Affected": "Creature.EnchantedBy",
-        "AddAbility": "Untap"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidCard": "Creature.AttachedBy"
-      }
+      "description": "Enchanted creature has \"{6}: Untap this creature.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "Untap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

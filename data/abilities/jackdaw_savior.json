@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature you control with flying dies, return another target creature card with lesser mana value from your graveyard to the battlefield.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigReturn",
-        "ValidCard": "Card.Self,Creature.Other+YouCtrl+withFlying",
-        "TriggerDescription": "Whenever CARDNAME or another creature you control with flying dies, return another target creature card with lesser mana value from your graveyard to the battlefield."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

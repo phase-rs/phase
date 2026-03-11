@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "SpellDescription": "Your life total becomes 26.",
-          "LifeAmount": "26",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Your life total becomes 26.",
-        "LifeAmount": "26",
-        "Defined": "You"
-      }
+      "description": "Your life total becomes 26.",
+      "effect": {
+        "description": "Your life total becomes 26.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

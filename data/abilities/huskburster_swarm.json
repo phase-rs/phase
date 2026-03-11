@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast for each creature card you own in exile and in your graveyard.",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "X",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {1} less to cast for each creature card you own in exile and in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

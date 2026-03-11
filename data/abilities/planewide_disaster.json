@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you encounter CARDNAME, destroy all creatures. (Then planeswalk away from this phenomenon.)",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "Disaster",
-        "TriggerDescription": "When you encounter CARDNAME, destroy all creatures. (Then planeswalk away from this phenomenon.)"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

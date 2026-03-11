@@ -2,28 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "DBDestroy,DBProtect",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DBDestroy,DBProtect",
-        "Defined": "You"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

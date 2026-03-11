@@ -1,19 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME has first strike and trample as long as an instant card and a sorcery card are in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "CheckSecondSVar": "Y",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has first strike and trample as long as an instant card and a sorcery card are in your graveyard.",
-        "CheckSVar": "X",
-        "AddKeyword": "First Strike & Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

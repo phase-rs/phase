@@ -1,39 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, suspect it. (It has menace and can't block.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigSuspect",
-        "TriggerDescription": "When CARDNAME enters, suspect it. (It has menace and can't block.)",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you draw a card and you lose 1 life.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you draw a card and you lose 1 life.",
-        "ValidSource": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever CARDNAME is dealt damage, target opponent loses that much life.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, target opponent loses that much life.",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

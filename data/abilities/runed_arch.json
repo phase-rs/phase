@@ -2,66 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ForgetOnMoved": "Battlefield",
-          "StackDescription": "X target creatures with power 2 or less [{c:Targeted}] can't be blocked this turn.",
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "Unblockable",
-          "TargetMin": "X",
-          "TgtPrompt": "Select X target creatures with power 2 or less",
-          "TargetMax": "X",
-          "SpellDescription": "X target creatures with power 2 or less can't be blocked this turn.",
-          "ValidTgts": "Creature.powerLE2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "X target creatures with power 2 or less can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ForgetOnMoved": "Battlefield",
-        "StackDescription": "X target creatures with power 2 or less [{c:Targeted}] can't be blocked this turn.",
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "Unblockable",
-        "TargetMin": "X",
-        "TgtPrompt": "Select X target creatures with power 2 or less",
-        "TargetMax": "X",
-        "SpellDescription": "X target creatures with power 2 or less can't be blocked this turn.",
-        "ValidTgts": "Creature.powerLE2"
-      }
+      "target_prompt": "Select X target creatures with power 2 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

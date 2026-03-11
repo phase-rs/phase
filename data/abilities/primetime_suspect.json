@@ -1,27 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChange",
-        "TriggerDescription": "Whenever enchanted creature attacks, you may search your library for a land card, put that card onto the battlefield tapped, then shuffle. If enchanted creature is suspected, you search for two lands instead.",
-        "ValidCard": "Card.AttachedBy",
-        "OptionalDecider": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AE",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever enchanted creature attacks, you may search your library for a land card, put that card onto the battlefield tapped, then shuffle. If enchanted creature is suspected, you search for two lands instead.",
+      "mode": "Attacks",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

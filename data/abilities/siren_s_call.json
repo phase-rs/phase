@@ -2,32 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Cast this spell only during an opponent's turn, before attackers are declared.,,,,,,Creatures the active player controls attack this turn if able.,,,,,,At the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.",
-          "SubAbility": "DestroyPacifist",
-          "ActivationPhases": "Upkeep->BeginCombat",
-          "ActivationFirstCombat": "True",
-          "OpponentTurn": "True",
-          "StaticAbilities": "MustAttack"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Cast this spell only during an opponent's turn, before attackers are declared.,,,,,,Creatures the active player controls attack this turn if able.,,,,,,At the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.",
-        "SubAbility": "DestroyPacifist",
-        "ActivationPhases": "Upkeep->BeginCombat",
-        "ActivationFirstCombat": "True",
-        "OpponentTurn": "True",
-        "StaticAbilities": "MustAttack"
-      }
+      "description": "Cast this spell only during an opponent's turn, before attackers are declared.,,,,,,Creatures the active player controls attack this turn if able.,,,,,,At the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

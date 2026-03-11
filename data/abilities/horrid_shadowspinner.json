@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may draw cards equal to its power. If you do, discard that many cards.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may draw cards equal to its power. If you do, discard that many cards.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

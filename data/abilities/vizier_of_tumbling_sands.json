@@ -2,35 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap another target permanent.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target permanent.",
-        "SpellDescription": "Untap another target permanent."
-      }
+      "target_prompt": "Select another target permanent."
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, untap target permanent.",
       "mode": "Cycled",
-      "params": {
-        "TriggerDescription": "When you cycle CARDNAME, untap target permanent.",
-        "Execute": "TrigUntap",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature becomes blocked by a creature with lesser power, destroy the blocking creature.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidBlocker": "LessPowerThanAttacker",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "Execute": "DestroyBlocker",
-        "TriggerDescription": "Whenever a creature becomes blocked by a creature with lesser power, destroy the blocking creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature blocks a creature with lesser power, destroy the attacking creature.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidBlocker": "Creature",
-        "TriggerZones": "Battlefield",
-        "Execute": "DestroyAttacker",
-        "TriggerDescription": "Whenever a creature blocks a creature with lesser power, destroy the attacking creature.",
-        "ValidCard": "LessPowerThanBlocker"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "LessPowerThanBlocker",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

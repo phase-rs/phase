@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -1,
-        "toughness": -1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withFlying"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature with flying gets -1/-1 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature with flying gets -1/-1 until end of turn.",
-        "TgtPrompt": "Select target creature with flying",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target creature with flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

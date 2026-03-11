@@ -1,51 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "During your turn, CARDNAME has first strike.",
           "mode": "Continuous",
-          "params": {
-            "Description": "During your turn, CARDNAME has first strike.",
-            "Affected": "Card.Self",
-            "Condition": "PlayerTurn",
-            "AddKeyword": "First Strike"
-          }
+          "modifications": [
+            {
+              "keyword": "First",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Strike",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create two 1/1 black Rat creature tokens with \"This creature can't block.\" (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "b_1_1_rat_noblock",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenAmount": "2",
-            "TokenOwner": "You",
-            "SpellDescription": "Create two 1/1 black Rat creature tokens with \"This creature can't block.\" (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

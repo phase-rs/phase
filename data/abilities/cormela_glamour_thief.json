@@ -2,47 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U B R",
-        "params": {
-          "RestrictValid": "Spell.Instant,Spell.Sorcery",
-          "SpellDescription": "Add {U}{B}{R}. Spend this mana only to cast instant and/or sorcery spells."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Instant,Spell.Sorcery",
-        "SpellDescription": "Add {U}{B}{R}. Spend this mana only to cast instant and/or sorcery spells."
-      }
+      "description": "Add {U}{B}{R}. Spend this mana only to cast instant and/or sorcery spells.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, return up to one target instant or sorcery card from your graveyard to your hand.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME dies, return up to one target instant or sorcery card from your graveyard to your hand.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

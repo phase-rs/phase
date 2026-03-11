@@ -2,36 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 B B",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "3"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsMonstrous"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is monstrous, it has menace. (It can't be blocked except by two or more creatures.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is monstrous, it has menace. (It can't be blocked except by two or more creatures.)",
-        "Affected": "Card.Self+IsMonstrous",
-        "AddKeyword": "Menace"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,68 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, scry 2.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "Execute": "TrigScry",
-            "TriggerDescription": "When CARDNAME enters, scry 2.",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "When you sacrifice CARDNAME, return it to the battlefield transformed under its owner's control at the beginning of the next end step.",
           "mode": "Sacrificed",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When you sacrifice CARDNAME, return it to the battlefield transformed under its owner's control at the beginning of the next end step.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDelay",
-            "ValidPlayer": "You"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "SpellDescription": "CARDNAME can't be blocked this turn.",
-              "StaticAbilities": "Unblockable",
-              "ExileOnMoved": "Battlefield",
-              "RememberObjects": "Self"
-            }
-          },
           "cost": {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME can't be blocked this turn.",
-            "StaticAbilities": "Unblockable",
-            "ExileOnMoved": "Battlefield",
-            "RememberObjects": "Self"
-          }
+          "description": "CARDNAME can't be blocked this turn.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

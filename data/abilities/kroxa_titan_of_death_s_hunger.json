@@ -1,38 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, sacrifice it unless it escaped.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSac",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When NICKNAME enters, sacrifice it unless it escaped."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "DBDiscard",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "DBDiscard"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

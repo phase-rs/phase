@@ -1,18 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+0.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control get +1/+0.",
-        "Affected": "Creature.YouCtrl",
-        "EffectZone": "Command",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

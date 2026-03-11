@@ -1,32 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a Warrior creature enters, you may attach CARDNAME to it.",
-        "ValidCard": "Creature.Warrior",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigAttach",
-        "OptionalDecider": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+1 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "AddPower": "2",
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +2/+1 and has haste.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Warrior creature enters, you may attach CARDNAME to it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Warrior"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell that doesn't share a creature type with a creature you control or a creature card in your graveyard, copy that spell. (A copy of a creature spell becomes a token.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Creature+!sharesCreatureTypeWith Valid Creature.YouCtrl+!sharesCreatureTypeWith ValidGraveyard Creature.YouOwn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a creature spell that doesn't share a creature type with a creature you control or a creature card in your graveyard, copy that spell. (A copy of a creature spell becomes a token.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,25 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
-        "Affected": "Opponent",
-        "AdditionalVillainousChoice": "1"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AdditionalOptionalVote": "1",
-        "Description": "While voting, you may vote an additional time.",
-        "Affected": "You"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "While voting, you may vote an additional time.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

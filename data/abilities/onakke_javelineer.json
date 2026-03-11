@@ -2,30 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "CARDNAME deals 2 damage to target player or battle.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Player,Battle"
-        }
+          "card_type": "Player,Battle",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Tap"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player or battle",
-        "SpellDescription": "CARDNAME deals 2 damage to target player or battle."
-      }
+      "target_prompt": "Select target player or battle"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

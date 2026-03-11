@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you become the monarch.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigMonarch",
-        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature attacks you or a planeswalker you control, that creature's controller loses 1 life.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidCard": "Creature.YouDontCtrl",
-        "Attacked": "You,Planeswalker.YouCtrl",
-        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, that creature's controller loses 1 life.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

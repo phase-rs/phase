@@ -1,40 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — This creature gets +1/+1 and has deathtouch as long as there are seven or more cards in your graveyard.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever this creature enters or attacks, draw a card, then discard a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever this creature enters or attacks, draw a card, then discard a card.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever this creature enters or attacks, draw a card, then discard a card.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever this creature enters or attacks, draw a card, then discard a card."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "AddKeyword": "Deathtouch",
-        "Condition": "Threshold",
-        "Description": "Threshold — This creature gets +1/+1 and has deathtouch as long as there are seven or more cards in your graveyard."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

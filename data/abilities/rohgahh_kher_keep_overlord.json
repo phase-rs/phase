@@ -1,39 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Kobold"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Kobolds you control get +2/+2.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you cast a Kobold spell, you may pay {2}. If you do, create a 4/4 red Dragon creature token with flying.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a Kobold spell, you may pay {2}. If you do, create a 4/4 red Dragon creature token with flying.",
-        "Execute": "TrigTokenDragon",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Kobold"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Kobold",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a Dragon spell, create a 0/1 red Kobold creature token named Kobolds of Kher Keep.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigTokenKobold",
-        "TriggerDescription": "Whenever you cast a Dragon spell, create a 0/1 red Kobold creature token named Kobolds of Kher Keep.",
-        "ValidCard": "Dragon"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Dragon",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Kobold+Other+YouCtrl",
-        "AddPower": "2",
-        "Description": "Other Kobolds you control get +2/+2.",
-        "AddToughness": "2"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

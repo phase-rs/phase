@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "For each player, CARDNAME deals damage to that player and each creature that player controls equal to the number of creatures they control.",
-          "DamageMap": "True",
-          "RepeatPlayers": "Player",
-          "RepeatSubAbility": "DmgEach"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each player, CARDNAME deals damage to that player and each creature that player controls equal to the number of creatures they control.",
-        "DamageMap": "True",
-        "RepeatPlayers": "Player",
-        "RepeatSubAbility": "DmgEach"
-      }
+      "description": "For each player, CARDNAME deals damage to that player and each creature that player controls equal to the number of creatures they control.",
+      "effect": {
+        "description": "For each player, CARDNAME deals damage to that player and each creature that player controls equal to the number of creatures they control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

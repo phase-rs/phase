@@ -2,34 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw X cards."
-      }
+      "description": "Draw X cards.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "Y",
-        "SVarCompare": "GE4",
-        "Color": "U U U",
-        "Description": "This spell costs {U}{U}{U} less to cast if an opponent has drawn four or more cards this turn.",
-        "EffectZone": "All",
-        "Type": "Spell"
-      }
+      "condition": {
+        "compare": "GE4",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "This spell costs {U}{U}{U} less to cast if an opponent has drawn four or more cards this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

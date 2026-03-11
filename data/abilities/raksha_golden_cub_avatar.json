@@ -1,30 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Creatures you control get +0/+1.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddToughness": "1",
-        "Description": "Creatures you control get +0/+1.",
-        "EffectZone": "Command",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Equipped creatures you control get +1/+0 and have first strike.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "AddPower": "1",
-        "Description": "Equipped creatures you control get +1/+0 and have first strike.",
-        "Affected": "Creature.YouCtrl+equipped",
-        "AddKeyword": "First Strike",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

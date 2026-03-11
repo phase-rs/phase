@@ -1,82 +1,70 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "X X"
+                "cost": "X X",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw X cards. Activate only as a sorcery.",
-            "SorcerySpeed": "True"
-          }
+          "description": "Draw X cards. Activate only as a sorcery.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "AILogic": "Always",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-              "Mode": "Transform",
-              "SorcerySpeed": "True",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 R R G G"
+            "cost": "2 R R G G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "AILogic": "Always",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-            "Mode": "Transform",
-            "SorcerySpeed": "True",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Enrage — Whenever CARDNAME is dealt damage, put a +1/+1 counter on him. If he's attacking, untap him and there is an additional combat phase after this phase.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "ValidTarget": "Card.Self",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPutCounter",
-            "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, put a +1/+1 counter on him. If he's attacking, untap him and there is an additional combat phase after this phase."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_target": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

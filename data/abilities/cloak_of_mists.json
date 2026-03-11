@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't be blocked."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

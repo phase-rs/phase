@@ -2,36 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 WB WB",
+        "type": "Mana"
+      },
+      "description": "CARDNAME perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying. Activate only if CARDNAME isn't a Spirit.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Boar",
           "Spirit"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 WB WB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "RemoveCreatureTypes": "True",
-        "IsPresent": "Card.Self+!Spirit",
-        "SpellDescription": "CARDNAME perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying. Activate only if CARDNAME isn't a Spirit.",
-        "Duration": "Perpetual",
-        "StackDescription": "CARDNAME perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

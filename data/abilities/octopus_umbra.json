@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has base power and toughness 8/8 and has \"Whenever this creature attacks, you may tap target creature with power 8 or less.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "AddTrigger": "AttackTrigger",
-        "AddSVar": "TrigTap",
-        "SetToughness": "8",
-        "Description": "Enchanted creature has base power and toughness 8/8 and has \"Whenever this creature attacks, you may tap target creature with power 8 or less.\"",
-        "SetPower": "8"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 8
+        },
+        {
+          "type": "SetToughness",
+          "value": 8
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

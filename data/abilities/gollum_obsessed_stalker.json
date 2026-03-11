@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.namedGollum; Obsessed Stalker",
-        "Execute": "NoteDamaged",
-        "CombatDamage": "True",
-        "Static": "True",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "At the beginning of your end step, each opponent dealt combat damage this game by a creature named Gollum, Obsessed Stalker loses life equal to the amount of life you gained this turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, each opponent dealt combat damage this game by a creature named Gollum, Obsessed Stalker loses life equal to the amount of life you gained this turn.",
-        "Execute": "TrigLoseLife",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

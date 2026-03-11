@@ -1,31 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, you may draw a card.",
-        "Execute": "TrigDraw",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "Amount": "1",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Desert.YouCtrl",
-        "Description": "This spell costs {1} less to cast if you control a Desert."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Desert",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control a Desert.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, you may draw a card.",
+      "mode": "BecomesTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

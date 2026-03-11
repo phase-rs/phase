@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an enchantment spell, you may have target creature get -2/-2 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPump",
-        "ValidCard": "Enchantment",
-        "TriggerDescription": "Whenever you cast an enchantment spell, you may have target creature get -2/-2 until end of turn.",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

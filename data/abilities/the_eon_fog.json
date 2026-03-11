@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, untap all permanents you control."
+      "description": "Players skip their untap steps.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "ActiveZones": "Command",
-        "Skip": "True",
-        "Description": "Players skip their untap steps.",
-        "Phase": "Untap"
-      }
+      "description": "Whenever chaos ensues, untap all permanents you control.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "You begin the game with a 1/1 green Elf creature token on the battlefield. It has \"{T}: Add {G}.\"",
       "mode": "NewGame",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "TrigToken",
-        "Static": "True",
-        "TriggerDescription": "You begin the game with a 1/1 green Elf creature token on the battlefield. It has \"{T}: Add {G}.\""
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,51 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 R G"
+            "cost": "2 R G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy up to one target artifact or enchantment. Shuffle CARDNAME into your library from your graveyard, then draw a card.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "Destroy up to one target artifact or enchantment. Shuffle CARDNAME into your library from your graveyard, then draw a card.",
-        "TgtPrompt": "Select up to one target artifact or enchantment",
-        "ActivationZone": "Hand",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select up to one target artifact or enchantment"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, ABILITY",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigCharm",
-        "TriggerDescription": "When CARDNAME enters, ABILITY",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

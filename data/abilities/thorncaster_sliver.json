@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AE",
-        "AddTrigger": "ThorncasterAttackTrig",
-        "Description": "Sliver creatures you control have \"Whenever this creature attacks, it deals 1 damage to any target.\"",
-        "Affected": "Creature.Sliver+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Sliver creatures you control have \"Whenever this creature attacks, it deals 1 damage to any target.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

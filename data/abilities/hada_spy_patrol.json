@@ -1,39 +1,91 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-2 2/2 CARDNAME can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SetPower": "2",
-        "SetToughness": "2",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
-        "Description": "LEVEL 1-2 2/2 CARDNAME can't be blocked."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL"
       }
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 3+ 3/3 Shroud (This creature can't be the target of spells or abilities.),,,CARDNAME can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "3",
-        "IsPresent": "Card.Self+counters_GE3_LEVEL",
-        "AddKeyword": "Shroud",
-        "SetToughness": "3",
-        "Description": "LEVEL 3+ 3/3 Shroud (This creature can't be the target of spells or abilities.),,,CARDNAME can't be blocked.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ReplaceDyingDefined": "Targeted",
-        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.",
-        "TgtPrompt": "Select target creature or planeswalker"
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

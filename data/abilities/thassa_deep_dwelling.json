@@ -2,49 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap another target creature.",
-        "IsCurse": "True"
-      }
+      "description": "Tap another target creature.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to blue is less than five, NICKNAME is not a creature.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of your end step, exile up to one other target creature you control, then return that card to the battlefield under your control.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, exile up to one other target creature you control, then return that card to the battlefield under your control."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "LT5",
-        "RemoveType": "Creature",
-        "Description": "As long as your devotion to blue is less than five, NICKNAME is not a creature."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

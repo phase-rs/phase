@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of the end step, if three or more creatures died this turn, flip CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "CheckSVar": "X",
-            "Execute": "TrigFlip",
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "SVarCompare": "GE3",
-            "TriggerDescription": "At the beginning of the end step, if three or more creatures died this turn, flip CARDNAME."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each player's upkeep, that player sacrifices a creature.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "Execute": "TrigSac",
-            "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a creature.",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

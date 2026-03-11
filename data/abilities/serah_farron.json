@@ -1,70 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "OptionalDecider": "You",
-            "TriggerDescription": "At the beginning of combat on your turn, if you control two or more other legendary creatures, you may transform CARDNAME.",
-            "IsPresent": "Creature.Other+Legendary+YouCtrl",
-            "TriggerZones": "Battlefield",
-            "Phase": "BeginCombat",
-            "Execute": "TrigTransform",
-            "ValidPlayer": "You",
-            "PresentCompare": "GE2"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "Amount": "2",
-            "EffectZone": "Battlefield",
-            "Type": "Spell",
-            "Activator": "You",
-            "ValidCard": "Creature.Legendary",
-            "Description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
-            "OnlyFirstSpell": "True"
-          }
+          "description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
+          "effect_zone": "Battlefield",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of combat on your turn, if you control two or more other legendary creatures, you may transform CARDNAME.",
+          "mode": "Phase",
+          "optional": true,
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "ValidCard": "Creature.Legendary",
-            "Description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
-            "Amount": "2",
-            "EffectZone": "Battlefield",
-            "Type": "Spell",
-            "Activator": "You",
-            "OnlyFirstSpell": "True"
-          }
+          "description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
+          "effect_zone": "Battlefield",
+          "mode": "ReduceCost"
         },
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Legendary creatures you control get +2/+2.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "2",
-            "Description": "Legendary creatures you control get +2/+2.",
-            "Affected": "Creature.Legendary+YouCtrl",
-            "AddToughness": "2"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            },
+            {
+              "type": "AddToughness",
+              "value": 2
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

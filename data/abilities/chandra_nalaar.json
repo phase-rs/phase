@@ -2,82 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 1 damage to target player or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player or planeswalker",
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to target player or planeswalker."
-      }
+      "target_prompt": "Select target player or planeswalker"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals X damage to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to target creature.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -8,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 10 damage to target player or planeswalker and each creature that player or that planeswalker's controller controls.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 10
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -8
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DmgAll",
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 10 damage to target player or planeswalker and each creature that player or that planeswalker's controller controls.",
-        "DamageMap": "True",
-        "TgtPrompt": "Select a player or planeswalker",
-        "Ultimate": "True"
-      }
+      "target_prompt": "Select a player or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

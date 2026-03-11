@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "Execute": "TapCreature",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

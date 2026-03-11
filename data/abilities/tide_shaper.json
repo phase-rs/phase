@@ -1,30 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+kicked",
-        "Origin": "Any",
-        "Execute": "TrigAnimate",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, target land becomes an Island for as long as CARDNAME remains on the battlefield."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as an opponent controls an Island.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "IsPresent": "Island.OppCtrl",
-        "Description": "CARDNAME gets +1/+1 as long as an opponent controls an Island."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if it was kicked, target land becomes an Island for as long as CARDNAME remains on the battlefield.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

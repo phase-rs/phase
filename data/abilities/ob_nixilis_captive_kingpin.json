@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more opponents each lose exactly 1 life, put a +1/+1 counter on CARDNAME. Exile the top card of your library. Until your next end step, you may play that card.",
       "mode": "LifeLostAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Opponent",
-        "TriggerDescription": "Whenever one or more opponents each lose exactly 1 life, put a +1/+1 counter on CARDNAME. Exile the top card of your library. Until your next end step, you may play that card.",
-        "Execute": "TrigPutCounter",
-        "ValidAmountEach": "EQ1"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "NameCard",
-        "params": {
-          "SpellDescription": "Choose a nonland card name. Target player reveals their hand. CARDNAME deals 3 damage to that player for each card with the chosen name revealed this way. Search that player's graveyard, hand, and library for all cards with that name and exile them. Then that player shuffles their library.",
-          "ValidCards": "Card.nonLand",
-          "ValidDescription": "nonland",
-          "SubAbility": "DBReveal"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a nonland card name. Target player reveals their hand. CARDNAME deals 3 damage to that player for each card with the chosen name revealed this way. Search that player's graveyard, hand, and library for all cards with that name and exile them. Then that player shuffles their library.",
-        "ValidCards": "Card.nonLand",
-        "ValidDescription": "nonland",
-        "SubAbility": "DBReveal"
-      }
+      "description": "Choose a nonland card name. Target player reveals their hand. CARDNAME deals 3 damage to that player for each card with the chosen name revealed this way. Search that player's graveyard, hand, and library for all cards with that name and exile them. Then that player shuffles their library.",
+      "effect": {
+        "description": "Choose a nonland card name. Target player reveals their hand. CARDNAME deals 3 damage to that player for each card with the chosen name revealed this way. Search that player's graveyard, hand, and library for all cards with that name and exile them. Then that player shuffles their library.",
+        "name": "NameCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

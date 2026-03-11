@@ -2,46 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 U U",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "3"
-      }
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME becomes monstrous, target land becomes an Island in addition to its other types.",
       "mode": "BecomeMonstrous",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME becomes monstrous, target land becomes an Island in addition to its other types.",
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "controlsIsland",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless defending player controls an Island."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

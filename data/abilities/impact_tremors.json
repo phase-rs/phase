@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control enters, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDmg",
-        "TriggerDescription": "Whenever a creature you control enters, CARDNAME deals 1 damage to each opponent.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

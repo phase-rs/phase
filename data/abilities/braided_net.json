@@ -1,76 +1,86 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Tap",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent.Other+nonLand"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "SubCounter<1/NET>"
+                "cost": "SubCounter<1/NET>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Tap another target nonland permanent.",
+          "effect": {
+            "target": {
+              "filters": [
+                {
+                  "card_type": "Permanent",
+                  "properties": [
+                    {
+                      "type": "NonType",
+                      "value": "Land"
+                    }
+                  ],
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Tap"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Tap another target nonland permanent.",
-            "TgtPrompt": "Select another target nonland permanent",
-            "SubAbility": "DBEffect"
-          }
+          "target_prompt": "Select another target nonland permanent"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "3 U"
+                "cost": "3 U",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Draw a card for each artifact you control,",
-            "SubAbility": "DBChangeZone"
-          }
+          "description": "Draw a card for each artifact you control,",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

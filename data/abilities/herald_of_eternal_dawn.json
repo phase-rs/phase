@@ -1,32 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "You can't lose the game and your opponents can't win the game.",
       "event": {
         "Other": "GameLoss"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "Description": "You can't lose the game and your opponents can't win the game.",
-        "ValidPlayer": "You"
       }
     },
     {
+      "description": "You can't lose the game and your opponents can't win the game.",
       "event": {
         "Other": "GameWin"
-      },
-      "params": {
-        "Secondary": "True",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "Opponent",
-        "Description": "You can't lose the game and your opponents can't win the game."
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

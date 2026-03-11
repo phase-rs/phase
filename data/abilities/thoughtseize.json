@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DiscardValid": "Card.nonLand",
-        "Mode": "RevealYouChoose",
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

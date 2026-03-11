@@ -2,35 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U"
+        "cost": "2 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)"
-      }
+      "description": "Scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a noncreature spell, you may have CARDNAME become a 3/3 Sphinx creature with flying in addition to its other types until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a noncreature spell, you may have CARDNAME become a 3/3 Sphinx creature with flying in addition to its other types until end of turn.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Card.nonCreature"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

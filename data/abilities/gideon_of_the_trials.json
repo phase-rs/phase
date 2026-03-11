@@ -2,94 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "SpellDescription": "Until your next turn, prevent all damage target permanent would deal.",
-          "Duration": "UntilYourNextTurn",
-          "RememberObjects": "Targeted",
-          "ReplacementEffects": "RPrevent",
-          "ValidTgts": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Until your next turn, prevent all damage target permanent would deal.",
-        "Duration": "UntilYourNextTurn",
-        "RememberObjects": "Targeted",
-        "ReplacementEffects": "RPrevent",
-        "ValidTgts": "Permanent"
-      }
+      "description": "Until your next turn, prevent all damage target permanent would deal.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Human",
           "Soldier"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
-        "Defined": "Self",
-        "Planeswalker": "True",
-        "SubAbility": "GideonPrevent",
-        "Keywords": "Indestructible"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "Stackable": "False",
-          "SpellDescription": "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
-          "ReplacementEffects": "DBYouCantLose,DBOppCantWin",
-          "Duration": "Permanent",
-          "Name": "Emblem — Gideon of the Trials",
-          "AILogic": "Always"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Stackable": "False",
-        "SpellDescription": "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
-        "ReplacementEffects": "DBYouCantLose,DBOppCantWin",
-        "Duration": "Permanent",
-        "Name": "Emblem — Gideon of the Trials",
-        "AILogic": "Always"
-      }
+      "description": "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

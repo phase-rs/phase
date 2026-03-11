@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME attacks each combat if able unless you control another Ally.",
-        "IsPresent": "Ally.Other+YouCtrl",
-        "ValidCreature": "Card.Self"
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Ally",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME attacks each combat if able unless you control another Ally.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

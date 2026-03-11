@@ -1,31 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "CounterRemoved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "CounterType": "P1P1",
-        "Execute": "ProteanPutCounter",
-        "TriggerDescription": "Whenever a +1/+1 counter is removed from CARDNAME, put two +1/+1 counters on it at the beginning of the next end step.",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "If damage would be dealt to CARDNAME, prevent that damage and remove that many +1/+1 counters from it.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True",
-        "ValidTarget": "Card.Self",
-        "ActiveZones": "Battlefield",
-        "AlwaysReplace": "True",
-        "Description": "If damage would be dealt to CARDNAME, prevent that damage and remove that many +1/+1 counters from it."
+      "description": "Whenever a +1/+1 counter is removed from CARDNAME, put two +1/+1 counters on it at the beginning of the next end step.",
+      "mode": "CounterRemoved",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

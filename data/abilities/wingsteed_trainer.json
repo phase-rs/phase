@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or attacks, conjure a Stormfront Pegasus card into your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters or attacks, conjure a Stormfront Pegasus card into your hand.",
-        "Execute": "TrigConjure"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, conjure a Stormfront Pegasus card into your hand.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, conjure a Stormfront Pegasus card into your hand.",
-        "Execute": "TrigConjure",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

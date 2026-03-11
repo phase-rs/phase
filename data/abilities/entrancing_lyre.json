@@ -2,60 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerLEX"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Tap target creature with power X or less. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature with power X or less. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
-        "RememberTapped": "True",
-        "TgtPrompt": "Select target creature with power X or less",
-        "AlwaysRemember": "True",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target creature with power X or less"
     }
   ],
-  "triggers": [
-    {
-      "mode": "Untaps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Static": "True",
-        "Execute": "ClearRemembered",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.IsRemembered",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

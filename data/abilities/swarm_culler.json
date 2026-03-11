@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped, you may sacrifice another creature or artifact. If you do, draw a card.",
       "mode": "Taps",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever this creature becomes tapped, you may sacrifice another creature or artifact. If you do, draw a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

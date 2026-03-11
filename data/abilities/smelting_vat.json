@@ -2,45 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 8,
-        "destination": "Battlefield"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "WithTotalCMC": "X",
-        "ChangeNum": "2",
-        "ChangeValid": "Artifact.nonCreature+YouOwn",
-        "Optional": "True",
-        "SpellDescription": "Reveal the top eight cards of your library. Put up to two noncreature artifact cards with total mana value less than or equal to the sacrificed artifact's mana value from among them onto the battlefield, and the rest on the bottom of your library in a random order.",
-        "Reveal": "True",
-        "RestRandomOrder": "True",
-        "DestinationZone2": "Library"
-      }
+      "description": "Reveal the top eight cards of your library. Put up to two noncreature artifact cards with total mana value less than or equal to the sacrificed artifact's mana value from among them onto the battlefield, and the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 8,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

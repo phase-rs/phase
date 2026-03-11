@@ -1,55 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent.MultiColor"
-            }
-          },
           "cost": null,
+          "description": "Destroy target multicolored permanent.",
+          "effect": {
+            "target": {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "MultiColor"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target multicolored permanent",
-            "SpellDescription": "Destroy target multicolored permanent."
-          }
+          "target_prompt": "Select target multicolored permanent"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "DestroyAll",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy all Auras and Equipment.",
-            "ValidCards": "Aura,Equipment"
-          }
+          "description": "Destroy all Auras and Equipment.",
+          "effect": {
+            "target": {
+              "type": "Any"
+            },
+            "type": "DestroyAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

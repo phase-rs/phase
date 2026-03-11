@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.White,Planeswalker.White,Creature.Green,Planeswalker.Green"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or planeswalker that's green or white. You gain 1 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White,Planeswalker.White,Creature.Green,Planeswalker.Green"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature or planeswalker that's green or white. You gain 1 life.",
-        "TgtPrompt": "Select target creature or planeswalker that's green or white",
-        "SubAbility": "DBGainLife"
-      }
+      "target_prompt": "Select target creature or planeswalker that's green or white"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

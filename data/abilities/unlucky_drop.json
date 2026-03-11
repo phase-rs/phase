@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Artifact"
-        }
-      },
       "cost": null,
+      "description": "Target artifact or creature's owner puts it on the top or bottom of their library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature,Artifact",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
-        "DestinationAlternative": "Library",
-        "SpellDescription": "Target artifact or creature's owner puts it on the top or bottom of their library.",
-        "LibraryPositionAlternative": "-1",
-        "AlternativeDecider": "TargetedOwner",
-        "TgtPrompt": "Select target artifact or creature"
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

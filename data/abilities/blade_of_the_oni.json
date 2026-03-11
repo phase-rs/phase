@@ -1,21 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has base power and toughness 5/5, has menace, and is a black Demon in addition to its other colors and types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "SetPower": "5",
-        "AddKeyword": "Menace",
-        "AddColor": "Black",
-        "SetToughness": "5",
-        "AddType": "Demon",
-        "Description": "Equipped creature has base power and toughness 5/5, has menace, and is a black Demon in addition to its other colors and types."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Demon",
+          "type": "AddType"
+        },
+        {
+          "color": "Black",
+          "type": "AddColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

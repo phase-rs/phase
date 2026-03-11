@@ -2,42 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W"
+        "cost": "W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target permanent becomes white until end of turn.",
-        "OverwriteColors": "True",
-        "Colors": "White"
-      }
+      "description": "Target permanent becomes white until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, destroy target enchantment.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When CARDNAME enters, destroy target enchantment.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

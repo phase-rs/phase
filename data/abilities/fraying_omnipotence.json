@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the creatures they control. Round up each time.",
-          "RepeatSubAbility": "DBLoseLife",
-          "AILifeThreshold": "1",
-          "RepeatPlayers": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the creatures they control. Round up each time.",
-        "RepeatSubAbility": "DBLoseLife",
-        "AILifeThreshold": "1",
-        "RepeatPlayers": "Player"
-      }
+      "description": "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the creatures they control. Round up each time.",
+      "effect": {
+        "description": "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the creatures they control. Round up each time.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

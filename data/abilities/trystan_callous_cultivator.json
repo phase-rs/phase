@@ -1,70 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever this creature enters or transforms into CARDNAME, mill three cards. Then if there is an Elf card in your graveyard, you gain 2 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill",
-            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, mill three cards. Then if there is an Elf card in your graveyard, you gain 2 life.",
-            "Destination": "Battlefield",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever this creature enters or transforms into CARDNAME, mill three cards. Then if there is an Elf card in your graveyard, you gain 2 life.",
           "mode": "Transformed",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Secondary": "True",
-            "Execute": "TrigMill",
-            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, mill three cards. Then if there is an Elf card in your graveyard, you gain 2 life."
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your first main phase, you may pay {B}. If you do, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your first main phase, you may pay {B}. If you do, transform NICKNAME.",
-            "Phase": "Main1",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "Execute": "TrigTransform"
-          }
+          "phase": "PreCombatMain",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever this creature transforms into CARDNAME, mill three cards, then you may exile an Elf card from your graveyard. If you do, each opponent loses 2 life.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "Whenever this creature transforms into CARDNAME, mill three cards, then you may exile an Elf card from your graveyard. If you do, each opponent loses 2 life.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your first main phase, you may pay {G}. If you do, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Main1",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "ValidPlayer": "You",
-            "TriggerDescription": "At the beginning of your first main phase, you may pay {G}. If you do, transform NICKNAME."
-          }
+          "phase": "PreCombatMain",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,25 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk away from CARDNAME, each player returns all creature cards from their graveyard to the battlefield.",
       "mode": "PlaneswalkedFrom",
-      "params": {
-        "TriggerDescription": "When you planeswalk away from CARDNAME, each player returns all creature cards from their graveyard to the battlefield.",
-        "Execute": "OrzhovaDeal",
-        "ValidCard": "Plane.Self"
+      "valid_card": {
+        "card_type": "Plane",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, for each opponent, exile up to one target creature card from that player's graveyard.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, for each opponent, exile up to one target creature card from that player's graveyard.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

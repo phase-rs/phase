@@ -1,36 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, tap up to two target creatures you don't control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "characteristic_defining": true,
+      "condition": {
+        "filter": {
+          "card_type": "Spirit",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell has flash as long as you control a Spirit.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Spirit.YouCtrl",
-        "CharacteristicDefining": "True",
-        "Description": "This spell has flash as long as you control a Spirit.",
-        "AddKeyword": "Flash"
-      }
+      "modifications": [
+        {
+          "keyword": "Flash",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Enchanted creature gets +1/+2.",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you cast this spell, tap up to two target creatures you don't control.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

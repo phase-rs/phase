@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Blocks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME blocks, it gets +1/+1 until end of turn for each creature it's blocking.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME can block any number of creatures.",
-        "Affected": "Card.Self",
-        "CanBlockAny": "True"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME can block any number of creatures.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME blocks, it gets +1/+1 until end of turn for each creature it's blocking.",
+      "mode": "Blocks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

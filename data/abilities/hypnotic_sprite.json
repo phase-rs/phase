@@ -1,39 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card.cmcLE3"
-            }
-          },
           "cost": null,
+          "description": "Counter target spell with mana value 3 or less. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Counter target spell with mana value 3 or less. (Then exile this card. You may cast the creature later from exile.)",
-            "TargetType": "Spell",
-            "TgtPrompt": "Select target spell with mana value 3 or less"
-          }
+          "target_prompt": "Select target spell with mana value 3 or less"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

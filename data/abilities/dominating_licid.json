@@ -2,56 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Enchantment",
-          "Aura"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U U"
+            "cost": "1 U U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Enchantment",
+          "Aura"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCardTypes": "True",
-        "RemoveEnchantmentTypes": "True",
-        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
-        "Defined": "Self",
-        "Duration": "Permanent",
-        "RevertCost": "U",
-        "RemoveThisAbility": "True",
-        "Keywords": "Enchant:Creature",
-        "SubAbility": "DBAttach"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You control enchanted creature.",
-        "Affected": "Card.EnchantedBy",
-        "GainControl": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

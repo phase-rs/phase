@@ -2,56 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayLife<1>",
+        "type": "Mana"
+      },
+      "description": "Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Exile",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayLife<1>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Necropotence",
-        "AILifeThreshold": "1",
-        "ExileFaceDown": "True",
-        "RememberChanged": "True",
-        "Defined": "TopOfLibrary",
-        "SpellDescription": "Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.",
-        "SubAbility": "DelayedReturn"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Discarded",
-      "params": {
-        "Execute": "TrigChange",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerDescription": "Whenever you discard a card, exile that card from your graveyard.",
-        "TriggerZones": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "Phase": "Draw",
-        "Skip": "True",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "Description": "Skip your draw step."
+      "description": "Whenever you discard a card, exile that card from your graveyard.",
+      "mode": "Discarded",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

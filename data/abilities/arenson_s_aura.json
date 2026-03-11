@@ -2,57 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target enchantment."
-      }
+      "description": "Destroy target enchantment.",
+      "effect": {
+        "target": {
+          "card_type": "Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U U"
+        "cost": "3 U U",
+        "type": "Mana"
       },
+      "description": "Counter target enchantment spell.",
+      "effect": {
+        "target": {
+          "card_type": "Enchantment",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target enchantment spell.",
-        "TgtPrompt": "Select target enchantment spell",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target enchantment spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

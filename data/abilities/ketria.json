@@ -1,37 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCounter",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigCounter",
-        "Phase": "Upkeep",
-        "TriggerZones": "Command",
-        "Secondary": "True",
-        "ValidPlayer": "You",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control."
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, exile cards from the top of your library until you exile a nonland permanent card. Put that card onto the battlefield or into your hand.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, exile cards from the top of your library until you exile a nonland permanent card. Put that card onto the battlefield or into your hand.",
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,39 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, you lose the game.",
-        "Execute": "TrigLose"
-      }
+      "description": "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+      "event": "DamageDone"
+    },
+    {
+      "description": "If you would gain life, draw that many cards instead.",
+      "event": "GainLife"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
-        "ValidTarget": "You",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ExileCards"
-      }
-    },
-    {
-      "event": "GainLife",
-      "params": {
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "AILogic": "LichDraw",
-        "ReplaceWith": "Draw",
-        "Description": "If you would gain life, draw that many cards instead."
+      "description": "When CARDNAME leaves the battlefield, you lose the game.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,52 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "tapXType<1/Vampire>"
+                "cost": "tapXType<1/Vampire>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME."
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

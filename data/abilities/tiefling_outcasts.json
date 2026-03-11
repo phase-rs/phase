@@ -1,17 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Demon",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Devil.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Imp.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Tiefling.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Demons, Devils, Imps, and Tieflings you control get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Demon.Other+YouCtrl,Devil.Other+YouCtrl,Imp.Other+YouCtrl,Tiefling.Other+YouCtrl",
-        "Description": "Other Demons, Devils, Imps, and Tieflings you control get +1/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

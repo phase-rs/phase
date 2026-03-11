@@ -1,93 +1,85 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, exile the top card of your library. If it's a nonland card, you may cast that card this turn.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. If it's a nonland card, you may cast that card this turn.",
-            "Execute": "TrigExile",
-            "Phase": "Upkeep",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         },
         {
+          "description": "Whenever you cast your third spell in a turn, you may transform CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "ValidActivatingPlayer": "You",
-            "OptionalDecider": "You",
-            "ValidCard": "Card.YouCtrl",
-            "ActivatorThisTurnCast": "EQ3",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "Whenever you cast your third spell in a turn, you may transform CARDNAME."
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "R",
-            "params": {
-              "Amount": "1",
-              "SpellDescription": "Add {R}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "SpellDescription": "Add {R}."
-          }
+          "description": "Add {R}.",
+          "effect": {
+            "produced": [
+              "Red"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "costs": [
+              {
+                "cost": "2 R",
+                "type": "Mana"
+              },
+              {
+                "type": "Tap"
+              }
+            ],
+            "type": "Composite"
+          },
+          "description": "CARDNAME deals 3 damage to any target.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": "2 R"
-              },
-              {
-                "type": "Tap"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 3 damage to any target."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

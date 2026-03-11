@@ -2,35 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Legendary"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U U"
+            "cost": "U U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Gain control of target legendary permanent. (This effect lasts indefinitely.)",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target legendary permanent",
-        "SpellDescription": "Gain control of target legendary permanent. (This effect lasts indefinitely.)"
-      }
+      "target_prompt": "Select target legendary permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

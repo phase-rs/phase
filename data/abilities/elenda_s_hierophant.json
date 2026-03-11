@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, put a +1/+1 counter on CARDNAME.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME dies, create X 1/1 white Vampire creature tokens with lifelink, where X is its power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, create X 1/1 white Vampire creature tokens with lifelink, where X is its power.",
-        "Origin": "Battlefield",
-        "Execute": "TrigToken",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

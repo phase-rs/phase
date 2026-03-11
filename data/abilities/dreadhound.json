@@ -1,42 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, mill three cards. (Put the top three cards of your library into your graveyard.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigMill",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, mill three cards. (Put the top three cards of your library into your graveyard.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigLoseLife",
-        "Secondary": "True",
-        "ValidCard": "Creature",
-        "TriggerDescription": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
-        "Origin": "Library"
+      "origin": "Library",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

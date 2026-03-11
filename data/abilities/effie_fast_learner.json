@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Survival — At the beginning of your second main phase, if NICKNAME is tapped, put a +1/+1 counter on each tapped creature you control. Then seek a Survivor card with mana value less than or equal to the number of tapped creatures you control.",
       "mode": "Phase",
-      "params": {
-        "PresentDefined": "Self",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if NICKNAME is tapped, put a +1/+1 counter on each tapped creature you control. Then seek a Survivor card with mana value less than or equal to the number of tapped creatures you control.",
-        "IsPresent": "Card.tapped",
-        "TriggerZones": "Battlefield",
-        "PhaseCount": "2",
-        "ValidPlayer": "You",
-        "Phase": "Main",
-        "Execute": "TrigPutCounterAll"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

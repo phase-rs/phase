@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source deals damage to CARDNAME, that source's controller gets a poison counter.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "Whenever a source deals damage to CARDNAME, that source's controller gets a poison counter.",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

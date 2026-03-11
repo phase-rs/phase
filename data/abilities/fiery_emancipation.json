@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Permanent,Player",
-        "ReplaceWith": "Dmg3",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "Description": "If a source you control would deal damage to a permanent or player, it deals triple that damage to that permanent or player instead."
-      }
+      "description": "If a source you control would deal damage to a permanent or player, it deals triple that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

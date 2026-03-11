@@ -2,58 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayEnergy<1>"
+            "cost": "PayEnergy<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Tap target creature or planeswalker. Its activated abilities can't be activated this turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "Tap target creature or planeswalker. Its activated abilities can't be activated this turn."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigEnergy",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters)."
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield"
+      "description": "When CARDNAME enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

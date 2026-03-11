@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — CARDNAME has double strike as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Condition": "Metalcraft",
-        "Description": "Metalcraft — CARDNAME has double strike as long as you control three or more artifacts.",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

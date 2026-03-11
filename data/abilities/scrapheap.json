@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact or enchantment is put into your graveyard from the battlefield, you gain 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Artifact.YouCtrl,Enchantment.YouCtrl",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever an artifact or enchantment is put into your graveyard from the battlefield, you gain 1 life.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Enchantment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

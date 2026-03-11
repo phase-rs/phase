@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to CARDNAME.",
-        "Origin": "Any",
-        "Execute": "TrigConjure",
-        "Destination": "Battlefield"
-      }
+      "description": "If damage would be dealt to CARDNAME, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to CARDNAME.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If damage would be dealt to CARDNAME, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to CARDNAME.",
-        "ValidTarget": "Card.Self+equipped",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DBImmediateTrigger",
-        "PreventionEffect": "True"
+      "description": "When CARDNAME enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

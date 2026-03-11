@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Swamp.YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Graveyard",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a Swamp you control enters, you may return CARDNAME from your graveyard to your hand.",
-        "Execute": "TrigChange"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Swamp you control enters, you may return CARDNAME from your graveyard to your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Swamp",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

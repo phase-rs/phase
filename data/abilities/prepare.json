@@ -1,58 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Untap",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Untap target creature. It gets +2/+2 and gains lifelink until end of turn.",
-            "SubAbility": "DBPump"
-          }
+          "description": "Untap target creature. It gets +2/+2 and gains lifelink until end of turn.",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Untap"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Target creature you control fights target creature an opponent controls.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature you control fights target creature an opponent controls.",
-            "SubAbility": "DBFight",
-            "TgtPrompt": "Choose target creature you control"
-          }
+          "target_prompt": "Choose target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

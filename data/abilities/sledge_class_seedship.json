@@ -1,19 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 7+ Flying,,,Whenever this Spacecraft attacks, you may put a creature card from your hand onto the battlefield.",
       "mode": "Continuous",
-      "params": {
-        "AddTrigger": "AttackTrig",
-        "Description": "STATION 7+ Flying,,,Whenever this Spacecraft attacks, you may put a creature card from your hand onto the battlefield.",
-        "AddType": "Creature",
-        "Affected": "Card.Self+counters_GE7_CHARGE",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

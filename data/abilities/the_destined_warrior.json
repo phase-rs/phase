@@ -1,30 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "At the beginning of combat on your turn, creatures you control get +1/+0 until end of turn. If you have a full party, creatures you control get +3/+0 until end of turn instead.",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "ValidCard": "Cleric,Rogue,Warrior,Wizard",
-        "Description": "Cleric, Rogue, Warrior, and Wizard spells you cast cost {1} less to cast.",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Cleric, Rogue, Warrior, and Wizard spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, creatures you control get +1/+0 until end of turn. If you have a full party, creatures you control get +3/+0 until end of turn instead.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

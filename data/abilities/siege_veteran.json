@@ -1,29 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever another nontoken Soldier you control dies, create a 1/1 colorless Soldier artifact creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Soldier.Other+!token+YouCtrl",
-        "TriggerDescription": "Whenever another nontoken Soldier you control dies, create a 1/1 colorless Soldier artifact creature token.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Soldier",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,61 +1,98 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attacks, exile up to one other target tapped creature or Vehicle. For as long as that card remains exiled, its owner may play it.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever NICKNAME attacks, exile up to one other target tapped creature or Vehicle. For as long as that card remains exiled, its owner may play it.",
-            "Execute": "TrigExile"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever a player plays a card exiled with NICKNAME, you draw a card and convert NICKNAME.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever a player plays a card exiled with NICKNAME, you draw a card and convert NICKNAME.",
-            "ValidCard": "Card.ExiledWithSourceLKI",
-            "Execute": "TrigDraw"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ExiledWithSourceLKI"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever a player plays a card exiled with NICKNAME, you draw a card and convert NICKNAME.",
           "mode": "LandPlayed",
-          "params": {
-            "TriggerDescription": "Whenever a player plays a card exiled with NICKNAME, you draw a card and convert NICKNAME.",
-            "Secondary": "True",
-            "Execute": "TrigDraw",
-            "ValidCard": "Card.ExiledWithSourceLKI",
-            "TriggerZones": "Battlefield"
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "ExiledWithSourceLKI"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever another creature or Vehicle you control enters, put a +1/+1 counter on NICKNAME. If this is the second time this ability has resolved this turn, convert NICKNAME.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "Whenever another creature or Vehicle you control enters, put a +1/+1 counter on NICKNAME. If this is the second time this ability has resolved this turn, convert NICKNAME.",
-            "Destination": "Battlefield",
-            "ValidCard": "Creature.YouCtrl+Other,Vehicle.YouCtrl+Other",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigCounter"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Other,Vehicle.YouCtrl"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,33 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of each end step, if you drew two or more cards this turn, you may put a quest counter on CARDNAME.",
-        "Phase": "End of Turn",
-        "SVarCompare": "GE2"
-      }
+      "description": "As long as CARDNAME has six or more quest counters on it, if you would draw a card, you may instead search your library for a card, put that card into your hand, then shuffle.",
+      "event": "Draw"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "ValidPlayer": "You",
-        "IsPresent": "Card.Self+counters_GE6_QUEST",
-        "Optional": "True",
-        "ActiveZones": "Battlefield",
-        "Description": "As long as CARDNAME has six or more quest counters on it, if you would draw a card, you may instead search your library for a card, put that card into your hand, then shuffle.",
-        "ReplaceWith": "Tutor"
-      }
+      "description": "At the beginning of each end step, if you drew two or more cards this turn, you may put a quest counter on CARDNAME.",
+      "mode": "Phase",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

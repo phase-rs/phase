@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
       "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "Description": "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.!token+OppOwn",
-        "ReplaceWith": "Exile"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

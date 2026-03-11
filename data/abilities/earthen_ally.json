@@ -2,37 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Earthbend",
-        "params": {
-          "Num": "5",
-          "SpellDescription": "Earthbend 5. (Target land you control becomes a 0/0 creature with haste that's still a land. Put five +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W U B R G"
+        "cost": "2 W U B R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Num": "5",
-        "SpellDescription": "Earthbend 5. (Target land you control becomes a 0/0 creature with haste that's still a land. Put five +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)"
-      }
+      "description": "Earthbend 5. (Target land you control becomes a 0/0 creature with haste that's still a land. Put five +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+      "effect": {
+        "description": "Earthbend 5. (Target land you control becomes a 0/0 creature with haste that's still a land. Put five +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+        "name": "Earthbend",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "This creature gets +1/+0 for each color among Allies you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "This creature gets +1/+0 for each color among Allies you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "ValidZone": "Sideboard",
-          "ValidTgts": "Opponent",
-          "WithoutManaCost": "True",
-          "SpellDescription": "Look at target opponent's sideboard. You may cast a card from that sideboard without paying its mana cost.",
-          "Optional": "True",
-          "Valid": "Card.TargetedPlayerCtrl",
-          "StackDescription": "SpellDescription",
-          "SubAbility": "DBExile"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidZone": "Sideboard",
-        "ValidTgts": "Opponent",
-        "WithoutManaCost": "True",
-        "SpellDescription": "Look at target opponent's sideboard. You may cast a card from that sideboard without paying its mana cost.",
-        "Optional": "True",
-        "Valid": "Card.TargetedPlayerCtrl",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBExile"
-      }
+      "description": "Look at target opponent's sideboard. You may cast a card from that sideboard without paying its mana cost.",
+      "effect": {
+        "description": "Look at target opponent's sideboard. You may cast a card from that sideboard without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

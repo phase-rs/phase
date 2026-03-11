@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put a +1/+1 counter on enchanted creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on enchanted creature.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, double the number of +1/+1 counters on enchanted creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "DBPump",
-        "TriggerDescription": "At the beginning of your upkeep, double the number of +1/+1 counters on enchanted creature."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

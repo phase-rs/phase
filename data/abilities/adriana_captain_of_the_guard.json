@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have melee. (If a creature has multiple instances of melee, each triggers separately.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other creatures you control have melee. (If a creature has multiple instances of melee, each triggers separately.)",
-        "AddKeyword": "Melee",
-        "Affected": "Creature.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Melee",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,41 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Player",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "ReplacementEffects": "RigRoll",
-          "SpellDescription": "The next time target player would roll one or more dice this turn, instead they roll that many dice plus one and you choose one of those rolls to ignore."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "ReplacementEffects": "RigRoll",
-        "SpellDescription": "The next time target player would roll one or more dice this turn, instead they roll that many dice plus one and you choose one of those rolls to ignore."
-      }
+      "description": "The next time target player would roll one or more dice this turn, instead they roll that many dice plus one and you choose one of those rolls to ignore.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

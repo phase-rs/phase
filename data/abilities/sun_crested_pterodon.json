@@ -1,18 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Dinosaur"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has vigilance as long as you control another Dinosaur.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has vigilance as long as you control another Dinosaur.",
-        "AddKeyword": "Vigilance",
-        "IsPresent": "Permanent.Dinosaur+YouCtrl+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,61 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "StaticAbilities": "STCantPrevent",
-              "SpellDescription": "Damage can't be prevented this turn. If a source you control would deal damage this turn, it deals double that damage instead.",
-              "ReplacementEffects": "InsultDamageEvent"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "StaticAbilities": "STCantPrevent",
-            "SpellDescription": "Damage can't be prevented this turn. If a source you control would deal damage this turn, it deals double that damage instead.",
-            "ReplacementEffects": "InsultDamageEvent"
-          }
+          "description": "Damage can't be prevented this turn. If a source you control would deal damage this turn, it deals double that damage instead.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 2 damage to target creature and 2 damage to target player or planeswalker.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 2
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 2 damage to target creature and 2 damage to target player or planeswalker.",
-            "SubAbility": "DBDealDamage"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

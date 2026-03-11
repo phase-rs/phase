@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card and reveal it. If it isn't a land card, discard it.",
-        "RememberDrawn": "True",
-        "Reveal": "All",
-        "SubAbility": "DBDiscard",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Draw a card and reveal it. If it isn't a land card, discard it.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

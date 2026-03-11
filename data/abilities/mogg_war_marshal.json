@@ -1,30 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or dies, create a 1/1 red Goblin creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters or dies, create a 1/1 red Goblin creature token.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or dies, create a 1/1 red Goblin creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "When CARDNAME enters or dies, create a 1/1 red Goblin creature token.",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Execute": "TrigToken",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

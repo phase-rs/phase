@@ -1,22 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+3, is black, has trample, and has \"At the beginning of your upkeep, sacrifice a creature.\"",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Threshold",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+3, is black, has trample, and has \"At the beginning of your upkeep, sacrifice a creature.\"",
-        "AddTrigger": "TrigSacrificeCreature",
-        "Affected": "Card.Self",
-        "SetColor": "Black",
-        "AddKeyword": "Trample",
-        "AddPower": "3",
-        "AddToughness": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "colors": [
+            "Black"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

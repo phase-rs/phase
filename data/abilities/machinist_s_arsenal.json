@@ -1,19 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2 for each artifact you control and is an Artificer in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "AddType": "Artificer",
-        "Description": "Equipped creature gets +2/+2 for each artifact you control and is an Artificer in addition to its other types.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "core_type": "Artificer",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

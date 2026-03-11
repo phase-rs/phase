@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "Destination": "Graveyard",
-        "Execute": "DelTrig",
-        "TriggerDescription": "Whenever equipped creature dies, return that card to the battlefield under its owner's control at the beginning of the next end step.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Lifelink",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has lifelink."
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature dies, return that card to the battlefield under its owner's control at the beginning of the next end step.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

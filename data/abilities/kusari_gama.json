@@ -1,28 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature.blocking",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever equipped creature deals damage to a blocking creature, CARDNAME deals that much damage to each other creature defending player controls.",
-        "Execute": "GamaDamage",
-        "ValidSource": "Card.EquippedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{2}: This creature gets +1/+0 until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "AddAbility": "GamaPump",
-        "Description": "Equipped creature has \"{2}: This creature gets +1/+0 until end of turn.\""
-      }
+      "modifications": [
+        {
+          "ability": "GamaPump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature deals damage to a blocking creature, CARDNAME deals that much damage to each other creature defending player controls.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,36 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "CARDNAME is also a Cleric, Rogue, Warrior, and Wizard.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME is also a Cleric, Rogue, Warrior, and Wizard.",
-        "Affected": "Card.Self",
-        "AddType": "Cleric & Rogue & Warrior & Wizard",
-        "CharacteristicDefining": "True"
-      }
+      "modifications": [
+        {
+          "core_type": "Cleric & Rogue & Warrior & Wizard",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

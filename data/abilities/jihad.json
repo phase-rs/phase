@@ -1,30 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "When the chosen player controls no nontoken permanents of the chosen color, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Permanent.!token+ChosenColor+ChosenCtrl",
-        "PresentCompare": "EQ0"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "ChosenColor"
+            },
+            {
+              "type": "Other",
+              "value": "ChosenCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "White creatures get +2/+1 as long as the chosen player controls a nontoken permanent of the chosen color.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.White",
-        "AddPower": "2",
-        "AddToughness": "1",
-        "IsPresent": "Permanent.!token+ChosenColor+ChosenCtrl",
-        "Description": "White creatures get +2/+1 as long as the chosen player controls a nontoken permanent of the chosen color."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When the chosen player controls no nontoken permanents of the chosen color, sacrifice CARDNAME.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

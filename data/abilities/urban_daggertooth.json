@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever CARDNAME is dealt damage, proliferate.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, proliferate.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigProliferate",
-        "ValidTarget": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,41 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "8",
+        "type": "Mana"
+      },
+      "description": "Return this card from your graveyard to the battlefield tapped with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "8"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Tapped": "True",
-        "SpellDescription": "Return this card from your graveyard to the battlefield tapped with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
-        "WithCountersType": "FINALITY",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "This creature can't be blocked except by three or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "This creature can't be blocked except by three or more creatures.",
-        "Min": "3"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

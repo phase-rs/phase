@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, CARDNAME gains banding until end of combat.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "Execute": "TrigBanding",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, CARDNAME gains banding until end of combat."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever CARDNAME becomes blocked by a Wall, destroy that Wall at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes blocked by a Wall, destroy that Wall at end of combat.",
-        "ValidCard": "Card.Self",
-        "ValidBlocker": "Creature.Wall",
-        "Execute": "DelayAttackTrig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

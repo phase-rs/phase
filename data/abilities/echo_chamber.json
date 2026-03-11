@@ -2,50 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SorcerySpeed": "True",
-          "TargetingPlayer": "Player.Opponent",
-          "SpellDescription": "An opponent chooses target creature they control. Create a token that's a copy of that creature. That token gains haste until end of turn. Exile the token at the beginning of the next end step. Activate only as a sorcery.",
-          "PumpKeywords": "Haste",
-          "TargetingPlayerControls": "True",
-          "PumpDuration": "EOT",
-          "AtEOT": "Exile",
-          "TgtPrompt": "Select target creature you control",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "An opponent chooses target creature they control. Create a token that's a copy of that creature. That token gains haste until end of turn. Exile the token at the beginning of the next end step. Activate only as a sorcery.",
+      "effect": {
+        "description": "An opponent chooses target creature they control. Create a token that's a copy of that creature. That token gains haste until end of turn. Exile the token at the beginning of the next end step. Activate only as a sorcery.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "TargetingPlayer": "Player.Opponent",
-        "SpellDescription": "An opponent chooses target creature they control. Create a token that's a copy of that creature. That token gains haste until end of turn. Exile the token at the beginning of the next end step. Activate only as a sorcery.",
-        "PumpKeywords": "Haste",
-        "TargetingPlayerControls": "True",
-        "PumpDuration": "EOT",
-        "AtEOT": "Exile",
-        "TgtPrompt": "Select target creature you control",
-        "ValidTgts": "Creature"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

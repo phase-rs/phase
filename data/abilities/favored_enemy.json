@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target creature you control fights up to one target creature you don't control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, target creature you control fights up to one target creature you don't control.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigFight"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature an opponent controls of the noted type dies, put a +1/+1 counter on target creature you control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature an opponent controls of the noted type dies, put a +1/+1 counter on target creature you control.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.OppCtrl+NotedType",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NotedType"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

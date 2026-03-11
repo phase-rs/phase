@@ -1,37 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Treasure"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Treasures you control have \"{T}, Sacrifice this artifact: Add two mana of any one color.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Secondary": "True",
-        "ValidSource": "Spell",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddAbility": "Mana",
-        "Affected": "Card.Treasure+YouCtrl",
-        "Description": "Treasures you control have \"{T}, Sacrifice this artifact: Add two mana of any one color.\""
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

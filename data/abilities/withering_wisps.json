@@ -2,47 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to each creature and each player. Activate no more times each turn than the number of snow Swamps you control.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidPlayers": "Player",
-        "AILogic": "DmgAllCreaturesAndPlayers",
-        "ActivationLimit": "X",
-        "ValidDescription": "each creature and each player.",
-        "ValidCards": "Creature",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature and each player. Activate no more times each turn than the number of snow Swamps you control."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, if no creatures are on the battlefield, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "At the beginning of the end step, if no creatures are on the battlefield, sacrifice CARDNAME.",
-        "IsPresent": "Creature",
-        "Phase": "End of Turn",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,53 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Zombie>",
+        "type": "Mana"
+      },
+      "description": "Target land becomes a Swamp until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Swamp"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Zombie>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveLandTypes": "True",
-        "SpellDescription": "Target land becomes a Swamp until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Zombie>"
+        "cost": "tapXType<1/Zombie>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Landwalk:Swamp",
-        "SpellDescription": "Target creature gains swampwalk until end of turn."
-      }
+      "description": "Target creature gains swampwalk until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

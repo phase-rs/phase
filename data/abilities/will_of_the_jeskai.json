@@ -2,29 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "MinCharmNum": "1",
-          "CharmNum": "Count$Compare Y GE1.2.1",
-          "Choices": "DBWheel,DBFlames",
-          "AdditionalDescription": ". If you control a commander as you cast this spell, you may choose both instead."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MinCharmNum": "1",
-        "CharmNum": "Count$Compare Y GE1.2.1",
-        "Choices": "DBWheel,DBFlames",
-        "AdditionalDescription": ". If you control a commander as you cast this spell, you may choose both instead."
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

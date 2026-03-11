@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on another target tapped creature you control."
+      "description": "If a nontoken creature an opponent owns would die or a creature card not on the battlefield would be put into an opponent's graveyard, exile that card instead.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          },
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "If a nontoken creature an opponent owns would die or a creature card not on the battlefield would be put into an opponent's graveyard, exile that card instead.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Exile",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Creature+!token+OppOwn"
+      "description": "Whenever CARDNAME attacks, put a +1/+1 counter on another target tapped creature you control.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

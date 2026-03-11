@@ -1,18 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "EnchantedPlayerCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures enchanted player controls gets -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures enchanted player controls gets -1/-1.",
-        "AddPower": "-1",
-        "Affected": "Creature.EnchantedPlayerCtrl",
-        "AddToughness": "-1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

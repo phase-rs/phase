@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Warrior",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YourTeamCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Warriors your team controls have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Warrior.YourTeamCtrl",
-        "AddKeyword": "Haste",
-        "Description": "Warriors your team controls have haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,53 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "RememberObjects": "Self",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "CARDNAME can't be blocked this turn.",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "RememberObjects": "Self",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "CARDNAME can't be blocked this turn.",
-        "ExileOnMoved": "Battlefield"
-      }
+      "description": "CARDNAME can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes untapped, you may pay {2}. If you do, draw a card.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "TrigDraw1",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes untapped, you may pay {2}. If you do, draw a card.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever an opponent casts a spell from anywhere other than their hand, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent casts a spell from anywhere other than their hand, draw a card.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw2",
-        "ValidCard": "Card.!wasCastFromTheirHand"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

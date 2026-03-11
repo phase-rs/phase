@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "Play with the top card of your library revealed. You may play lands and cast spells from the top of your library.",
-        "MayPlay": "True",
-        "MayLookAt": "Player",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed. You may play lands and cast spells from the top of your library.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

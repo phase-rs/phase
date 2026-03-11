@@ -1,33 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "InfectDamage"
-      },
-      "params": {
-        "ValidTarget": "You",
-        "CheckSVar": "UnlifeCondition",
-        "SVarCompare": "LE0",
-        "Description": "As long as you have 0 or less life, all damage is dealt to you as though its source had infect."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "You don't lose the game for having 0 or less life.",
       "event": {
         "Other": "GameLoss"
-      },
-      "params": {
-        "ValidLoseReason": "LifeReachedZero",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Description": "You don't lose the game for having 0 or less life.",
-        "Layer": "CantHappen"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "condition": {
+        "compare": "LE0",
+        "type": "CheckSVar",
+        "var": "UnlifeCondition"
+      },
+      "description": "As long as you have 0 or less life, all damage is dealt to you as though its source had infect.",
+      "mode": {
+        "Other": "InfectDamage"
+      }
+    }
+  ],
+  "triggers": []
 }

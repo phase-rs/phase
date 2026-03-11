@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Description": "Activated abilities of Foods you control cost {1} less to activate.",
-        "AffectedZone": "Battlefield",
-        "Type": "Ability",
-        "ValidCard": "Food.YouCtrl"
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of Foods you control cost {1} less to activate.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

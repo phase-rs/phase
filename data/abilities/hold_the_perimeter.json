@@ -1,31 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first upkeep, create a 1/2 white Soldier creature token with defender.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigToken1",
-        "Phase": "Upkeep",
-        "EffectZone": "Command",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ1",
-        "TriggerDescription": "At the beginning of your first upkeep, create a 1/2 white Soldier creature token with defender."
-      }
+      "phase": "Upkeep"
     },
     {
+      "description": "At the beginning of each other player's first upkeep, that player creates a 1/1 red Goblin creature token with \"This creature can't block.\"",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken2",
-        "TriggerDescription": "At the beginning of each other player's first upkeep, that player creates a 1/1 red Goblin creature token with \"This creature can't block.\"",
-        "EffectZone": "Command",
-        "ValidPlayer": "Player.Other+!IsRemembered",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

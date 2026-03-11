@@ -2,65 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "Amount": "4",
-          "SpellDescription": "Add {B}{B}{B}{B}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "4",
-        "SpellDescription": "Add {B}{B}{B}{B}."
-      }
+      "description": "Add {B}{B}{B}{B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would enter, sacrifice a Swamp instead. If you do, put CARDNAME onto the battlefield. If you don't, put it into its owner's graveyard.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplaceWith": "PayBeforeETB",
-        "Description": "If CARDNAME would enter, sacrifice a Swamp instead. If you do, put CARDNAME onto the battlefield. If you don't, put it into its owner's graveyard."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,53 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
-          "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
-          "MayChooseTarget": "True",
-          "TargetType": "Spell",
-          "AILogic": "Once"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<X/Artifact/artifacts you control>"
+            "cost": "tapXType<X/Artifact/artifacts you control>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
-        "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
-        "MayChooseTarget": "True",
-        "TargetType": "Spell",
-        "AILogic": "Once"
-      }
+      "description": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may discard a card. If you do, investigate twice.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigInvestigate",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, investigate twice.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

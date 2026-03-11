@@ -2,34 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "ValidTgts": "Artifact",
-          "SpellDescription": "Create a token that's a copy of target artifact."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Artifact",
-        "SpellDescription": "Create a token that's a copy of target artifact."
-      }
+      "description": "Create a token that's a copy of target artifact.",
+      "effect": {
+        "description": "Create a token that's a copy of target artifact.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopy",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

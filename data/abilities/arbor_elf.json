@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Forest"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap target Forest.",
+      "effect": {
+        "target": {
+          "card_type": "Forest",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "PoolExtraMana",
-        "SpellDescription": "Untap target Forest.",
-        "TgtPrompt": "Select target Forest"
-      }
+      "target_prompt": "Select target Forest"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

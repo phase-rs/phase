@@ -2,45 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 R",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 2 damage divided as you choose among one or two targets.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 R"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select any target to distribute damage to",
-        "SpellDescription": "CARDNAME deals 2 damage divided as you choose among one or two targets.",
-        "TargetMax": "2",
-        "TargetMin": "1",
-        "DividedAsYouChoose": "2"
-      }
+      "target_prompt": "Select any target to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

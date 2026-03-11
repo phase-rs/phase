@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Spirit or Arcane spell, target creature can't block this turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Spirit,Arcane",
-        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, target creature can't block this turn.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCurse"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spirit,Arcane",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

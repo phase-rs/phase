@@ -2,50 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 3,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills three cards."
-      }
+      "description": "Target player mills three cards.",
+      "effect": {
+        "count": 3,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact enters, you may untap CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever an artifact enters, you may untap CARDNAME.",
-        "ValidCard": "Artifact",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "Execute": "TrigUntap"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

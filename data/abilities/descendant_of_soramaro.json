@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RearrangeTopOfLibrary",
-        "params": {
-          "NumCards": "X",
-          "SpellDescription": "Look at the top X cards of your library, where X is the number of cards in your hand, then put them back in any order.",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NumCards": "X",
-        "SpellDescription": "Look at the top X cards of your library, where X is the number of cards in your hand, then put them back in any order.",
-        "Defined": "You"
-      }
+      "description": "Look at the top X cards of your library, where X is the number of cards in your hand, then put them back in any order.",
+      "effect": {
+        "description": "Look at the top X cards of your library, where X is the number of cards in your hand, then put them back in any order.",
+        "name": "RearrangeTopOfLibrary",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

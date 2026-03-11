@@ -1,43 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When NICKNAME enters, create a 3/2 blue Reflection creature token.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "description": "NICKNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "NICKNAME doesn't untap during your untap step if you control a Reflection.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "NICKNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped"
-      }
-    },
-    {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "NICKNAME doesn't untap during your untap step if you control a Reflection.",
-        "IsPresent": "Reflection.YouCtrl",
-        "ActiveZones": "Battlefield"
+      "description": "When NICKNAME enters, create a 3/2 blue Reflection creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

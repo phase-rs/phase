@@ -2,53 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top card of your library, then exile it face down. (You may look at it any time.)",
-        "ChangeNum": "All",
-        "ExileFaceDown": "True",
-        "WithMayLook": "True"
-      }
+      "description": "Look at the top card of your library, then exile it face down. (You may look at it any time.)",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "MayPlay",
-          "SpellDescription": "Until end of turn, you may play cards you own exiled with CARDNAME."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "MayPlay",
-        "SpellDescription": "Until end of turn, you may play cards you own exiled with CARDNAME."
-      }
+      "description": "Until end of turn, you may play cards you own exiled with CARDNAME.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5"
+        "cost": "5",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PlayerTurn": "True",
-        "ActivationZone": "Command",
-        "SpellDescription": "Destroy all nonland permanents. Activate only once and only during your turn.",
-        "ValidCards": "Permanent.nonLand",
-        "GameActivationLimit": "1"
-      }
+      "description": "Destroy all nonland permanents. Activate only once and only during your turn.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

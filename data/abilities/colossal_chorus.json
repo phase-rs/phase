@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "SpellDescription": "Conjure X cards named Colossal Dreadmaw onto the battlefield, where X is this spell's intensity.",
-          "Name": "Colossal Dreadmaw",
-          "Conjure": "True",
-          "Zone": "Battlefield",
-          "Amount": "X",
-          "SubAbility": "DBIntensify"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Conjure X cards named Colossal Dreadmaw onto the battlefield, where X is this spell's intensity.",
-        "Name": "Colossal Dreadmaw",
-        "Conjure": "True",
-        "Zone": "Battlefield",
-        "Amount": "X",
-        "SubAbility": "DBIntensify"
-      }
+      "description": "Conjure X cards named Colossal Dreadmaw onto the battlefield, where X is this spell's intensity.",
+      "effect": {
+        "description": "Conjure X cards named Colossal Dreadmaw onto the battlefield, where X is this spell's intensity.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

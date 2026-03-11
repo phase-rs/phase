@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ0",
-        "Description": "CARDNAME can't attack unless you've cast a noncreature spell this turn."
-      }
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack unless you've cast a noncreature spell this turn.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

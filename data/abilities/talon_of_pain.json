@@ -2,52 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "X",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "SubCounter<X/CHARGE>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "It deals X damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "X"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "SubCounter<X/CHARGE>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "It deals X damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source you control other than CARDNAME deals damage to an opponent, put a charge counter on CARDNAME.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TalonPutCounter",
-        "ValidSource": "Card.Other+YouCtrl,Emblem.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Opponent",
-        "TriggerDescription": "Whenever a source you control other than CARDNAME deals damage to an opponent, put a charge counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Emblem.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

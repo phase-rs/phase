@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Goblin enters, each player flips a coin. Each player whose coin comes up tails sacrifices a creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "AssassinsFlip",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Goblin.Other",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME or another Goblin enters, each player flips a coin. Each player whose coin comes up tails sacrifices a creature."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Goblin.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Food",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Food is put into a graveyard from the battlefield, put two +1/+1 counters on CARDNAME.",
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Other creatures are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other creatures are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\"",
-        "AddType": "Artifact & Food",
-        "AddAbility": "FoodSac",
-        "Affected": "Creature.Other",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "ability": "FoodSac",
+          "type": "AddAbility"
+        },
+        {
+          "core_type": "Artifact & Food",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Food is put into a graveyard from the battlefield, put two +1/+1 counters on CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Food",
+        "type": "Typed"
+      }
+    }
+  ]
 }

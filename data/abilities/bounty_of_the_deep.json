@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Branch",
-        "params": {
-          "BranchConditionSVar": "X",
-          "BranchConditionSVarCompare": "GE1",
-          "FalseSubAbility": "Seek1",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "If you have no land cards in your hand, seek a land card and a nonland card. Otherwise, seek two nonland cards.",
-          "TrueSubAbility": "Seek2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "BranchConditionSVar": "X",
-        "BranchConditionSVarCompare": "GE1",
-        "FalseSubAbility": "Seek1",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "If you have no land cards in your hand, seek a land card and a nonland card. Otherwise, seek two nonland cards.",
-        "TrueSubAbility": "Seek2"
-      }
+      "description": "If you have no land cards in your hand, seek a land card and a nonland card. Otherwise, seek two nonland cards.",
+      "effect": {
+        "description": "If you have no land cards in your hand, seek a land card and a nonland card. Otherwise, seek two nonland cards.",
+        "name": "Branch",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

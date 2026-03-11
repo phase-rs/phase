@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouOwn,Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Return target artifact or creature card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Creature.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target artifact or creature card from your graveyard to your hand.",
-        "SubAbility": "DBToken",
-        "TgtPrompt": "Select target artifact or creature card in your graveyard"
-      }
+      "target_prompt": "Select target artifact or creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

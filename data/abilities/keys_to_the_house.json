@@ -2,83 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Land.Basic",
-        "ChangeTypeDesc": "basic land",
-        "SpellDescription": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "UnlockDoor",
-        "params": {
-          "SorcerySpeed": "True",
-          "ValidTgts": "Room.YouCtrl",
-          "Mode": "LockOrUnlock",
-          "SpellDescription": "Lock or unlock a door of target Room you control. Activate only as a sorcery.",
-          "TgtPrompt": "Choose target Room you control"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Lock or unlock a door of target Room you control. Activate only as a sorcery.",
+      "effect": {
+        "description": "Lock or unlock a door of target Room you control. Activate only as a sorcery.",
+        "name": "UnlockDoor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "ValidTgts": "Room.YouCtrl",
-        "Mode": "LockOrUnlock",
-        "SpellDescription": "Lock or unlock a door of target Room you control. Activate only as a sorcery.",
-        "TgtPrompt": "Choose target Room you control"
-      }
+      "target_prompt": "Choose target Room you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

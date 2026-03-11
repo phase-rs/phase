@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "TriggeredCardController",
-        "TriggerDescription": "When CARDNAME dies, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

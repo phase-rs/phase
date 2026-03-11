@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "STBlock,DeclareCombatants",
-          "SpellDescription": "Creatures your opponents control block this turn if able, and you choose how those creatures block."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 RW RW"
+        "cost": "3 RW RW",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "STBlock,DeclareCombatants",
-        "SpellDescription": "Creatures your opponents control block this turn if able, and you choose how those creatures block."
-      }
+      "description": "Creatures your opponents control block this turn if able, and you choose how those creatures block.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control attacks, defending player loses 1 life and you gain 1 life.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever a creature you control attacks, defending player loses 1 life and you gain 1 life.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

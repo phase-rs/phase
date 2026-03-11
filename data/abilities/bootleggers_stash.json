@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control have \"{T}: Create a Treasure token.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Lands you control have \"{T}: Create a Treasure token.\"",
-        "Affected": "Land.YouCtrl",
-        "AddAbility": "CreateToken"
-      }
+      "modifications": [
+        {
+          "ability": "CreateToken",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

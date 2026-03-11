@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+2 until end of turn. Activate only once each turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "CARDNAME gets +2/+2 until end of turn. Activate only once each turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would scry a number of cards, draw that many cards instead.",
       "event": {
         "Other": "Scry"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Description": "If you would scry a number of cards, draw that many cards instead.",
-        "ReplaceWith": "Draw",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

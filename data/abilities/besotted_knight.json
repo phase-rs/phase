@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a Royal Role token attached to target creature you control.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "role_royal",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "AttachedTo": "Targeted",
-            "ValidTgts": "Creature.YouCtrl",
-            "TgtPrompt": "Select target creature you control",
-            "SpellDescription": "Create a Royal Role token attached to target creature you control."
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

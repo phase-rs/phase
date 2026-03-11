@@ -1,53 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, search your library for a basic Plains card, reveal it, put it into your hand, then shuffle. You gain 2 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, search your library for a basic Plains card, reveal it, put it into your hand, then shuffle. You gain 2 life.",
-            "Execute": "TrigChange",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigToken",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, create two 1/1 colorless Gnome artifact creature tokens."
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "description": "Creatures you control get +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "AddToughness": "1",
-            "Description": "Creatures you control get +1/+1.",
-            "AddPower": "1",
-            "Affected": "Creature.YouCtrl"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "When CARDNAME enters, create two 1/1 colorless Gnome artifact creature tokens.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

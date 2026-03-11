@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME attacks a player, for each other opponent, create a token that's a copy of NICKNAME tapped and attacking that player, except it isn't legendary. Sacrifice those tokens at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks a player, for each other opponent, create a token that's a copy of NICKNAME tapped and attacking that player, except it isn't legendary. Sacrifice those tokens at end of combat.",
-        "Attacked": "Player",
-        "Execute": "TrigCopy",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, that player loses half their life, rounded up.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, that player loses half their life, rounded up.",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigLoseLifeOpp"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

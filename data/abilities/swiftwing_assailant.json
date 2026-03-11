@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "MaxSpeed",
-        "Affected": "Card.Self",
-        "Description": "Max speed — This creature gets +0/+1 and has vigilance.",
-        "AddStaticAbility": "MaxSpeedStatic"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — This creature gets +0/+1 and has vigilance.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

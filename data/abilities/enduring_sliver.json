@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Sliver",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Sliver creatures you control have outlast {2}.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver.YouCtrl+Other",
-        "AddKeyword": "Outlast:2",
-        "Description": "Other Sliver creatures you control have outlast {2}."
-      }
+      "modifications": [
+        {
+          "keyword": "Outlast:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

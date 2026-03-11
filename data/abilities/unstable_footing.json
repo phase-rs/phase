@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDamage",
-          "StaticAbilities": "STCantPrevent",
-          "SpellDescription": "Damage can't be prevented this turn. If this spell was kicked, it deals 5 damage to target player or planeswalker."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamage",
-        "StaticAbilities": "STCantPrevent",
-        "SpellDescription": "Damage can't be prevented this turn. If this spell was kicked, it deals 5 damage to target player or planeswalker."
-      }
+      "description": "Damage can't be prevented this turn. If this spell was kicked, it deals 5 damage to target player or planeswalker.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

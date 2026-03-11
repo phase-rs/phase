@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create Guenhwyvar, a legendary 4/1 green Cat creature token with trample.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, create Guenhwyvar, a legendary 4/1 green Cat creature token with trample."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature dies, if it had power greater than NICKNAME's power, put a number of +1/+1 counters on NICKNAME equal to the difference.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a creature dies, if it had power greater than NICKNAME's power, put a number of +1/+1 counters on NICKNAME equal to the difference.",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.powerGTX"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,40 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayEnergy<3>",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter on CARDNAME. It gains hexproof until end of turn.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<3>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "AILogic": "PayEnergyConservatively",
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME. It gains hexproof until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get {E}{E}{E} (three energy counters).",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigEnergy",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E} (three energy counters).",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

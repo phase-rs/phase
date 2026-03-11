@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME deals 2 damage to the creature with the least toughness. If two or more creatures are tied for least toughness, you choose one of them.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigChooseDmg",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 2 damage to the creature with the least toughness. If two or more creatures are tied for least toughness, you choose one of them."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

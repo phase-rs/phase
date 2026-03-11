@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +5/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "5",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +5/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 5
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

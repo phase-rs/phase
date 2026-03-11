@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Wall"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Wall creatures you control get +1/+0 and have banding.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Wall creatures you control get +1/+0 and have banding.",
-        "AddPower": "1",
-        "Affected": "Creature.YouCtrl+Wall",
-        "AddKeyword": "Banding"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Banding",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

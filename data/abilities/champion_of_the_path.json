@@ -1,42 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "As an additional cost to cast this spell, behold an Elemental and exile it. (Exile an Elemental you control or an Elemental card from your hand.)",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever another Elemental you control enters, it deals damage equal to its power to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever another Elemental you control enters, it deals damage equal to its power to each opponent.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Elemental.Other+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Elemental",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "RaiseCost",
-      "params": {
-        "Cost": "BeholdExile<1/Elemental>",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "As an additional cost to cast this spell, behold an Elemental and exile it. (Exile an Elemental you control or an Elemental card from your hand.)",
-        "Type": "Spell",
-        "Activator": "You"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

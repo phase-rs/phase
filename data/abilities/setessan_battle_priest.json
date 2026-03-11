@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, you gain 2 life.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "DBGainLife",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, you gain 2 life.",
-        "TargetsValid": "Card.Self",
-        "ValidActivatingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

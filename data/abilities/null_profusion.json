@@ -1,51 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you play a card, draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card"
-      }
-    },
-    {
-      "mode": "LandPlayed",
-      "params": {
-        "TriggerDescription": "Whenever you play a card, draw a card.",
-        "Secondary": "True",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Your maximum hand size is 2.",
-        "SetMaxHandSize": "2",
-        "Affected": "You"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "BeginPhase"
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
       },
-      "params": {
-        "Skip": "True",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "Phase": "Draw",
-        "Description": "Skip your draw step."
-      }
+      "description": "Your maximum hand size is 2.",
+      "mode": "Continuous"
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you play a card, draw a card.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever you play a card, draw a card.",
+      "mode": "LandPlayed",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Spirit or Arcane spell, you may tap or untap target creature.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigTapOrUntap",
-        "ValidCard": "Spirit,Arcane",
-        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may tap or untap target creature.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spirit,Arcane",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

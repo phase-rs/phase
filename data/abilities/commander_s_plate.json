@@ -1,19 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.",
-        "AddPower": "3",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "3",
-        "AddKeyword": "Protection from NotCommanderColorID"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "NotCommanderColorID",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

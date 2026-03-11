@@ -1,39 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Thopter",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Thopters you control have haste.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
-        "ValidCard": "Card.wasCastFromExile",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigToken",
-        "Secondary": "True",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Affected": "Thopter.YouCtrl",
-        "Description": "Thopters you control have haste."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

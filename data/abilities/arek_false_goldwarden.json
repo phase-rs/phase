@@ -2,51 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W B"
+            "cost": "3 W B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent loses X life and you gain X life, where X is NICKNAME's intensity.",
-        "ValidTgts": "Opponent",
-        "SubAbility": "DBGainLife"
-      }
+      "description": "Target opponent loses X life and you gain X life, where X is NICKNAME's intensity.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature you control enters, perpetually increase the intensity of NICKNAME and all cards named Arek, False Goldwarden in your graveyard, hand and library by 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigIntensify",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another creature you control enters, perpetually increase the intensity of NICKNAME and all cards named Arek, False Goldwarden in your graveyard, hand and library by 1.",
-        "Origin": "Any",
-        "ValidCard": "Creature.YouCtrl+Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

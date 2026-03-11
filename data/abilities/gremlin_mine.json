@@ -2,81 +2,88 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "It deals 4 damage to target artifact creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.Artifact"
-        }
-      },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Artifact"
             }
-          }
-        ]
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact creature",
-        "SpellDescription": "It deals 4 damage to target artifact creature."
-      }
+      "target_prompt": "Select target artifact creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "CHARGE",
-        "count": 4,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Remove up to four charge counters from target noncreature artifact.",
+      "effect": {
+        "count": 4,
+        "counter_type": "CHARGE",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "RemoveCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature artifact",
-        "SpellDescription": "Remove up to four charge counters from target noncreature artifact.",
-        "UpTo": "True"
-      }
+      "target_prompt": "Select target noncreature artifact"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

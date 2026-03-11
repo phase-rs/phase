@@ -1,28 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeZone",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Cosmo Memory — When NICKNAME enters, return target Aura or Equipment card from your graveyard to your hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other modified creatures you control have vigilance and trample. (Equipment, Auras you control, and counters are modifications.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Vigilance & Trample",
-        "Description": "Other modified creatures you control have vigilance and trample. (Equipment, Auras you control, and counters are modifications.)",
-        "Affected": "Creature.Other+modified+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Cosmo Memory — When NICKNAME enters, return target Aura or Equipment card from your graveyard to your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

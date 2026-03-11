@@ -2,78 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Target creature you control gains deathtouch and lifelink until end of turn. If it's a Vampire, put a +1/+1 counter on it.",
       "effect": {
-        "type": "Pump",
         "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "SubAbility": "DBPutCounter",
-        "Planeswalker": "True",
-        "KW": "Deathtouch & Lifelink",
-        "SpellDescription": "Target creature you control gains deathtouch and lifelink until end of turn. If it's a Vampire, put a +1/+1 counter on it."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "You may sacrifice a Vampire.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "RememberSacrificed": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "You may sacrifice a Vampire.",
-        "SacValid": "Vampire",
-        "SubAbility": "TrigPayCost",
-        "Defined": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "You may put a Vampire creature card from your hand onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You may put a Vampire creature card from your hand onto the battlefield.",
-        "Ultimate": "True",
-        "ChangeType": "Creature.Vampire",
-        "ChangeNum": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

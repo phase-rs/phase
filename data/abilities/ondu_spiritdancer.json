@@ -1,22 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an enchantment you control enters, you may create a token that's a copy of it. Do this only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigCopy",
-        "Destination": "Battlefield",
-        "ResolvedLimit": "1",
-        "TriggerDescription": "Whenever an enchantment you control enters, you may create a token that's a copy of it. Do this only once each turn.",
-        "ValidCard": "Enchantment.YouCtrl",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

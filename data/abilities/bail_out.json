@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control. It deals 1 damage to each opponent.\"",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control. It deals 1 damage to each opponent.\"",
-        "TgtPrompt": "Select target creature you control",
-        "Triggers": "BailOutTrigCZ"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

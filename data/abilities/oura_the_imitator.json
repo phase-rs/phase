@@ -1,29 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "AffectedZone": "Library",
-        "EffectZone": "Battlefield",
-        "Description": "As long as the top card of your library is a Faerie or instant card, you may look at it any time and you may cast it.",
-        "MayLookAt": "You",
-        "Affected": "Faerie.TopLibrary+YouOwn,Instant.TopLibrary+YouOwn"
-      }
+      "affected": {
+        "card_type": "Faerie",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn,Instant.TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "As long as the top card of your library is a Faerie or instant card, you may look at it any time and you may cast it.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     },
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "Description": "You may cast Faerie spells as though they had flash.",
-        "ValidCard": "Faerie",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast Faerie spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

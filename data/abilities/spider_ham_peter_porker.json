@@ -1,29 +1,119 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When NICKNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Spider",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Boar.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Bat.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Bear.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Bird.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Cat.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Dog.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Frog.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Jackal.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Lizard.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Mouse.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Otter.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Rabbit.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Raccoon.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Rat.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Squirrel.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Turtle.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Wolf.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Animal May-Ham — Other Spiders, Boars, Bats, Bears, Birds, Cats, Dogs, Frogs, Jackals, Lizards, Mice, Otters, Rabbits, Raccoons, Rats, Squirrels, Turtles, and Wolves you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Animal May-Ham — Other Spiders, Boars, Bats, Bears, Birds, Cats, Dogs, Frogs, Jackals, Lizards, Mice, Otters, Rabbits, Raccoons, Rats, Squirrels, Turtles, and Wolves you control get +1/+1.",
-        "Affected": "Spider.Other+YouCtrl,Boar.Other+YouCtrl,Bat.Other+YouCtrl,Bear.Other+YouCtrl,Bird.Other+YouCtrl,Cat.Other+YouCtrl,Dog.Other+YouCtrl,Frog.Other+YouCtrl,Jackal.Other+YouCtrl,Lizard.Other+YouCtrl,Mouse.Other+YouCtrl,Otter.Other+YouCtrl,Rabbit.Other+YouCtrl,Raccoon.Other+YouCtrl,Rat.Other+YouCtrl,Squirrel.Other+YouCtrl,Turtle.Other+YouCtrl,Wolf.Other+YouCtrl",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

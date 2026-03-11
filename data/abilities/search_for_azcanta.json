@@ -1,79 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, surveil 1. Then if you have seven or more cards in your graveyard, you may transform CARDNAME. (Look at the top card of your library. You may put that card into your graveyard.)",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "Execute": "TrigSurveil",
-            "TriggerDescription": "At the beginning of your upkeep, surveil 1. Then if you have seven or more cards in your graveyard, you may transform CARDNAME. (Look at the top card of your library. You may put that card into your graveyard.)",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "Amount": "1",
-              "SpellDescription": "Add {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "SpellDescription": "Add {U}."
-          }
+          "description": "Add {U}.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 4,
-            "destination": ""
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 U"
+                "cost": "2 U",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Optional": "True",
-            "ChangeValid": "Card.nonCreature+nonLand",
-            "ChangeNum": "1",
-            "SpellDescription": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in any order."
-          }
+          "description": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+          "effect": {
+            "count": 4,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

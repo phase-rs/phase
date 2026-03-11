@@ -1,29 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Artifact.Creature",
-        "Description": "CARDNAME can't be blocked by artifact creatures."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "ValidTarget": "Creature.Self",
-        "ValidSource": "Artifact.Creature+inZoneBattlefield",
-        "Description": "Prevent all damage that would be dealt to CARDNAME by artifact creatures."
+      "description": "Prevent all damage that would be dealt to CARDNAME by artifact creatures.",
+      "event": "DamageDone"
+    }
+  ],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked by artifact creatures.",
+      "mode": {
+        "Other": "CantBlockBy"
       }
     }
   ],
-  "faces": []
+  "triggers": []
 }

@@ -2,39 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 G",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Return CARDNAME from your graveyard to your hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+1 for each Elf you control and has reach.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "AddKeyword": "Reach",
-        "Description": "Enchanted creature gets +1/+1 for each Elf you control and has reach.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

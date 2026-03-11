@@ -1,21 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ValidCounterType": "P1P1",
-        "ReplaceWith": "AddOneMoreCounters",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield",
-        "Description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead."
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,71 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileFaceDown": "True",
-        "PrecostDesc": "Draw Arcanum",
-        "DestinationZone2": "Library",
-        "WithMayLook": "True",
-        "SpellDescription": "Look at the top card of your library. You may exile it face down.",
-        "LibraryPosition2": "0",
-        "Optional": "True"
-      }
+      "description": "Look at the top card of your library. You may exile it face down.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Until end of turn, you may play cards exiled with CARDNAME. Spells you cast this way cost {2} less to cast.",
-          "PrecostDesc": "Play Arcanum",
-          "StaticAbilities": "SMayPlay,SReduceCost"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, you may play cards exiled with CARDNAME. Spells you cast this way cost {2} less to cast.",
-        "PrecostDesc": "Play Arcanum",
-        "StaticAbilities": "SMayPlay,SReduceCost"
-      }
+      "description": "Until end of turn, you may play cards exiled with CARDNAME. Spells you cast this way cost {2} less to cast.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life.",
       "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Origin": "Exile",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life."
+      "origin": "Exile",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.wasCastFromExile",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life.",
-        "Execute": "TrigGainLife"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

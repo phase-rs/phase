@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies, you may pay {X}. If you do, you gain X life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigGainLife",
-        "OptionalDecider": "You",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control dies, you may pay {X}. If you do, you gain X life.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

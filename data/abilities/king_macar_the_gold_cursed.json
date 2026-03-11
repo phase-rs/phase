@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Inspired — Whenever CARDNAME becomes untapped, you may exile target creature. If you do, create a Gold token. (It's an artifact with \"Sacrifice this artifact: Add one mana of any color.\")",
       "mode": "Untaps",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, you may exile target creature. If you do, create a Gold token. (It's an artifact with \"Sacrifice this artifact: Add one mana of any color.\")",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "You draw two cards and target opponent discards two cards.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You draw two cards and target opponent discards two cards.",
-        "Mode": "TgtChoose",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

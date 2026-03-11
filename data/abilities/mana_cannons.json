@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, CARDNAME deals X damage to any target, where X is the number of colors that spell is.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDamage",
-        "ValidCard": "Card.MultiColor",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a multicolored spell, CARDNAME deals X damage to any target, where X is the number of colors that spell is.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

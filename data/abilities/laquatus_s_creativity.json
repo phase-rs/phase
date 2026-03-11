@@ -2,23 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SubAbility": "DBDiscard",
-        "RememberDrawn": "AllReplaced",
-        "SpellDescription": "Target player draws cards equal to the number of cards in their hand, then discards that many cards."
-      }
+      "description": "Target player draws cards equal to the number of cards in their hand, then discards that many cards.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME dies, create Jumblebones, a legendary 2/1 black Skeleton creature token with \"This creature can't block\" and \"When this creature leaves the battlefield, return target card named Ozox, the Clattering King from your graveyard to your hand.\"",
-        "Destination": "Graveyard",
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME dies, create Jumblebones, a legendary 2/1 black Skeleton creature token with \"This creature can't block\" and \"When this creature leaves the battlefield, return target card named Ozox, the Clattering King from your graveyard to your hand.\"",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks, flip a coin. If you lose the flip, remove CARDNAME from combat and it can't block this turn. Creatures it was blocking that had become blocked by only CARDNAME this combat become unblocked.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks, flip a coin. If you lose the flip, remove CARDNAME from combat and it can't block this turn. Creatures it was blocking that had become blocked by only CARDNAME this combat become unblocked.",
-        "ValidCard": "Card.Self",
-        "Execute": "FlipCoin"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

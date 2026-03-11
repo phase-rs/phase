@@ -2,48 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}. Spend this mana only to cast an artifact spell or activate an ability of an artifact.",
-          "Amount": "1",
-          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}. Spend this mana only to cast an artifact spell or activate an ability of an artifact.",
-        "Amount": "1",
-        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
-      }
+      "description": "Add {C}. Spend this mana only to cast an artifact spell or activate an ability of an artifact.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, create a token that's a copy of it, except it isn't legendary.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "When you cast this spell, create a token that's a copy of it, except it isn't legendary."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Paradox — Whenever you cast a spell from anywhere other than your hand, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.!wasCastFromYourHand",
-        "TriggerDescription": "Paradox — Whenever you cast a spell from anywhere other than your hand, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigInvestigate"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

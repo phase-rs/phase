@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "SpellDescription": "Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.",
-          "Sides": "20",
-          "ResultSubAbilities": "Else:DBDiscard,1-9:DBReturn,10-19:DBDrawTwo,20:DBReanimate",
-          "Modifier": "CardsInHand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.",
-        "Sides": "20",
-        "ResultSubAbilities": "Else:DBDiscard,1-9:DBReturn,10-19:DBDrawTwo,20:DBReanimate",
-        "Modifier": "CardsInHand"
-      }
+      "description": "Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.",
+      "effect": {
+        "description": "Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

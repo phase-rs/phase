@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a creature spell, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies, distribute X +1/+1 counters among any number of target creatures you control, where X is the number of +1/+1 counters on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "Execute": "TrigCounterDist",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, distribute X +1/+1 counters among any number of target creatures you control, where X is the number of +1/+1 counters on CARDNAME."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

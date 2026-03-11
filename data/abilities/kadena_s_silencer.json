@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, counter all abilities your opponents control.",
       "mode": "TurnFaceUp",
-      "params": {
-        "Execute": "TrigCounter",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME is turned face up, counter all abilities your opponents control.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

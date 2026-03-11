@@ -2,44 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "PeekAmount": "1",
-          "SpellDescription": "Look at the top card of your library. If it's a snow card, you may reveal it and put it into your hand.",
-          "SubAbility": "DBChangeZone",
-          "RememberRevealed": "True",
-          "RevealOptional": "True",
-          "RevealValid": "Snow"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "S"
+            "cost": "S",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PeekAmount": "1",
-        "SpellDescription": "Look at the top card of your library. If it's a snow card, you may reveal it and put it into your hand.",
-        "SubAbility": "DBChangeZone",
-        "RememberRevealed": "True",
-        "RevealOptional": "True",
-        "RevealValid": "Snow"
-      }
+      "description": "Look at the top card of your library. If it's a snow card, you may reveal it and put it into your hand.",
+      "effect": {
+        "description": "Look at the top card of your library. If it's a snow card, you may reveal it and put it into your hand.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

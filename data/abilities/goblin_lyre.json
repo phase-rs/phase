@@ -2,36 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "WinSubAbility": "DBDamageOpp",
-          "TgtPrompt": "Choose target opponent or planeswalker",
-          "SpellDescription": "Flip a coin. If you win the flip, CARDNAME deals damage to target opponent or planeswalker equal to the number of creatures you control. If you lose the flip, CARDNAME deals damage to you equal to the number of creatures that opponent or that planeswalker's controller controls.",
-          "ValidTgts": "Opponent,Planeswalker",
-          "LoseSubAbility": "DBDamageYou"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Flip a coin. If you win the flip, CARDNAME deals damage to target opponent or planeswalker equal to the number of creatures you control. If you lose the flip, CARDNAME deals damage to you equal to the number of creatures that opponent or that planeswalker's controller controls.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, CARDNAME deals damage to target opponent or planeswalker equal to the number of creatures you control. If you lose the flip, CARDNAME deals damage to you equal to the number of creatures that opponent or that planeswalker's controller controls.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "WinSubAbility": "DBDamageOpp",
-        "TgtPrompt": "Choose target opponent or planeswalker",
-        "SpellDescription": "Flip a coin. If you win the flip, CARDNAME deals damage to target opponent or planeswalker equal to the number of creatures you control. If you lose the flip, CARDNAME deals damage to you equal to the number of creatures that opponent or that planeswalker's controller controls.",
-        "ValidTgts": "Opponent,Planeswalker",
-        "LoseSubAbility": "DBDamageYou"
-      }
+      "target_prompt": "Choose target opponent or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

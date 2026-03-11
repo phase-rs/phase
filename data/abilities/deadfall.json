@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with forestwalk can be blocked as though they didn't have forestwalk.",
       "mode": {
         "Other": "IgnoreLandWalk"
-      },
-      "params": {
-        "ValidKeyword": "Landwalk:Forest",
-        "Description": "Creatures with forestwalk can be blocked as though they didn't have forestwalk."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

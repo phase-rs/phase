@@ -2,144 +2,100 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "SubAbility": "DBGainFly",
-          "ValidTgts": "Creature.withFlying",
-          "TgtPrompt": "Select target creature with flying",
-          "SpellDescription": "Target creature loses flying until end of turn and another target creature gains it until end of turn.",
-          "Keywords": "Flying"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature loses flying until end of turn and another target creature gains it until end of turn.",
+      "effect": {
+        "description": "Target creature loses flying until end of turn and another target creature gains it until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainFly",
-        "ValidTgts": "Creature.withFlying",
-        "TgtPrompt": "Select target creature with flying",
-        "SpellDescription": "Target creature loses flying until end of turn and another target creature gains it until end of turn.",
-        "Keywords": "Flying"
-      }
+      "target_prompt": "Select target creature with flying"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "ValidTgts": "Creature.withFirst Strike",
-          "TgtPrompt": "Select target creature with first strike",
-          "Keywords": "First Strike",
-          "SpellDescription": "Target creature loses first strike until end of turn and another target creature gains it until end of turn.",
-          "SubAbility": "DBGainFs"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature loses first strike until end of turn and another target creature gains it until end of turn.",
+      "effect": {
+        "description": "Target creature loses first strike until end of turn and another target creature gains it until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.withFirst Strike",
-        "TgtPrompt": "Select target creature with first strike",
-        "Keywords": "First Strike",
-        "SpellDescription": "Target creature loses first strike until end of turn and another target creature gains it until end of turn.",
-        "SubAbility": "DBGainFs"
-      }
+      "target_prompt": "Select target creature with first strike"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "TgtPrompt": "Select target creature with shadow",
-          "SpellDescription": "Target creature loses shadow until end of turn and another target creature gains it until end of turn.",
-          "ValidTgts": "Creature.withShadow",
-          "Keywords": "Shadow",
-          "SubAbility": "DBGainShdw"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature loses shadow until end of turn and another target creature gains it until end of turn.",
+      "effect": {
+        "description": "Target creature loses shadow until end of turn and another target creature gains it until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with shadow",
-        "SpellDescription": "Target creature loses shadow until end of turn and another target creature gains it until end of turn.",
-        "ValidTgts": "Creature.withShadow",
-        "Keywords": "Shadow",
-        "SubAbility": "DBGainShdw"
-      }
+      "target_prompt": "Select target creature with shadow"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "SpellDescription": "Target creature loses trample until end of turn and another target creature gains it until end of turn.",
-          "ValidTgts": "Creature.withTrample",
-          "TgtPrompt": "Select target creature with trample",
-          "Keywords": "Trample",
-          "SubAbility": "DBGainTrpl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature loses trample until end of turn and another target creature gains it until end of turn.",
+      "effect": {
+        "description": "Target creature loses trample until end of turn and another target creature gains it until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature loses trample until end of turn and another target creature gains it until end of turn.",
-        "ValidTgts": "Creature.withTrample",
-        "TgtPrompt": "Select target creature with trample",
-        "Keywords": "Trample",
-        "SubAbility": "DBGainTrpl"
-      }
+      "target_prompt": "Select target creature with trample"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

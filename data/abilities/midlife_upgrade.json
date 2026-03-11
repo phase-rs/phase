@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AssembleContraption",
-        "params": {
-          "Amount": "Y",
-          "SpellDescription": "Assemble X plus one Contraptions.",
-          "CostDesc": "As an additional cost to cast this spell, sacrifice X Contraptions."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W"
+            "cost": "3 W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "Y",
-        "SpellDescription": "Assemble X plus one Contraptions.",
-        "CostDesc": "As an additional cost to cast this spell, sacrifice X Contraptions."
-      }
+      "description": "Assemble X plus one Contraptions.",
+      "effect": {
+        "description": "Assemble X plus one Contraptions.",
+        "name": "AssembleContraption",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

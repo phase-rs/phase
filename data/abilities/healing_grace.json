@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "SubAbility": "DBEffect",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn by a source of your choice. You gain 3 life."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "SubAbility": "DBEffect",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn by a source of your choice. You gain 3 life."
-      }
+      "description": "Prevent the next 3 damage that would be dealt to any target this turn by a source of your choice. You gain 3 life.",
+      "effect": {
+        "description": "Prevent the next 3 damage that would be dealt to any target this turn by a source of your choice. You gain 3 life.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

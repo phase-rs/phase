@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Green creatures you control get +0/+2.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Green creatures you control get +0/+2.",
-        "AddToughness": "2",
-        "Affected": "Creature.Green+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

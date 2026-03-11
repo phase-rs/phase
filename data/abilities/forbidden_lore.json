@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Target creature gets +2/+1 until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Damage",
-        "Description": "Enchanted land has \"{T}: Target creature gets +2/+1 until end of turn.\"",
-        "Affected": "Card.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

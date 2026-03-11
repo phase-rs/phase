@@ -2,33 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W U B R G",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes an Angel, gets +3/+3, and gains flying and lifelink.",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [
-          "Angel"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Angel"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying & Lifelink",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Until end of turn, CARDNAME becomes an Angel, gets +3/+3, and gains flying and lifelink.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

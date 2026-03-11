@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME attacks, exile up to one target legendary artifact card or legendary land card from a graveyard and put a discovery counter on it. You may play a card from exile with a discovery counter on it this turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever NICKNAME attacks, exile up to one target legendary artifact card or legendary land card from a graveyard and put a discovery counter on it. You may play a card from exile with a discovery counter on it this turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Raid — At end of combat on your turn, if you attacked this turn, create a Treasure token.",
       "mode": "Phase",
-      "params": {
-        "Phase": "EndCombat",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "RaidTest",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Raid — At end of combat on your turn, if you attacked this turn, create a Treasure token.",
-        "ValidPlayer": "You"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

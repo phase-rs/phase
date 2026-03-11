@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player kicks a spell, you create a 1/1 green Saproling creature token.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl+kicked",
-        "TriggerDescription": "Whenever a player kicks a spell, you create a 1/1 green Saproling creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

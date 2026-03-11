@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control are the chosen type in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.YouCtrl",
-        "AddType": "ChosenType",
-        "Description": "Lands you control are the chosen type in addition to their other types."
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

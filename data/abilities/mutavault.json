@@ -2,49 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 2/2 creature with all creature types until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 2,
-        "toughness": 2,
-        "types": [
-          "Creature"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Animate",
+        "types": [
+          "Creature"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME becomes a 2/2 creature with all creature types until end of turn. It's still a land.",
-        "AddAllCreatureTypes": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

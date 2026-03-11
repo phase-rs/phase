@@ -2,46 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell,Activated,Triggered",
-          "Optional": "True",
-          "ValidTgts": "Card,Emblem",
-          "SpellDescription": "You may choose new targets for target spell or ability.",
-          "TgtPrompt": "Select target spell or ability"
-        }
-      },
       "cost": null,
+      "description": "You may choose new targets for target spell or ability.",
+      "effect": {
+        "description": "You may choose new targets for target spell or ability.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell,Activated,Triggered",
-        "Optional": "True",
-        "ValidTgts": "Card,Emblem",
-        "SpellDescription": "You may choose new targets for target spell or ability.",
-        "TgtPrompt": "Select target spell or ability"
-      }
+      "target_prompt": "Select target spell or ability"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a commander, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "EffectZone": "All",
-        "ValidSA": "Spell",
-        "ValidPlayer": "You",
-        "Description": "If you control a commander, you may cast this spell without paying its mana cost.",
-        "IsPresent": "Card.IsCommander+YouCtrl",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

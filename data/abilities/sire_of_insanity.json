@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, each player discards their hand.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each end step, each player discards their hand.",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

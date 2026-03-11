@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChoosePlayer",
-        "params": {
-          "SubAbility": "DBMana",
-          "ChoiceTitle": "Choose a player",
-          "SpellDescription": "Choose a player. That player adds one mana of any color they choose.",
-          "Choices": "Player",
-          "Defined": "You"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBMana",
-        "ChoiceTitle": "Choose a player",
-        "SpellDescription": "Choose a player. That player adds one mana of any color they choose.",
-        "Choices": "Player",
-        "Defined": "You"
-      }
+      "description": "Choose a player. That player adds one mana of any color they choose.",
+      "effect": {
+        "description": "Choose a player. That player adds one mana of any color they choose.",
+        "name": "ChoosePlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

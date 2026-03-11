@@ -1,37 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Ox",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Oxen you control have double strike.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, exile the top card of your library. If it's a land card, create a 2/2 white Ox creature token. Otherwise, you may cast it until the end of your next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile the top card of your library. If it's a land card, create a 2/2 white Ox creature token. Otherwise, you may cast it until the end of your next turn.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, exile the top card of your library. If it's a land card, create a 2/2 white Ox creature token. Otherwise, you may cast it until the end of your next turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile the top card of your library. If it's a land card, create a 2/2 white Ox creature token. Otherwise, you may cast it until the end of your next turn.",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Oxen you control have double strike.",
-        "AddKeyword": "Double Strike",
-        "Affected": "Ox.YouCtrl"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

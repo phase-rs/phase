@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may have NICKNAME become a copy of another target creature you control until end of turn, except its name is Gogo, Mysterious Mime. If you do, NICKNAME and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "Execute": "TrigClone",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, you may have NICKNAME become a copy of another target creature you control until end of turn, except its name is Gogo, Mysterious Mime. If you do, NICKNAME and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You"
-      }
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

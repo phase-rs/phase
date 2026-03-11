@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has banding.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has banding.",
-        "AddKeyword": "Banding",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Banding",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "ValidCards": "Creature.YouDontCtrl",
-          "CounterNum": "1",
-          "CounterType": "M1M1",
-          "IsCurse": "True",
-          "SubAbility": "DBSearch",
-          "SpellDescription": "Put a -1/-1 counter on each creature you don't control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouDontCtrl",
-        "CounterNum": "1",
-        "CounterType": "M1M1",
-        "IsCurse": "True",
-        "SubAbility": "DBSearch",
-        "SpellDescription": "Put a -1/-1 counter on each creature you don't control."
-      }
+      "description": "Put a -1/-1 counter on each creature you don't control.",
+      "effect": {
+        "description": "Put a -1/-1 counter on each creature you don't control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

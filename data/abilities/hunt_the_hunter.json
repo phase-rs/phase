@@ -2,28 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+Green"
-        }
-      },
       "cost": null,
+      "description": "Target green creature you control gets +2/+2 until end of turn. It fights target green creature an opponent controls.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBFight",
-        "TgtPrompt": "Select target green creature you control",
-        "AILogic": "Fight",
-        "SpellDescription": "Target green creature you control gets +2/+2 until end of turn. It fights target green creature an opponent controls."
-      }
+      "target_prompt": "Select target green creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

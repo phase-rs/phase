@@ -2,37 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target legendary creature to redirect damage from",
-          "ValidTgts": "Creature.Legendary+YouCtrl",
-          "ReplacementEffects": "DamageEvent",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "SpellDescription": "The next 1 damage that would be dealt to target legendary creature you control is dealt to you instead."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "The next 1 damage that would be dealt to target legendary creature you control is dealt to you instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target legendary creature to redirect damage from",
-        "ValidTgts": "Creature.Legendary+YouCtrl",
-        "ReplacementEffects": "DamageEvent",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "SpellDescription": "The next 1 damage that would be dealt to target legendary creature you control is dealt to you instead."
-      }
+      "target_prompt": "Select target legendary creature to redirect damage from"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

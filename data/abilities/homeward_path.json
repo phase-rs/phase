@@ -2,48 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GainControlVariant",
-        "params": {
-          "SpellDescription": "Each player gains control of all creatures they own.",
-          "AILogic": "GainControlOwns",
-          "AllValid": "Creature",
-          "ChangeController": "CardOwner"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player gains control of all creatures they own.",
-        "AILogic": "GainControlOwns",
-        "AllValid": "Creature",
-        "ChangeController": "CardOwner"
-      }
+      "description": "Each player gains control of all creatures they own.",
+      "effect": {
+        "description": "Each player gains control of all creatures they own.",
+        "name": "GainControlVariant",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

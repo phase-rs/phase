@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 for each Aura attached to it and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddSVar": "EnMe",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Enchanted creature gets +2/+2 for each Aura attached to it and has vigilance.",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

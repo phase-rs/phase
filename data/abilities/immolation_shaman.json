@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +3/+3 and gains menace until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +3/+3 and gains menace until end of turn.",
-        "Defined": "Self",
-        "KW": "Menace"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, CARDNAME deals 1 damage to that player.",
       "mode": "AbilityCast",
-      "params": {
-        "ValidCard": "Artifact.inZoneBattlefield,Creature.inZoneBattlefield,Land.inZoneBattlefield",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, CARDNAME deals 1 damage to that player.",
-        "ValidSA": "SpellAbility.!ManaAbility",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDmg"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

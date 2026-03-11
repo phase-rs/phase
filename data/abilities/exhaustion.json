@@ -2,36 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "KeepOppCreatsLandsTapped",
-          "IsCurse": "True",
-          "StaticAbilities": "DontUntap",
-          "Duration": "Permanent",
-          "Triggers": "RemoveEffect",
-          "ValidTgts": "Opponent",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Creatures and lands target opponent controls don't untap during their next untap step."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "KeepOppCreatsLandsTapped",
-        "IsCurse": "True",
-        "StaticAbilities": "DontUntap",
-        "Duration": "Permanent",
-        "Triggers": "RemoveEffect",
-        "ValidTgts": "Opponent",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Creatures and lands target opponent controls don't untap during their next untap step."
-      }
+      "description": "Creatures and lands target opponent controls don't untap during their next untap step.",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

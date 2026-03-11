@@ -2,30 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonCreature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exchange control of target noncreature spell and target creature. Then the spell's controller may choose new targets for it.",
-        "StackDescription": "SpellDescription",
-        "ImprintCards": "TargetedSource",
-        "TargetType": "Spell",
-        "TgtZone": "Stack",
-        "SubAbility": "DBRemember"
-      }
+      "description": "Exchange control of target noncreature spell and target creature. Then the spell's controller may choose new targets for it.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

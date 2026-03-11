@@ -2,62 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player draws a card.",
-        "Defined": "Player",
-        "Planeswalker": "True"
-      }
+      "description": "Each player draws a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player draws a card."
-      }
+      "description": "Target player draws a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -10,
+        "type": "Loyalty"
+      },
+      "description": "Target player mills twenty cards.",
       "effect": {
-        "type": "Mill",
         "count": 20,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -10
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Target player mills twenty cards."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

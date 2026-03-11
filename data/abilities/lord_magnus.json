@@ -1,27 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with plainswalk can be blocked as though they didn't have plainswalk.",
       "mode": {
         "Other": "IgnoreLandWalk"
-      },
-      "params": {
-        "ValidKeyword": "Landwalk:Plains",
-        "Description": "Creatures with plainswalk can be blocked as though they didn't have plainswalk."
       }
     },
     {
+      "description": "Creatures with forestwalk can be blocked as though they didn't have forestwalk.",
       "mode": {
         "Other": "IgnoreLandWalk"
-      },
-      "params": {
-        "Description": "Creatures with forestwalk can be blocked as though they didn't have forestwalk.",
-        "ValidKeyword": "Landwalk:Forest"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

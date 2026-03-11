@@ -1,30 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another nontoken creature dies, you may create a 1/1 black Rat creature token.",
-        "Origin": "Battlefield",
-        "OptionalDecider": "You",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.!token+Other",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Rat"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Rats you control have deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Rat+YouCtrl",
-        "AddKeyword": "Deathtouch",
-        "Description": "Rats you control have deathtouch."
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another nontoken creature dies, you may create a 1/1 black Rat creature token.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

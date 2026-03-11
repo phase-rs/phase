@@ -1,40 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile two target sorcery cards from a single graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "Execute": "TrigSpellweaverExile",
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile two target sorcery cards from a single graveyard.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a player casts a card, if it has the same name as one of the cards exiled with CARDNAME, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a player casts a card, if it has the same name as one of the cards exiled with CARDNAME, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
-        "ValidCard": "Card.sharesNameWith Imprinted+!token",
-        "Execute": "TrigSpellweaverCopy",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Execute": "DBCleanImprinted"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

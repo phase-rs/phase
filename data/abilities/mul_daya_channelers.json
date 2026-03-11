@@ -1,37 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "Player",
-        "AffectedZone": "Library",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "Play with the top card of your library revealed."
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as the top card of your library is a creature card, CARDNAME gets +3/+3.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "AddToughness": "3",
-        "Description": "As long as the top card of your library is a creature card, CARDNAME gets +3/+3.",
-        "TopCardOfLibraryIs": "Creature"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as the top card of your library is a land card, CARDNAME has \"{T}: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as the top card of your library is a land card, CARDNAME has \"{T}: Add two mana of any one color.\"",
-        "Affected": "Card.Self",
-        "AddAbility": "AnyMana",
-        "TopCardOfLibraryIs": "Land"
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

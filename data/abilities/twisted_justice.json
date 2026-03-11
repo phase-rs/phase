@@ -2,25 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player sacrifices a creature. You draw cards equal to that creature's power.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Creature",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Target player sacrifices a creature. You draw cards equal to that creature's power.",
-        "RememberSacrificed": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

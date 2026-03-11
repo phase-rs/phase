@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Instant and sorcery spells you cast with mana value 5 or greater cost {1} less to cast.",
-        "Amount": "1",
-        "ValidCard": "Instant.cmcGE5,Sorcery.cmcGE5",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Instant and sorcery spells you cast with mana value 5 or greater cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

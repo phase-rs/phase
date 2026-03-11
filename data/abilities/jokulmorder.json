@@ -1,51 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigSacUnless",
-        "TriggerDescription": "When this creature enters, sacrifice it unless you sacrifice five lands.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "description": "This creature enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you play an Island, you may untap this creature.",
-        "ValidCard": "Island.YouCtrl",
-        "Execute": "TrigUntap",
-        "OptionalDecider": "You"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "This creature enters tapped.",
-        "ReplacementResult": "Updated"
+      "description": "When this creature enters, sacrifice it unless you sacrifice five lands.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidCard": "Card.Self"
+      "description": "Whenever you play an Island, you may untap this creature.",
+      "mode": "LandPlayed",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Island",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

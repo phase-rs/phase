@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainLife",
-        "amount": 6
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player gains 6 life."
-      }
+      "description": "Target player gains 6 life.",
+      "effect": {
+        "amount": 6,
+        "type": "GainLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls a Swamp and you control a Forest, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "CheckSecondSVar": "Y",
-        "ValidPlayer": "You",
-        "CheckSVar": "X",
-        "ValidCard": "Card.Self",
-        "Description": "If an opponent controls a Swamp and you control a Forest, you may cast this spell without paying its mana cost.",
-        "EffectZone": "All",
-        "ValidSA": "Spell"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,31 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a historic spell, draw a card. CARDNAME can't be blocked this turn. This ability triggers only once each turn. (Artifacts, legendaries, and Sagas are historic.)",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you cast a historic spell, draw a card. CARDNAME can't be blocked this turn. This ability triggers only once each turn. (Artifacts, legendaries, and Sagas are historic.)",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Historic",
-        "ValidActivatingPlayer": "You",
-        "ActivationLimit": "1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

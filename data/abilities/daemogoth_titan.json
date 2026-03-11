@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, sacrifice a creature.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice a creature.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, sacrifice a creature.",
       "mode": "Blocks",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice a creature.",
-        "Secondary": "True",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

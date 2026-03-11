@@ -2,36 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target instant or sorcery card",
-          "StaticAbilities": "Play",
-          "TgtZone": "Graveyard",
-          "SubAbility": "DBEffect",
-          "SpellDescription": "Until end of turn, you may cast target instant or sorcery card from your graveyard without paying its mana cost. If that card would be put into your graveyard this turn, exile it instead. Exile CARDNAME.",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-          "ExileOnMoved": "Graveyard"
-        }
-      },
       "cost": null,
+      "description": "Until end of turn, you may cast target instant or sorcery card from your graveyard without paying its mana cost. If that card would be put into your graveyard this turn, exile it instead. Exile CARDNAME.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target instant or sorcery card",
-        "StaticAbilities": "Play",
-        "TgtZone": "Graveyard",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Until end of turn, you may cast target instant or sorcery card from your graveyard without paying its mana cost. If that card would be put into your graveyard this turn, exile it instead. Exile CARDNAME.",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "ExileOnMoved": "Graveyard"
-      }
+      "target_prompt": "Select target instant or sorcery card"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

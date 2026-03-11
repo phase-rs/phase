@@ -2,37 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 B"
+        "cost": "1 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Blue,Card.Red",
-        "Type": "Spell",
-        "Amount": "1",
-        "Activator": "You",
-        "Description": "Blue spells and red spells you cast cost {1} less to cast."
-      }
+      "description": "Blue spells and red spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

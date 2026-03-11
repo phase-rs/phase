@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.YouOwn"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Destroy target permanent you own. It can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target permanent you own",
-        "SpellDescription": "Destroy target permanent you own. It can't be regenerated.",
-        "NoRegen": "True"
-      }
+      "target_prompt": "Select target permanent you own"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

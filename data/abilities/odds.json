@@ -1,68 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "FlipACoin",
-            "params": {
-              "TgtZone": "Stack",
-              "TgtPrompt": "Select target instant or sorcery spell",
-              "HeadsSubAbility": "OddCounter",
-              "TargetType": "Spell",
-              "SpellDescription": "Flip a coin. If it comes up heads, counter target instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets for the copy.",
-              "NoCall": "True",
-              "ValidTgts": "Instant,Sorcery",
-              "TailsSubAbility": "OddCopy"
-            }
-          },
           "cost": null,
+          "description": "Flip a coin. If it comes up heads, counter target instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets for the copy.",
+          "effect": {
+            "description": "Flip a coin. If it comes up heads, counter target instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets for the copy.",
+            "name": "FlipACoin",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtZone": "Stack",
-            "TgtPrompt": "Select target instant or sorcery spell",
-            "HeadsSubAbility": "OddCounter",
-            "TargetType": "Spell",
-            "SpellDescription": "Flip a coin. If it comes up heads, counter target instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets for the copy.",
-            "NoCall": "True",
-            "ValidTgts": "Instant,Sorcery",
-            "TailsSubAbility": "OddCopy"
-          }
+          "target_prompt": "Select target instant or sorcery spell"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player sacrifices two attacking creatures.",
           "effect": {
-            "type": "Sacrifice",
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SacValid": "Creature.attacking",
-            "Amount": "2",
-            "SpellDescription": "Target player sacrifices two attacking creatures."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

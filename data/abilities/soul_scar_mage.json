@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Creature.OppCtrl",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "IsCombat": "False",
-        "ExecuteMode": "PerTarget",
-        "Description": "If a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
-        "ReplaceWith": "Counters"
-      }
+      "description": "If a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a red spell, you may pay {R}. If you do, CARDNAME deals 1 damage to any target.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Red",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever a player casts a red spell, you may pay {R}. If you do, CARDNAME deals 1 damage to any target."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

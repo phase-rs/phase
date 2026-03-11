@@ -1,41 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {G}.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigUpkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {G}.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever a player puts an Island or blue permanent onto the battlefield, that player sacrifices an Island or blue permanent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Island,Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a player puts an Swamp or black permanent onto the battlefield, that player sacrifices a Swamp or black permanent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSacrificeBlue",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a player puts an Island or blue permanent onto the battlefield, that player sacrifices an Island or blue permanent.",
-        "ValidCard": "Island,Card.Blue"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Swamp,Card.Black",
-        "Execute": "TrigSacrificeBlack",
-        "TriggerDescription": "Whenever a player puts an Swamp or black permanent onto the battlefield, that player sacrifices a Swamp or black permanent.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Swamp,Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

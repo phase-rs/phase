@@ -1,17 +1,83 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You draw cards from the bottom of your library instead of the top of your library.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "You draw cards from the bottom of your library instead of the top of your library.",
-        "Affected": "You",
-        "Description": "You draw cards from the bottom of your library instead of the top of your library."
-      }
+      "modifications": [
+        {
+          "keyword": "You",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "draw",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "cards",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "the",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "bottom",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "your",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "library",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "instead",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "the",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "top",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "your",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "library.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

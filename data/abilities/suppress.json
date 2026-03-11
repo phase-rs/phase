@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrig",
-        "Hidden": "True",
-        "StackDescription": "{p:Targeted} exiles all cards from their hand face down.",
-        "ExileFaceDown": "True",
-        "SpellDescription": "Target player exiles all cards from their hand face down. At the beginning of the end step of that player's next turn, that player returns those cards to their hand.",
-        "RememberChanged": "True",
-        "Reveal": "False",
-        "ChangeType": "Card"
-      }
+      "description": "Target player exiles all cards from their hand face down. At the beginning of the end step of that player's next turn, that player returns those cards to their hand.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

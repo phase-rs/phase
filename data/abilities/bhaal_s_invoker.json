@@ -2,31 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "8",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 4 damage to each opponent.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "8"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Scorching Ray —",
-        "SpellDescription": "CARDNAME deals 4 damage to each opponent.",
-        "Defined": "Opponent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

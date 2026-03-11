@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may choose a creature card in your hand. If you do, it perpetually gains \"This creature enters with an additional shield counter on it.\" Otherwise, put a shield counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChoose",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, you may choose a creature card in your hand. If you do, it perpetually gains \"This creature enters with an additional shield counter on it.\" Otherwise, put a shield counter on CARDNAME.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each combat, CARDNAME gets +1/+1 until end of turn for each shield counter among other creatures you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each combat, CARDNAME gets +1/+1 until end of turn for each shield counter among other creatures you control.",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "Execute": "TrigPump"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

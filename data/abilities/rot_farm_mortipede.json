@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creature cards leave your graveyard, CARDNAME gets +1/+0 and gains menace and lifelink until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever one or more creature cards leave your graveyard, CARDNAME gets +1/+0 and gains menace and lifelink until end of turn.",
-        "Origin": "Graveyard",
-        "Destination": "Any",
-        "ValidCards": "Creature.YouOwn",
-        "TriggerZones": "Battlefield"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

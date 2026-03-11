@@ -2,52 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "SelfDamage",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "The next time damage would be dealt to target creature this turn, destroy that creature instead.",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "SelfDamage",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "The next time damage would be dealt to target creature this turn, destroy that creature instead.",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature"
-      }
+      "description": "The next time damage would be dealt to target creature this turn, destroy that creature instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

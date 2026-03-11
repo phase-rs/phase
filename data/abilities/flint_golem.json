@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, defending player mills three cards.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigMill",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, defending player mills three cards.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

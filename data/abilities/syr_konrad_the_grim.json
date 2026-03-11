@@ -2,64 +2,109 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B",
+        "type": "Mana"
+      },
+      "description": "Each player mills a card.",
       "effect": {
-        "type": "Mill",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player mills a card.",
-        "AILogic": "AtOppEOT",
-        "Defined": "Player"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.Other",
-        "TriggerDescription": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
-        "Origin": "Hand,Graveyard,Exile,Stack,Library,Command",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDmg"
+      "origin": "Hand,Graveyard,Exile,Stack,Library,Command",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
-        "Secondary": "True",
-        "Destination": "Graveyard",
-        "Execute": "TrigDmg",
-        "ValidCard": "Creature.Other"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Destination": "Any",
-        "ValidCard": "Card.Creature+Other+YouOwn",
-        "Execute": "TrigDmg",
-        "TriggerDescription": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent."
+      "origin": "Graveyard",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Creature"
+              },
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

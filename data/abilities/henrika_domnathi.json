@@ -1,54 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, ABILITY",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Phase": "BeginCombat",
-            "ValidPlayer": "You",
-            "Execute": "TrigCharm",
-            "TriggerDescription": "At the beginning of combat on your turn, ABILITY"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 1,
-            "toughness": 0,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "1 B B"
+            "cost": "1 B B",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature.YouCtrl+withFlying,Creature.YouCtrl+withLifelink,Creature.YouCtrl+withDeathtouch",
-            "SpellDescription": "Each creature you control with flying, deathtouch and/or lifelink gets +1/+0 until end of turn."
-          }
+          "description": "Each creature you control with flying, deathtouch and/or lifelink gets +1/+0 until end of turn.",
+          "effect": {
+            "power": 1,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

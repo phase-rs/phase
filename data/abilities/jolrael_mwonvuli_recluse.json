@@ -2,43 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Power": "X",
-          "SpellDescription": "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards in your hand.",
-          "Toughness": "X",
-          "ValidCards": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 G G"
+        "cost": "4 G G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Power": "X",
-        "SpellDescription": "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards in your hand.",
-        "Toughness": "X",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards in your hand.",
+      "effect": {
+        "description": "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards in your hand.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, create a 2/2 green Cat creature token.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerDescription": "Whenever you draw your second card each turn, create a 2/2 green Cat creature token.",
-        "Number": "2"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

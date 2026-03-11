@@ -1,63 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent.YouOwn"
-            }
-          },
           "cost": null,
+          "description": "Return any number of target permanents you own to your hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouOwn"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMin": "0",
-            "TargetMax": "X",
-            "TgtPrompt": "Select target permanent you own",
-            "SpellDescription": "Return any number of target permanents you own to your hand."
-          }
+          "target_prompt": "Select target permanent you own"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Discard any number of cards, then draw that many cards.",
           "effect": {
-            "type": "Discard",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDraw",
-            "SpellDescription": "Discard any number of cards, then draw that many cards.",
-            "AnyNumber": "True",
-            "RememberDiscarded": "True",
-            "Mode": "TgtChoose",
-            "Optional": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

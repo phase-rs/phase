@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, you may pay {1}. When you do, CARDNAME deals X damage to target player or planeswalker, where X is the number of Shrines you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, you may pay {1}. When you do, CARDNAME deals X damage to target player or planeswalker, where X is the number of Shrines you control.",
-        "Execute": "TrigImmediateTrig",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, if CARDNAME is untapped, any opponent may sacrifice a nontoken creature. If they do, tap CARDNAME, then seek a land card and put it onto the battlefield tapped.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigSac",
-        "IsPresent": "Card.Self+untapped",
-        "TriggerDescription": "At the beginning of each combat, if CARDNAME is untapped, any opponent may sacrifice a nontoken creature. If they do, tap CARDNAME, then seek a land card and put it onto the battlefield tapped.",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a land you control enters, it perpetually gains \"{B}{G}, {T}, Sacrifice this land: Draw a card.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate",
-        "TriggerDescription": "Whenever a land you control enters, it perpetually gains \"{B}{G}, {T}, Sacrifice this land: Draw a card.\""
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

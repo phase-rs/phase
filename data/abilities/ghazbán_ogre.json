@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if a player has more life than each other player, the player with the most life gains control of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "APlayerHasMoreLifeThanEachOther": "True",
-        "TriggerDescription": "At the beginning of your upkeep, if a player has more life than each other player, the player with the most life gains control of CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigOppControl"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,43 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, put a +1/+1 counter on target creature you control. Then that creature fights up to one target creature you don't control.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigCounter",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature you control. Then that creature fights up to one target creature you don't control.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, another target creature gets +2/+2 and loses all abilities until end of turn.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPump",
-            "TriggerDescription": "At the beginning of combat on your turn, another target creature gets +2/+2 and loses all abilities until end of turn.",
-            "ValidPlayer": "You",
-            "Phase": "BeginCombat"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

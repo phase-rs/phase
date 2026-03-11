@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "StackDescription": "You and target opponent play a best two-out-of-three Rock, Paper, Scissors match.",
-        "SubAbility": "ResetWin"
-      }
+      "description": "You and target opponent play a best two-out-of-three Rock, Paper, Scissors match.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Player"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

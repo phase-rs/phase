@@ -2,52 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B"
+            "cost": "2 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +X/+0 until end of turn, where X is the sacrificed enchantment's mana value."
-      }
+      "description": "CARDNAME gets +X/+0 until end of turn, where X is the sacrificed enchantment's mana value.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayLimit": "1",
-        "Condition": "PlayerTurn",
-        "MayPlay": "True",
-        "MayPlayAltManaCost": "PayLife<ConvertedManaCost>",
-        "Affected": "Card.Enchantment+YouCtrl+nonLand",
-        "MayPlayDontGrantZonePermissions": "True",
-        "Description": "Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.",
-        "AffectedZone": "Hand,Graveyard,Exile,Library,Command"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Enchantment"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "description": "Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

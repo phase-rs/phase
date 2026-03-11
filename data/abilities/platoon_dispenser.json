@@ -2,41 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 W",
+        "type": "Mana"
+      },
+      "description": "Create a 1/1 colorless Soldier artifact creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_1_1_a_soldier",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 colorless Soldier artifact creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control two or more other creatures, draw a card.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, if you control two or more other creatures, draw a card.",
-        "Phase": "End of Turn",
-        "IsPresent": "Creature.YouCtrl+Other",
-        "Execute": "TrigDraw",
-        "PresentCompare": "GE2",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

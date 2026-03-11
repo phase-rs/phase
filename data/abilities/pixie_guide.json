@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Grant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
       "event": {
         "Other": "RollDice"
-      },
-      "params": {
-        "Description": "Grant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "PlusRoll",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

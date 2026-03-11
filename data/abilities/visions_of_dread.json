@@ -2,32 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent puts a creature card of their choice from their graveyard onto the battlefield under your control.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.TargetedPlayerOwn"
         ],
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent puts a creature card of their choice from their graveyard onto the battlefield under your control.",
-        "Amount": "1",
-        "ChoiceZone": "Graveyard",
-        "Mandatory": "True",
-        "StackDescription": "SpellDescription",
-        "AILogic": "WorstCard",
-        "SubAbility": "DBChangeZone"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

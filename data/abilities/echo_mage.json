@@ -1,31 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 2-3 2/4 {U}{U}, {T}: Copy target instant or sorcery spell. You may choose new targets for the copy.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "4",
-        "AddAbility": "CopyOnce",
-        "Affected": "Card.Self",
-        "SetPower": "2",
-        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LT4_LEVEL",
-        "Description": "LEVEL 2-3 2/4 {U}{U}, {T}: Copy target instant or sorcery spell. You may choose new targets for the copy."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "ability": "CopyOnce",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 4+ 2/5 {U}{U}, {T}: Copy target instant or sorcery spell twice. You may choose new targets for the copies.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "5",
-        "Description": "LEVEL 4+ 2/5 {U}{U}, {T}: Copy target instant or sorcery spell twice. You may choose new targets for the copies.",
-        "Affected": "Card.Self",
-        "AddAbility": "CopyTwice",
-        "IsPresent": "Card.Self+counters_GE4_LEVEL",
-        "SetPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "ability": "CopyTwice",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

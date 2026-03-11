@@ -2,57 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "MaxRepeat": "2",
-          "RepeatSubAbility": "DBDraw",
-          "StackDescription": "SpellDescription",
-          "RepeatPresent": "Land.YouCtrl",
-          "SpellDescription": "Draw a card. You may put a land card from your hand onto the battlefield tapped. If you control eight or more lands, repeat this process once.",
-          "RepeatCompare": "GE8"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MaxRepeat": "2",
-        "RepeatSubAbility": "DBDraw",
-        "StackDescription": "SpellDescription",
-        "RepeatPresent": "Land.YouCtrl",
-        "SpellDescription": "Draw a card. You may put a land card from your hand onto the battlefield tapped. If you control eight or more lands, repeat this process once.",
-        "RepeatCompare": "GE8"
-      }
+      "description": "Draw a card. You may put a land card from your hand onto the battlefield tapped. If you control eight or more lands, repeat this process once.",
+      "effect": {
+        "description": "Draw a card. You may put a land card from your hand onto the battlefield tapped. If you control eight or more lands, repeat this process once.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, target opponent loses 2 life and you gain 2 life.",
       "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever you draw your second card each turn, target opponent loses 2 life and you gain 2 life.",
-        "Number": "2",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "LoseGain"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

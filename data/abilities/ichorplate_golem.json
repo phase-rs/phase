@@ -1,30 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature you control enters, if it has one or more oil counters on it, put an oil counter on it.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Creature.YouCtrl+counters_GE1_OIL"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with oil counters on them get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Creatures you control with oil counters on them get +1/+1.",
-        "Affected": "Creature.YouCtrl+counters_GE1_OIL",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control enters, if it has one or more oil counters on it, put an oil counter on it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

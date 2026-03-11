@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Domain — Whenever CARDNAME enters or becomes tapped, another target creature you control gets +X/+X until end of turn, where X is the number of basic land types among lands you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Domain — Whenever CARDNAME enters or becomes tapped, another target creature you control gets +X/+X until end of turn, where X is the number of basic land types among lands you control."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Domain — Whenever CARDNAME enters or becomes tapped, another target creature you control gets +X/+X until end of turn, where X is the number of basic land types among lands you control.",
       "mode": "Taps",
-      "params": {
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Domain — Whenever CARDNAME enters or becomes tapped, another target creature you control gets +X/+X until end of turn, where X is the number of basic land types among lands you control."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Library,Hand,Exile,Command,Stack",
-        "Execute": "TrigChangeZone",
-        "ValidCard": "Permanent.Lhurgoyf+YouOwn",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield."
+      "origin": "Library,Hand,Exile,Command,Stack",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Lhurgoyf"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, create a Tarmogoyf token. (It's a {1}{G} Lhurgoyf creature with \"Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.\")",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, create a Tarmogoyf token. (It's a {1}{G} Lhurgoyf creature with \"Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.\")"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

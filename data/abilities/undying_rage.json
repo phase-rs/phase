@@ -1,37 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and can't block.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "Enchanted creature gets +2/+2 and can't block.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
-      "mode": "CantBlock",
-      "params": {
-        "Secondary": "True",
-        "Description": "Enchanted creature gets +2/+2 and can't block.",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "description": "Enchanted creature gets +2/+2 and can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

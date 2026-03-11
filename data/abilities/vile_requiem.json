@@ -2,53 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy up to X target nonblack creatures, where X is the number of verse counters on CARDNAME. They can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "NoRegen": "True",
-        "TargetMax": "X",
-        "TgtPrompt": "Select target nonblack creature",
-        "SpellDescription": "Destroy up to X target nonblack creatures, where X is the number of verse counters on CARDNAME. They can't be regenerated."
-      }
+      "target_prompt": "Select target nonblack creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

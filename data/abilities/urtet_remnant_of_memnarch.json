@@ -2,63 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterType": "P1P1",
-          "SpellDescription": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
-          "CounterNum": "3",
-          "PlayerTurn": "True",
-          "ValidCards": "Myr.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W U B R G"
+            "cost": "W U B R G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterType": "P1P1",
-        "SpellDescription": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
-        "CounterNum": "3",
-        "PlayerTurn": "True",
-        "ValidCards": "Myr.YouCtrl"
-      }
+      "description": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
+      "effect": {
+        "description": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Myr spell, create a 1/1 colorless Myr artifact creature token.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a Myr spell, create a 1/1 colorless Myr artifact creature token.",
-        "ValidCard": "Myr",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigToken"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Myr",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of combat on your turn, untap each Myr you control.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, untap each Myr you control.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "UntapMyr"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

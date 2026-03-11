@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control three or more creatures that share a creature type, put a +1/+1 counter on CARDNAME, then scry 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "CheckSVar": "X",
-        "Execute": "TrigPutCounter",
-        "SVarCompare": "GE3",
-        "TriggerDescription": "When CARDNAME enters, if you control three or more creatures that share a creature type, put a +1/+1 counter on CARDNAME, then scry 1.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

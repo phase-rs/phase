@@ -2,36 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature card in your graveyard perpetually becomes an artifact.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Artifact"
+        ]
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Graveyard",
-        "TgtPrompt": "Select target creature card in your graveyard",
-        "SubAbility": "DBEffect",
-        "StackDescription": "REP Target creature card in your graveyard_{c:Targeted}",
-        "Duration": "Perpetual",
-        "RemoveCardTypes": "True",
-        "SpellDescription": "Target creature card in your graveyard perpetually becomes an artifact."
-      }
+      "target_prompt": "Select target creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

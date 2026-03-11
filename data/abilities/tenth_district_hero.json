@@ -2,80 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1 W",
+            "type": "Mana"
+          },
+          {
+            "cost": "CollectEvidence<2>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME becomes a Human Detective with base power and toughness 4/4 and gains vigilance.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Human",
           "Detective"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1 W"
-          },
-          {
-            "type": "Mana",
-            "cost": "CollectEvidence<2>"
-          }
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Vigilance",
-        "SpellDescription": "CARDNAME becomes a Human Detective with base power and toughness 4/4 and gains vigilance.",
-        "Duration": "Permanent",
-        "RemoveCreatureTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2 W",
+            "type": "Mana"
+          },
+          {
+            "cost": "CollectEvidence<4>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "If CARDNAME is a Detective, it becomes a legendary creature named Mileva, the Stalwart, it has base power and toughness 5/5, and it gains \"Other creatures you control have indestructible.\"",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 5,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 5,
+        "type": "Animate",
         "types": [
           "Legendary",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2 W"
-          },
-          {
-            "type": "Mana",
-            "cost": "CollectEvidence<4>"
-          }
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Card.Self+Detective",
-        "SpellDescription": "If CARDNAME is a Detective, it becomes a legendary creature named Mileva, the Stalwart, it has base power and toughness 5/5, and it gains \"Other creatures you control have indestructible.\"",
-        "staticAbilities": "Static",
-        "Duration": "Permanent",
-        "RemoveCreatureTypes": "True",
-        "Name": "Mileva, the Stalwart"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

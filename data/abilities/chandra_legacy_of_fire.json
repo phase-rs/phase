@@ -2,65 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "Planeswalker": "True",
-          "Amount": "X",
-          "SpellDescription": "Add {R} for each planeswalker you control."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Amount": "X",
-        "SpellDescription": "Add {R} for each planeswalker you control."
-      }
+      "description": "Add {R} for each planeswalker you control.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Remove a loyalty counter from each of any number of permanents you control. Exile that many cards from the top of your library. You may play them this turn.",
       "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "LOYALTY",
         "count": 1,
+        "counter_type": "LOYALTY",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "RemoveCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Remove a loyalty counter from each of any number of permanents you control. Exile that many cards from the top of your library. You may play them this turn.",
-        "Choices": "Permanent.YouCtrl",
-        "Planeswalker": "True",
-        "SubAbility": "DBExile",
-        "ChoiceOptional": "True",
-        "RememberAmount": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, CARDNAME deals X damage to each opponent, where X is the number of planeswalkers you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, CARDNAME deals X damage to each opponent, where X is the number of planeswalkers you control.",
-        "Phase": "End of Turn",
-        "Execute": "TrigDealDamage",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

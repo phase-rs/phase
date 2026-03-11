@@ -2,53 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "ValidTgts": "Any",
-          "Amount": "3",
-          "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Any",
-        "Amount": "3",
-        "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn."
-      }
+      "description": "Prevent the next 3 damage that would be dealt to any target this turn.",
+      "effect": {
+        "description": "Prevent the next 3 damage that would be dealt to any target this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.MultiColor",
-        "TriggerZones": "Graveyard",
-        "OptionalDecider": "You",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
-        "ValidActivatingPlayer": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would lose unspent mana, that mana becomes colorless instead.",
       "event": {
         "Other": "LoseMana"
-      },
-      "params": {
-        "ReplacementResult": "Replaced",
-        "Description": "If you would lose unspent mana, that mana becomes colorless instead.",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ConvertMana"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

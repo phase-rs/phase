@@ -2,41 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
-        "destination": "Graveyard",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.ExiledWithSource+cmcEQX"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X W"
+        "cost": "X W",
+        "type": "Mana"
       },
+      "description": "Put target card with mana value X exiled with CARDNAME into its owner's graveyard. You gain X life.",
+      "effect": {
+        "destination": "Graveyard",
+        "origin": "Exile",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "ExiledWithSource"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target permanent card exiled with CARDNAME with mana value X",
-        "SpellDescription": "Put target card with mana value X exiled with CARDNAME into its owner's graveyard. You gain X life.",
-        "SubAbility": "TrigLife"
-      }
+      "target_prompt": "Select target permanent card exiled with CARDNAME with mana value X"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, for each opponent, exile up to one target nonland permanent that player controls until CARDNAME leaves the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, for each opponent, exile up to one target nonland permanent that player controls until CARDNAME leaves the battlefield."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

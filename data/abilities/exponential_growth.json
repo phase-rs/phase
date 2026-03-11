@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "MaxRepeat": "X",
-          "RepeatSubAbility": "DBPump",
-          "SpellDescription": "Until end of turn, double target creature's power X times.",
-          "ValidTgts": "Creature",
-          "StackDescription": "REP target creature_{c:Targeted}"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MaxRepeat": "X",
-        "RepeatSubAbility": "DBPump",
-        "SpellDescription": "Until end of turn, double target creature's power X times.",
-        "ValidTgts": "Creature",
-        "StackDescription": "REP target creature_{c:Targeted}"
-      }
+      "description": "Until end of turn, double target creature's power X times.",
+      "effect": {
+        "description": "Until end of turn, double target creature's power X times.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters the battlefield, open an Attraction.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigOpenAttraction",
-        "TriggerDescription": "When CARDNAME enters the battlefield, open an Attraction."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you roll a 1, create a 1/1 white Clown Robot artifact creature token.",
       "mode": "RolledDie",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you roll a 1, create a 1/1 white Clown Robot artifact creature token.",
-        "TriggerZones": "Battlefield",
-        "ValidResult": "1"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

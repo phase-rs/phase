@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 and has \"Whenever this creature attacks, you may sacrifice CARDNAME. When you do, this creature deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "AddTrigger": "AttackTrigger",
-        "AddPower": "1",
-        "Description": "Equipped creature gets +1/+0 and has \"Whenever this creature attacks, you may sacrifice CARDNAME. When you do, this creature deals 1 damage to any target.\"",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

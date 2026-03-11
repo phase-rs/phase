@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "You may reveal an Eldrazi card you own from outside the game or choose a face-up Eldrazi card you own in exile. Put that card into your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Sideboard,Exile",
         "destination": "Hand",
+        "origin": "Sideboard,Exile",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:You} may reveal an Eldrazi card they own from outside the game or in exile and put it into their hand.",
-        "Reveal": "True",
-        "ChangeType": "Card.Eldrazi+YouOwn",
-        "Hidden": "True",
-        "SpellDescription": "You may reveal an Eldrazi card you own from outside the game or choose a face-up Eldrazi card you own in exile. Put that card into your hand.",
-        "ChangeNum": "1"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

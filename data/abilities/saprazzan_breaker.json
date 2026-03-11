@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Mill a card.",
       "effect": {
-        "type": "Mill",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBUnblockable",
-        "RememberMilled": "True",
-        "SpellDescription": "Mill a card."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

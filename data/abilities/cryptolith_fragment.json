@@ -1,74 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "SpellDescription": "Add one mana of any color. Each player loses 1 life.",
-              "SubAbility": "DBPain"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add one mana of any color. Each player loses 1 life.",
-            "SubAbility": "DBPain"
-          }
+          "description": "Add one mana of any color. Each player loses 1 life.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your upkeep, if each player has 10 or less life, transform CARDNAME.",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "Execute": "TrigTransform",
-            "SVarCompare": "LE10",
-            "CheckSVar": "X"
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "ETBTapped",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "ReplacementResult": "Updated",
-            "Description": "CARDNAME enters tapped."
-          }
+          "description": "At the beginning of your upkeep, if each player has 10 or less life, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
       ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, each opponent loses 3 life.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDrain",
-            "TriggerDescription": "Whenever CARDNAME attacks, each opponent loses 3 life."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

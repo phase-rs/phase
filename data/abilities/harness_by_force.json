@@ -2,28 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "MaxTargets",
-        "SpellDescription": "Gain control of any number of target creatures until end of turn. Untap those creatures. They gain haste until end of turn.",
-        "TargetMin": "0",
-        "AddKWs": "Haste",
-        "LoseControl": "EOT",
-        "Untap": "True"
-      }
+      "description": "Gain control of any number of target creatures until end of turn. Untap those creatures. They gain haste until end of turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

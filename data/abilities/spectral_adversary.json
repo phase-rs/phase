@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may pay {1}{U} any number of times. When you pay this cost one or more times, put that many +1/+1 counters on CARDNAME, then up to that many other target artifacts, creatures, and/or enchantments phase out.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you may pay {1}{U} any number of times. When you pay this cost one or more times, put that many +1/+1 counters on CARDNAME, then up to that many other target artifacts, creatures, and/or enchantments phase out.",
-        "Execute": "TrigPay"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

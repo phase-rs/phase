@@ -2,71 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 3 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 3 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "Exile each permanent with mana value X or less that's one or more colors.",
       "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "UseAllOriginZones": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Exile each permanent with mana value X or less that's one or more colors.",
-        "ChangeType": "Permanent.nonColorless+cmcLEX"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 7
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 7 life, draw seven cards, then put up to seven permanent cards from your hand onto the battlefield.",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SubAbility": "DBDraw"
-      }
+      "description": "You gain 7 life, draw seven cards, then put up to seven permanent cards from your hand onto the battlefield.",
+      "effect": {
+        "amount": 7,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

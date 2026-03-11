@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to the number of red permanents you control.",
-        "SetPower": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of red permanents you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

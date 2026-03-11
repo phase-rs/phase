@@ -2,90 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Name": "Davriel, Soul Broker's Effect — +1 Attack Tax",
-          "Duration": "UntilYourNextTurn",
-          "AILogic": "Main2",
-          "Triggers": "AttackTrigger",
-          "SpellDescription": "Until your next turn, whenever an opponent attacks you and/or planeswalkers you control, they discard a card. If they can't, they sacrifice an attacking creature."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Name": "Davriel, Soul Broker's Effect — +1 Attack Tax",
-        "Duration": "UntilYourNextTurn",
-        "AILogic": "Main2",
-        "Triggers": "AttackTrigger",
-        "SpellDescription": "Until your next turn, whenever an opponent attacks you and/or planeswalkers you control, they discard a card. If they can't, they sacrifice an attacking creature."
-      }
+      "description": "Until your next turn, whenever an opponent attacks you and/or planeswalkers you control, they discard a card. If they can't, they sacrifice an attacking creature.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Planeswalker": "True",
-          "NumRandomChoices": "3",
-          "Choices": "Draw3,Conjure,Return2,ReturnBig,EmblemBuff,EmblemReduceCost,EmblemDavrielPW,EmblemDrawGain",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
-          "ChoicePrompt": "Choose an offer",
-          "SubAbility": "DBCondition"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "NumRandomChoices": "3",
-        "Choices": "Draw3,Conjure,Return2,ReturnBig,EmblemBuff,EmblemReduceCost,EmblemDavrielPW,EmblemDrawGain",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
-        "ChoicePrompt": "Choose an offer",
-        "SubAbility": "DBCondition"
-      }
+      "description": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
+      "effect": {
+        "description": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Target creature an opponent controls perpetually gets -3/-3.",
       "effect": {
-        "type": "Pump",
         "power": -3,
-        "toughness": -3,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": -3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature an opponent controls perpetually gets -3/-3.",
-        "IsCurse": "True",
-        "Duration": "Perpetual",
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creature an opponent controls",
-        "StackDescription": "REP Target creature an opponent controls_{c:Targeted}"
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

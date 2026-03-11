@@ -1,28 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "EnchantedBy"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.EnchantedBy+YouCtrl",
-        "AddToughness": "2",
-        "Description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Secondary": "True",
-        "Description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
-        "IsPresent": "Card.EnchantedBy+YouDontCtrl"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "EnchantedBy"
+            },
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

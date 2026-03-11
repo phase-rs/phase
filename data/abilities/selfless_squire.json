@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, prevent all damage that would be dealt to you this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "DBEffect",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, prevent all damage that would be dealt to you this turn.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever damage that would be dealt to you is prevented, put that many +1/+1 counters on CARDNAME.",
       "mode": "DamagePreventedOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "You",
-        "TriggerDescription": "Whenever damage that would be dealt to you is prevented, put that many +1/+1 counters on CARDNAME.",
-        "Execute": "TrigPut"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

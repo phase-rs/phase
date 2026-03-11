@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Rough Divide — Whenever a creature you control attacks alone, it gains double strike until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Rough Divide — Whenever a creature you control attacks alone, it gains double strike until end of turn.",
-        "Alone": "True",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, return target permanent card with mana value 3 or less from your graveyard to the battlefield."
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

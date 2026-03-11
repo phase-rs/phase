@@ -1,51 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, put a +1/+1 counter on each creature you control. Untap those creatures.",
           "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "Execute": "TrigCounters",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on each creature you control. Untap those creatures.",
-            "ValidPlayer": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a 2/2 white Knight creature token with vigilance. (Then exile this card. You may cast the enchantment later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "w_2_2_knight_vigilance",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create a 2/2 white Knight creature token with vigilance. (Then exile this card. You may cast the enchantment later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

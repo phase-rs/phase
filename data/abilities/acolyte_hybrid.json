@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heavy Rock Cutter — Whenever CARDNAME attacks, destroy up to one target artifact. If an artifact is destroyed this way, its controller draws a card.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Heavy Rock Cutter — Whenever CARDNAME attacks, destroy up to one target artifact. If an artifact is destroyed this way, its controller draws a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

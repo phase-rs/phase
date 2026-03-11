@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, draw four cards. You have no maximum hand size until your next turn.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, draw four cards. You have no maximum hand size until your next turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "GreatMind"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

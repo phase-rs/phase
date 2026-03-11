@@ -2,26 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 5,
-        "destination": ""
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "ForceRevealToController": "True",
-        "ChangeValid": "Card.Historic",
-        "RestRandomOrder": "True",
-        "SpellDescription": "Look at the top five cards of your library. You may reveal a historic card from among them and put it into your hand. Put the rest on the bottom of your library in a random order. (Artifacts, legendaries, and Sagas are historic.)",
-        "ChangeNum": "1"
-      }
+      "description": "Look at the top five cards of your library. You may reveal a historic card from among them and put it into your hand. Put the rest on the bottom of your library in a random order. (Artifacts, legendaries, and Sagas are historic.)",
+      "effect": {
+        "count": 5,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Card.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, both creatures have \"{1}{U}: Exile this creature, then return it to the battlefield under your control.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.PairedWith,Card.Self+Paired",
-        "AddSVar": "DeadeyeReturn",
-        "AddAbility": "DeadeyeFlicker",
-        "Description": "As long as CARDNAME is paired with another creature, both creatures have \"{1}{U}: Exile this creature, then return it to the battlefield under your control.\""
-      }
+      "modifications": [
+        {
+          "ability": "DeadeyeFlicker",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

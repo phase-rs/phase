@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, you may have it deal 1 damage to any target.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, you may have it deal 1 damage to any target.",
-        "Execute": "TrigDealDamage"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

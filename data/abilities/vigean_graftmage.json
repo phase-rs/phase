@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.counters_GE1_P1P1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
+      "description": "Untap target creature with a +1/+1 counter on it.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap target creature with a +1/+1 counter on it.",
-        "TgtPrompt": "Select target creature with a +1/+1 counter"
-      }
+      "target_prompt": "Select target creature with a +1/+1 counter"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

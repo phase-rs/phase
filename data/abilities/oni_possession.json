@@ -1,39 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice a creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +3/+3 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "Description": "Enchanted creature gets +3/+3 and has trample.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "3",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature is a Demon Spirit.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature is a Demon Spirit.",
-        "RemoveCreatureTypes": "True",
-        "Affected": "Creature.EnchantedBy",
-        "AddType": "Demon & Spirit"
-      }
+      "modifications": [
+        {
+          "core_type": "Demon & Spirit",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice a creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -2,24 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Mill seven cards. At the beginning of the next end step, exile seven cards from your graveyard.",
       "effect": {
-        "type": "Mill",
         "count": 7,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Mill seven cards. At the beginning of the next end step, exile seven cards from your graveyard."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

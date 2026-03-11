@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature an opponent controls. Each other creature that player controls gets -2/-0 until end of turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "WeakenOther",
-        "RememberLKI": "True",
-        "TgtPrompt": "Select target creature an opponent controls",
-        "AlwaysRemember": "True",
-        "SpellDescription": "Destroy target creature an opponent controls. Each other creature that player controls gets -2/-0 until end of turn."
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

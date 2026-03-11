@@ -2,32 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw two cards."
-      }
+      "description": "Draw two cards.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Amount": "1",
-        "IsPresent": "Otter.YouCtrl",
-        "Description": "This spell costs {1} less to cast if you control an Otter.",
-        "EffectZone": "All"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Otter",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control an Otter.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

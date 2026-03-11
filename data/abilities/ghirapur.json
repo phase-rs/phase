@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, until end of turn, each noncreature, non-Vehicle artifact you control becomes a 5/3 Vehicle in addition to its other types and gains trample, haste, and crew 2.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "Execute": "TrigAnimateAll",
-        "TriggerDescription": "At the beginning of combat on your turn, until end of turn, each noncreature, non-Vehicle artifact you control becomes a 5/3 Vehicle in addition to its other types and gains trample, haste, and crew 2.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, return target noncreature artifact card from your graveyard to your hand.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, return target noncreature artifact card from your graveyard to your hand."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

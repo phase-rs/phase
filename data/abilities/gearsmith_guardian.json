@@ -1,18 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +2/+0 as long as you control a blue creature.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Creature.YouCtrl+Blue",
-        "Description": "CARDNAME gets +2/+0 as long as you control a blue creature.",
-        "AddPower": "2",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

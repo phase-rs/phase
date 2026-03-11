@@ -2,52 +2,109 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other+YouCtrl,Land.Other+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Untap another target creature or land you control.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Land.Other"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature or land you control",
-        "SpellDescription": "Untap another target creature or land you control."
-      }
+      "target_prompt": "Select another target creature or land you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Tapped"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other tapped creatures you control have deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "Affected": "Creature.tapped+YouCtrl+Other",
-        "Description": "Other tapped creatures you control have deathtouch."
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other untapped creatures you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other untapped creatures you control have hexproof.",
-        "Affected": "Creature.untapped+YouCtrl+Other",
-        "AddKeyword": "Hexproof"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

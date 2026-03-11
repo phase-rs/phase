@@ -2,70 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<1/Artifact;Creature/artifact or creature>"
+            "cost": "tapXType<1/Artifact;Creature/artifact or creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 U"
+            "cost": "4 U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "The owner of target nonland permanent puts it on the top or bottom of their library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "DestinationAlternative": "Library",
-        "TgtPrompt": "Select target nonland permanent",
-        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
-        "LibraryPositionAlternative": "-1",
-        "ActivationZone": "Hand",
-        "AlternativeDecider": "TargetedOwner",
-        "PrecostDesc": "Channel —",
-        "SpellDescription": "The owner of target nonland permanent puts it on the top or bottom of their library."
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

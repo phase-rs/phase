@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W U B R G",
+        "type": "Mana"
+      },
+      "description": "Search your library for a legendary permanent card with mana value less than NICKNAME's power, put that card onto the battlefield, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "ChangeType": "Permanent.Legendary+cmcLTY",
-        "SpellDescription": "Search your library for a legendary permanent card with mana value less than NICKNAME's power, put that card onto the battlefield, then shuffle."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Description": "CARDNAME gets +1/+1 for each color among other legendary permanents you control.",
-        "Affected": "Card.Self",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each color among other legendary permanents you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

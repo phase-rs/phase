@@ -1,28 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerDescription": "At the beginning of each player's end step, NICKNAME deals damage to that player equal to the number of creatures that player controls that didn't attack this turn.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "All creatures have haste.",
-        "AddKeyword": "Haste",
-        "Affected": "Creature"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's end step, NICKNAME deals damage to that player equal to the number of creatures that player controls that didn't attack this turn.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

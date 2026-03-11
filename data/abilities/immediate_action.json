@@ -1,18 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NamedCard"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control of the named card has haste.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "AddKeyword": "Haste",
-        "Description": "Creatures you control of the named card has haste.",
-        "Affected": "Creature.YouCtrl+NamedCard"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

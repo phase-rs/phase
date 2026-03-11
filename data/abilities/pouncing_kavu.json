@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "If CARDNAME was kicked, it enters with two +1/+1 counters on it and with haste.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "PounceAdvantage",
-        "TriggerDescription": "If CARDNAME was kicked, it enters with two +1/+1 counters on it and with haste.",
-        "ValidCard": "Card.Self+kicked",
-        "Static": "True",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures can't be the target of spells.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidSA": "Spell",
-        "Description": "Creatures can't be the target of spells.",
-        "ValidTarget": "Creature"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

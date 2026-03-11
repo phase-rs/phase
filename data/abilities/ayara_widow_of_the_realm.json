@@ -1,93 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Variable",
-              "value": "X"
-            },
-            "target": {
-              "type": "Filtered",
-              "filter": "Opponent,Battle"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "CARDNAME deals X damage to target opponent or battle and you gain X life, where X is the sacrificed permanent's mana value.",
+          "effect": {
+            "amount": {
+              "type": "Variable",
+              "value": "X"
+            },
+            "target": {
+              "card_type": "Opponent,Battle",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target opponent or battle",
-            "SubAbility": "DBGainLife",
-            "SpellDescription": "CARDNAME deals X damage to target opponent or battle and you gain X life, where X is the sacrificed permanent's mana value."
-          }
+          "target_prompt": "Select target opponent or battle"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Mode": "Transform",
-              "SorcerySpeed": "True",
-              "AILogic": "Always",
-              "Defined": "Self",
-              "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "5 RP"
+            "cost": "5 RP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "Transform",
-            "SorcerySpeed": "True",
-            "AILogic": "Always",
-            "Defined": "Self",
-            "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
-          }
+          "description": "Transform NICKNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform NICKNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, return up to one target artifact or creature card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of combat on your turn, return up to one target artifact or creature card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step.",
-            "Phase": "BeginCombat",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "Execute": "TrigChangeZone"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

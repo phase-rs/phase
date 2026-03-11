@@ -1,29 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has base power and toughness 7/7 and can't be blocked by creatures with power 2 or less.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "SetPower": "7",
-        "SetToughness": "7",
-        "Description": "Equipped creature has base power and toughness 7/7 and can't be blocked by creatures with power 2 or less."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 7
+        },
+        {
+          "type": "SetToughness",
+          "value": 7
+        }
+      ]
     },
     {
+      "description": "Equipped creature can't be blocked by creatures with power 2 or less.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.powerLE2",
-        "ValidAttacker": "Creature.EquippedBy",
-        "Secondary": "True",
-        "Description": "Equipped creature can't be blocked by creatures with power 2 or less."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

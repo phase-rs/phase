@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless you control another creature with power 4 or greater.",
-        "IsPresent": "Creature.powerGE4+YouCtrl+Other",
-        "PresentCompare": "EQ0"
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack unless you control another creature with power 4 or greater.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

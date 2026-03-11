@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RearrangeTopOfLibrary",
-        "params": {
-          "MayShuffle": "True",
-          "SpellDescription": "Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card.",
-          "SubAbility": "DBDraw",
-          "NumCards": "3",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MayShuffle": "True",
-        "SpellDescription": "Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card.",
-        "SubAbility": "DBDraw",
-        "NumCards": "3",
-        "Defined": "You"
-      }
+      "description": "Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card.",
+      "effect": {
+        "description": "Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card.",
+        "name": "RearrangeTopOfLibrary",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

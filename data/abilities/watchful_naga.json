@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, draw a card. (An exerted creature won't untap during your next untap step.)",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "Trigger": "DBDraw",
-        "Description": "You may exert CARDNAME as it attacks. When you do, draw a card. (An exerted creature won't untap during your next untap step.)",
-        "Cost": "Exert<1/CARDNAME>",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

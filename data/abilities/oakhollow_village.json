@@ -2,76 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "RestrictValid": "Spell.Creature",
-          "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Creature",
-        "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell."
-      }
+      "description": "Add {G}. Spend this mana only to cast a creature spell.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "ValidCards": "Frog.ThisTurnEntered+YouCtrl,Rabbit.ThisTurnEntered+YouCtrl,Raccoon.ThisTurnEntered+YouCtrl,Squirrel.ThisTurnEntered+YouCtrl",
-          "CounterType": "P1P1",
-          "CounterNum": "1",
-          "SpellDescription": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Frog.ThisTurnEntered+YouCtrl,Rabbit.ThisTurnEntered+YouCtrl,Raccoon.ThisTurnEntered+YouCtrl,Squirrel.ThisTurnEntered+YouCtrl",
-        "CounterType": "P1P1",
-        "CounterNum": "1",
-        "SpellDescription": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn."
-      }
+      "description": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

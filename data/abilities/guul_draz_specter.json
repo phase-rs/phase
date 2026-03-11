@@ -1,31 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDiscard",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player discards a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +3/+3 as long as an opponent has no cards in hand.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +3/+3 as long as an opponent has no cards in hand.",
-        "SVarCompare": "EQ0",
-        "AddToughness": "3",
-        "Affected": "Card.Self",
-        "AddPower": "3",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player discards a card.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

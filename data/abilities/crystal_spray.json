@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "ValidTgts": "Card",
-          "TgtPrompt": "Choose target spell or permanent",
-          "StackDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
-          "Choices": "ChangeColor,ChangeType",
-          "TgtZone": "Stack,Battlefield",
-          "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
-          "Defined": "You"
-        }
-      },
       "cost": null,
+      "description": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
+      "effect": {
+        "description": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Card",
-        "TgtPrompt": "Choose target spell or permanent",
-        "StackDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
-        "Choices": "ChangeColor,ChangeType",
-        "TgtZone": "Stack,Battlefield",
-        "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another or one basic land type with another until end of turn. Draw a card.",
-        "Defined": "You"
-      }
+      "target_prompt": "Choose target spell or permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

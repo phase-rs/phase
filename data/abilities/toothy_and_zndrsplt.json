@@ -1,39 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you win a coin flip, put a +1/+1 counter on CARDNAME.",
       "mode": "FlippedCoin",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you win a coin flip, put a +1/+1 counter on CARDNAME.",
-        "ValidResult": "Win",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigFlip",
-        "TriggerDescription": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME leaves the battlefield, draw a card for each +1/+1 counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, draw a card for each +1/+1 counter on it.",
-        "ValidCard": "Card.Self",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

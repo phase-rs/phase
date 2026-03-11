@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "Planeswalker": "True",
-          "ResultSubAbilities": "1-2:Token,3:Unearth,4-5:Damage,6:CometGo",
-          "SpellDescription": "Roll a six-sided die."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ResultSubAbilities": "1-2:Token,3:Unearth,4-5:Damage,6:CometGo",
-        "SpellDescription": "Roll a six-sided die."
-      }
+      "description": "Roll a six-sided die.",
+      "effect": {
+        "description": "Roll a six-sided die.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

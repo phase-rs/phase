@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "PlayerTurn": "Opponent",
-        "Phases": "End of Turn",
-        "Caster": "You",
-        "ValidSA": "Spell",
-        "Description": "During each opponent's end step, you may cast spells as though they had flash.",
-        "ValidCard": "Card"
-      }
+      "description": "During each opponent's end step, you may cast spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

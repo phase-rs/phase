@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigFlip",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of your end step, flip a coin. If you win the flip, take an extra turn after this one.",
-        "Phase": "End of Turn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each permanent you control has phasing. (It phases in or out before you untap during each of your untap steps. While it's phased out, it's treated as though it doesn't exist.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.YouCtrl",
-        "EffectZone": "Command",
-        "AddKeyword": "Phasing",
-        "Description": "Each permanent you control has phasing. (It phases in or out before you untap during each of your untap steps. While it's phased out, it's treated as though it doesn't exist.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Phasing",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, flip a coin. If you win the flip, take an extra turn after this one.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever your team attacks with exactly two creatures, those creatures gain double strike until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "Whenever your team attacks with exactly two creatures, those creatures gain double strike until end of turn.",
-        "NoResolvingCheck": "True",
-        "ValidAttackers": "Creature.YourTeamCtrl",
-        "TriggerZones": "Command",
-        "IsPresent": "Creature.attacking",
-        "PresentCompare": "EQ2",
-        "AttackingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, untap up to two target creatures your team controls. If it's a main phase, there is an additional combat phase after this phase, followed by an additional main phase.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, untap up to two target creatures your team controls. If it's a main phase, there is an additional combat phase after this phase, followed by an additional main phase.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

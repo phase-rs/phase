@@ -1,31 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AddPower": "X",
-            "AddToughness": "X",
-            "Description": "CARDNAME gets +1/+1 for each artifact and/or enchantment you control.",
-            "Affected": "Card.Self"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "CARDNAME gets +1/+1 for each artifact and/or enchantment you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

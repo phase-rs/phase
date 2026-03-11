@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "AddPower": "AffectedX",
-        "Affected": "Creature.YouCtrl",
-        "AddToughness": "AffectedX",
-        "AffectedZone": "Battlefield",
-        "Description": "Each creature you control gets +1/+1 for each of its colors."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Each creature you control gets +1/+1 for each of its colors.",
+      "effect_zone": "Command",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,63 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SpellDescription": "Add {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}."
-      }
+      "description": "Add {U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 U",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 7/7 blue Giant creature with ward {3}. It's still a land. (Whenever it becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)",
       "effect": {
-        "type": "Animate",
         "power": 7,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 7,
+        "type": "Animate",
         "types": [
           "Creature",
           "Giant"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "Keywords": "Ward:3",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 7/7 blue Giant creature with ward {3}. It's still a land. (Whenever it becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)",
-        "OverwriteColors": "True",
-        "Colors": "Blue"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you control two or more other lands, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "LandTapped",
-        "ReplacementResult": "Updated",
-        "Description": "If you control two or more other lands, CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

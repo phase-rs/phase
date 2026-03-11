@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, destroy up to X target artifacts.",
       "mode": "Cycled",
-      "params": {
-        "Execute": "TrigDestroy",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cycle CARDNAME, destroy up to X target artifacts."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

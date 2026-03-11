@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Decimate — When CARDNAME enters, each opponent sacrifices a tenth of the creatures they control, rounded up.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRepeatEach",
-        "TriggerDescription": "Decimate — When CARDNAME enters, each opponent sacrifices a tenth of the creatures they control, rounded up.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever an opponent sacrifices a creature, put a +1/+1 counter on NICKNAME.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an opponent sacrifices a creature, put a +1/+1 counter on NICKNAME.",
-        "ValidCard": "Creature.OppCtrl",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Fog",
-          "ReplacementEffects": "RPrevent",
-          "SpellDescription": "Prevent all damage that would be dealt this turn by creatures your opponents control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Fog",
-        "ReplacementEffects": "RPrevent",
-        "SpellDescription": "Prevent all damage that would be dealt this turn by creatures your opponents control."
-      }
+      "description": "Prevent all damage that would be dealt this turn by creatures your opponents control.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

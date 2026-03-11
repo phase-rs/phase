@@ -1,27 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player sacrifices a permanent, put a +1/+1 counter on CARDNAME and you gain 1 life.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerDescription": "Whenever a player sacrifices a permanent, put a +1/+1 counter on CARDNAME and you gain 1 life.",
-        "Execute": "TrigCounter",
-        "ValidCard": "Permanent",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever NICKNAME attacks, return up to one target permanent card with mana value less than or equal to NICKNAME's power from your graveyard to the battlefield.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigReanimate",
-        "TriggerDescription": "Whenever NICKNAME attacks, return up to one target permanent card with mana value less than or equal to NICKNAME's power from your graveyard to the battlefield."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RemoveFromCombat",
-        "params": {
-          "OpponentTurn": "True",
-          "SubAbility": "DBUntap",
-          "SpellDescription": "Cast CARDNAME only on the declare blockers step on an opponent's turn. Remove all attacking creatures from combat and untap them. After this phase, there is an additional combat phase. Each of those creatures attacks that combat if able. They can't attack you or planeswalkers you control that combat.",
-          "RememberRemovedFromCombat": "True",
-          "Defined": "Valid Creature.attacking",
-          "ActivationPhases": "Declare Blockers"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "OpponentTurn": "True",
-        "SubAbility": "DBUntap",
-        "SpellDescription": "Cast CARDNAME only on the declare blockers step on an opponent's turn. Remove all attacking creatures from combat and untap them. After this phase, there is an additional combat phase. Each of those creatures attacks that combat if able. They can't attack you or planeswalkers you control that combat.",
-        "RememberRemovedFromCombat": "True",
-        "Defined": "Valid Creature.attacking",
-        "ActivationPhases": "Declare Blockers"
-      }
+      "description": "Cast CARDNAME only on the declare blockers step on an opponent's turn. Remove all attacking creatures from combat and untap them. After this phase, there is an additional combat phase. Each of those creatures attacks that combat if able. They can't attack you or planeswalkers you control that combat.",
+      "effect": {
+        "description": "Cast CARDNAME only on the declare blockers step on an opponent's turn. Remove all attacking creatures from combat and untap them. After this phase, there is an additional combat phase. Each of those creatures attacks that combat if able. They can't attack you or planeswalkers you control that combat.",
+        "name": "RemoveFromCombat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

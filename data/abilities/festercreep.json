@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": -1,
-        "toughness": -1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/P1P1>"
+            "cost": "SubCounter<1/P1P1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.StrictlyOther",
-        "IsCurse": "True",
-        "SpellDescription": "All other creatures get -1/-1 until end of turn."
-      }
+      "description": "All other creatures get -1/-1 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": -1,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,113 +1,90 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "C",
-            "params": {
-              "SpellDescription": "Add {C}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {C}."
-          }
+          "description": "Add {C}.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "costs": [
+              {
+                "cost": "R",
+                "type": "Mana"
+              },
+              {
+                "type": "Tap"
+              }
+            ],
+            "type": "Composite"
+          },
+          "description": "Target creature gains haste until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 0,
-            "toughness": 0,
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": "R"
-              },
-              {
-                "type": "Tap"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature gains haste until end of turn.",
-            "KW": "Haste"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "Meld",
-            "params": {
-              "Primary": "Hanweir Battlements",
-              "Name": "Hanweir, the Writhing Township",
-              "ConditionPresent": "Card.Self+YouCtrl+YouOwn",
-              "ConditionCheckSVar": "X",
-              "Secondary": "Hanweir Garrison",
-              "SpellDescription": "If you both own and control CARDNAME and a creature named Hanweir Garrison, exile them, then meld them into Hanweir, the Writhing Township."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "3 R R"
+                "cost": "3 R R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Primary": "Hanweir Battlements",
-            "Name": "Hanweir, the Writhing Township",
-            "ConditionPresent": "Card.Self+YouCtrl+YouOwn",
-            "ConditionCheckSVar": "X",
-            "Secondary": "Hanweir Garrison",
-            "SpellDescription": "If you both own and control CARDNAME and a creature named Hanweir Garrison, exile them, then meld them into Hanweir, the Writhing Township."
-          }
+          "description": "If you both own and control CARDNAME and a creature named Hanweir Garrison, exile them, then meld them into Hanweir, the Writhing Township.",
+          "effect": {
+            "description": "If you both own and control CARDNAME and a creature named Hanweir Garrison, exile them, then meld them into Hanweir, the Writhing Township.",
+            "name": "Meld",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, create two 3/2 colorless Eldrazi Horror creature tokens that are tapped and attacking.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME attacks, create two 3/2 colorless Eldrazi Horror creature tokens that are tapped and attacking.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

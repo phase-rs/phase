@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, defending player loses 1 life and you gain 1 life.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME attacks, defending player loses 1 life and you gain 1 life.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

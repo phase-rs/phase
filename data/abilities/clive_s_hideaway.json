@@ -2,65 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "SpellDescription": "You may play the exiled card without paying its mana cost if you control four or more legendary creatures.",
-          "ConditionSVarCompare": "GE4",
-          "Controller": "You",
-          "Amount": "All",
-          "WithoutManaCost": "True",
-          "Defined": "ExiledWith",
-          "Optional": "True",
-          "ConditionCheckSVar": "X"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may play the exiled card without paying its mana cost if you control four or more legendary creatures.",
-        "ConditionSVarCompare": "GE4",
-        "Controller": "You",
-        "Amount": "All",
-        "WithoutManaCost": "True",
-        "Defined": "ExiledWith",
-        "Optional": "True",
-        "ConditionCheckSVar": "X"
-      }
+      "description": "You may play the exiled card without paying its mana cost if you control four or more legendary creatures.",
+      "effect": {
+        "description": "You may play the exiled card without paying its mana cost if you control four or more legendary creatures.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

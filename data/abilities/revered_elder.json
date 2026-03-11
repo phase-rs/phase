@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Amount": "1",
-          "Defined": "Self",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "Defined": "Self",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn."
-      }
+      "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

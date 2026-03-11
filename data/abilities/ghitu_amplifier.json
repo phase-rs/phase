@@ -1,29 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked, return target creature an opponent controls to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+kicked",
-        "Execute": "TrigReturn",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, return target creature an opponent controls to its owner's hand.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast an instant or sorcery spell, CARDNAME gets +2/+0 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "DBPump",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME gets +2/+0 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

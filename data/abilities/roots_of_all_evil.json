@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, create five 1/1 green Saproling creature tokens.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, create five 1/1 green Saproling creature tokens.",
-        "ValidCard": "Card.Self",
-        "Execute": "GetSaps"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

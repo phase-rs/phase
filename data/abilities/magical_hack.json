@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeText",
-        "params": {
-          "Duration": "Permanent",
-          "ChangeTypeWord": "ChooseBasicLandType ChooseBasicLandType",
-          "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one basic land type with another. (For example, you may change \"swampwalk\" to \"plainswalk.\" This effect lasts indefinitely.)",
-          "ValidTgts": "Card",
-          "TgtZone": "Stack,Battlefield",
-          "TgtPrompt": "Choose target spell or permanent"
-        }
-      },
       "cost": null,
+      "description": "Change the text of target spell or permanent by replacing all instances of one basic land type with another. (For example, you may change \"swampwalk\" to \"plainswalk.\" This effect lasts indefinitely.)",
+      "duration": "Permanent",
+      "effect": {
+        "description": "Change the text of target spell or permanent by replacing all instances of one basic land type with another. (For example, you may change \"swampwalk\" to \"plainswalk.\" This effect lasts indefinitely.)",
+        "name": "ChangeText",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "ChangeTypeWord": "ChooseBasicLandType ChooseBasicLandType",
-        "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one basic land type with another. (For example, you may change \"swampwalk\" to \"plainswalk.\" This effect lasts indefinitely.)",
-        "ValidTgts": "Card",
-        "TgtZone": "Stack,Battlefield",
-        "TgtPrompt": "Choose target spell or permanent"
-      }
+      "target_prompt": "Choose target spell or permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

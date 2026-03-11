@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks and isn't blocked, it gets +2/+0 until end of combat.",
       "mode": "AttackerUnblocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it gets +2/+0 until end of combat.",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

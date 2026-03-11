@@ -1,20 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another permanent you control leaves the battlefield, if it had counters on it, investigate.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigInvestigate",
-        "TriggerDescription": "Whenever another permanent you control leaves the battlefield, if it had counters on it, investigate.",
-        "Origin": "Battlefield",
-        "ValidCard": "Permanent.YouCtrl+Other+HasCounters",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "HasCounters"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

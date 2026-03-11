@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Spirit,Arcane"
-        }
-      },
       "cost": null,
+      "description": "Counter target Spirit or Arcane spell.",
+      "effect": {
+        "target": {
+          "card_type": "Spirit,Arcane",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Spirit or Arcane spell",
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target Spirit or Arcane spell."
-      }
+      "target_prompt": "Select target Spirit or Arcane spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

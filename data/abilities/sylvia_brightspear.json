@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Dragon",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YourTeamCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Dragons your team controls have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Dragons your team controls have double strike.",
-        "AddKeyword": "Double Strike",
-        "Affected": "Dragon.YourTeamCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

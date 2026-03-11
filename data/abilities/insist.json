@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "Mode": "SpellCast",
-          "ValidCard": "Creature",
-          "ValidActivatingPlayer": "You",
-          "Static": "True",
-          "ThisTurn": "True",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "The next creature spell you cast this turn can't be countered.",
-          "Execute": "DBEffect"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "SpellCast",
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "You",
-        "Static": "True",
-        "ThisTurn": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "The next creature spell you cast this turn can't be countered.",
-        "Execute": "DBEffect"
-      }
+      "description": "The next creature spell you cast this turn can't be countered.",
+      "effect": {
+        "description": "The next creature spell you cast this turn can't be countered.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

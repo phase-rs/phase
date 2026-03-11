@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ5",
-        "ValidTarget": "You",
-        "Description": "As long as you control a permanent of each color, prevent all damage that would be dealt to you.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "As long as you control a permanent of each color, prevent all damage that would be dealt to you.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

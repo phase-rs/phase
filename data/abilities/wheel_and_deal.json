@@ -2,28 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Any number of target opponents each discard their hands, then draw seven cards.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDrawOpp",
-        "TargetMax": "MaxTgt",
-        "Mode": "Hand",
-        "SpellDescription": "Any number of target opponents each discard their hands, then draw seven cards.",
-        "TargetMin": "0"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

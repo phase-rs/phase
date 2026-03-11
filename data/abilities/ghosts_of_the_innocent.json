@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If a source would deal damage to a permanent or player, it deals half that damage, rounded down, to that permanent or player instead.",
-        "ValidTarget": "Player,Permanent",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DmgHalfDown"
-      }
+      "description": "If a source would deal damage to a permanent or player, it deals half that damage, rounded down, to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

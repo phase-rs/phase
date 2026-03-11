@@ -1,26 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, put a feeding counter on CARDNAME.",
       "mode": "LifeGained",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you gain life, put a feeding counter on CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever NICKNAME attacks, you may remove three feeding counters from it. If you do, you draw three cards and you lose 3 life.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks, you may remove three feeding counters from it. If you do, you draw three cards and you lose 3 life.",
-        "Execute": "TrigDraw"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

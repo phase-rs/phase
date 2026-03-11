@@ -1,69 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "AnimateAll",
-            "params": {
-              "SpellDescription": "Until end of turn, creatures you control gain trample and \"Whenever this creature deals combat damage to a player, draw a card.\"",
-              "Keywords": "Trample",
-              "ValidCards": "Creature.YouCtrl",
-              "Triggers": "Trig1",
-              "StackDescription": "SpellDescription"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Until end of turn, creatures you control gain trample and \"Whenever this creature deals combat damage to a player, draw a card.\"",
-            "Keywords": "Trample",
-            "ValidCards": "Creature.YouCtrl",
-            "Triggers": "Trig1",
-            "StackDescription": "SpellDescription"
-          }
+          "description": "Until end of turn, creatures you control gain trample and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+          "effect": {
+            "description": "Until end of turn, creatures you control gain trample and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+            "name": "AnimateAll",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "AnimateAll",
-            "params": {
-              "ValidCards": "Creature.YouCtrl",
-              "SpellDescription": "Until end of turn, creatures you control gain menace and \"Whenever this creature deals combat damage to a player, that player discards a card.\"",
-              "Triggers": "Trig2",
-              "Keywords": "Menace",
-              "StackDescription": "SpellDescription"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature.YouCtrl",
-            "SpellDescription": "Until end of turn, creatures you control gain menace and \"Whenever this creature deals combat damage to a player, that player discards a card.\"",
-            "Triggers": "Trig2",
-            "Keywords": "Menace",
-            "StackDescription": "SpellDescription"
-          }
+          "description": "Until end of turn, creatures you control gain menace and \"Whenever this creature deals combat damage to a player, that player discards a card.\"",
+          "effect": {
+            "description": "Until end of turn, creatures you control gain menace and \"Whenever this creature deals combat damage to a player, that player discards a card.\"",
+            "name": "AnimateAll",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

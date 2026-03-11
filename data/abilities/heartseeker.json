@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+1 and has \"{T}, Unattach CARDNAME: Destroy target creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +2/+1 and has \"{T}, Unattach CARDNAME: Destroy target creature.\"",
-        "AddPower": "2",
-        "AddAbility": "SeekerDestroy",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "ability": "SeekerDestroy",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

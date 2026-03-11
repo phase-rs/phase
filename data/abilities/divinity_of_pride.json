@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE25",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +4/+4 as long as you have 25 or more life.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE25",
-        "AddToughness": "4",
-        "AddPower": "4",
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "Description": "CARDNAME gets +4/+4 as long as you have 25 or more life."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

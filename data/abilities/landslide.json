@@ -2,28 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Sacrifice any number of Mountains. CARDNAME deals that much damage to target player or planeswalker.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "SacX",
-        "SubAbility": "DBDamage",
-        "Defined": "You",
-        "RememberSacrificed": "True",
-        "Optional": "True",
-        "SpellDescription": "Sacrifice any number of Mountains. CARDNAME deals that much damage to target player or planeswalker.",
-        "SacValid": "Mountain"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

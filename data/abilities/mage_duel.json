@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Target creature you control gets +1/+2 until end of turn. It fights target creature you don't control.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature you control gets +1/+2 until end of turn. It fights target creature you don't control.",
-        "TgtPrompt": "Select target creature you control",
-        "SubAbility": "DBFight",
-        "AILogic": "Fight"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "Description": "This spell costs {2} less to cast if you've cast another instant or sorcery spell this turn.",
-        "Type": "Spell",
-        "Amount": "2"
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {2} less to cast if you've cast another instant or sorcery spell this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

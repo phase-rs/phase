@@ -1,28 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "ValkasCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on equipped creature if it's red.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, put a +1/+1 counter on equipped creature if it's red.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -2,50 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "SpellDescription": "Move any number of counters from target permanent you control to another target permanent you control.",
-          "TargetMax": "2",
-          "ValidTgts": "Permanent.YouCtrl",
-          "TgtPrompt": "Select target permanent to move counters from then target permanent to move counters to",
-          "TargetMin": "2",
-          "CounterNum": "Any",
-          "CounterType": "Any"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 W"
+        "cost": "4 W",
+        "type": "Mana"
       },
+      "description": "Move any number of counters from target permanent you control to another target permanent you control.",
+      "effect": {
+        "description": "Move any number of counters from target permanent you control to another target permanent you control.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Move any number of counters from target permanent you control to another target permanent you control.",
-        "TargetMax": "2",
-        "ValidTgts": "Permanent.YouCtrl",
-        "TgtPrompt": "Select target permanent to move counters from then target permanent to move counters to",
-        "TargetMin": "2",
-        "CounterNum": "Any",
-        "CounterType": "Any"
-      }
+      "target_prompt": "Select target permanent to move counters from then target permanent to move counters to"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a permanent you control leaves the battlefield, if it had counters on it, put those counters on target permanent you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl+HasCounters",
-        "TriggerZones": "Battlefield",
-        "Destination": "Any",
-        "Execute": "TrigPutCounter",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a permanent you control leaves the battlefield, if it had counters on it, put those counters on target permanent you control."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

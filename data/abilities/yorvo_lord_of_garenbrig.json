@@ -1,20 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another green creature you control enters, put a +1/+1 counter on NICKNAME. Then if that creature's power is greater than NICKNAME's power, put another +1/+1 counter on NICKNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever another green creature you control enters, put a +1/+1 counter on NICKNAME. Then if that creature's power is greater than NICKNAME's power, put another +1/+1 counter on NICKNAME.",
-        "Execute": "TrigPutCounter",
-        "Origin": "Any",
-        "ValidCard": "Creature.Other+YouCtrl+Green",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Green"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

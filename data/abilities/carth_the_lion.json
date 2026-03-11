@@ -1,41 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Planeswalkers' loyalty abilities you activate cost an additional [+1] to activate.",
+      "mode": "RaiseCost"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or a planeswalker you control dies, look at the top seven cards of your library. You may reveal a planeswalker card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDig",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or a planeswalker you control dies, look at the top seven cards of your library. You may reveal a planeswalker card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or a planeswalker you control dies, look at the top seven cards of your library. You may reveal a planeswalker card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or a planeswalker you control dies, look at the top seven cards of your library. You may reveal a planeswalker card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "Execute": "TrigDig",
-        "Secondary": "True",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Planeswalker.YouCtrl"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Planeswalker",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "RaiseCost",
-      "params": {
-        "ValidSpell": "Activated.Loyalty",
-        "Cost": "AddCounter<1/LOYALTY>",
-        "ValidCard": "Planeswalker.YouCtrl",
-        "Description": "Planeswalkers' loyalty abilities you activate cost an additional [+1] to activate."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

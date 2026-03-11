@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, gain control of target creature an opponent controls and untap it.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, gain control of target creature an opponent controls and untap it.",
-        "Execute": "DBGainControl"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

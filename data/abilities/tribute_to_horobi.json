@@ -1,39 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, gain control of all Rat tokens.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, gain control of all Rat tokens.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigGainControl",
-            "Destination": "Battlefield"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME attacks, you may sacrifice another creature. If you do, draw a card.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice another creature. If you do, draw a card.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDraw"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

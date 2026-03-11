@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more Goblins you control attack, create a 1/1 red Goblin creature token that's tapped and attacking.",
       "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackers": "Goblin.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more Goblins you control attack, create a 1/1 red Goblin creature token that's tapped and attacking.",
-        "Execute": "TrigToken"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever another creature you control enters, CARDNAME deals 1 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Other+YouCtrl",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals 1 damage to each opponent."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

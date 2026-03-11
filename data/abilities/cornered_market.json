@@ -1,25 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Players can't play nonbasic lands with the same name as a nontoken permanent.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "ValidCard": "Land.nonBasic+sharesNameWith NonToken",
-        "Description": "Players can't play nonbasic lands with the same name as a nontoken permanent."
       }
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.sharesNameWith NonToken",
-        "Description": "Players can't cast spells with the same name as a nontoken permanent."
-      }
+      "description": "Players can't cast spells with the same name as a nontoken permanent.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

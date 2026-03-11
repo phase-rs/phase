@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "ValidTgts": "Permanent.nonAura",
-          "Defined": "Targeted",
-          "CloneTarget": "Valid Permanent.nonLand+YouCtrl",
-          "TgtPrompt": "Select target non-Aura permanent",
-          "SpellDescription": "Each nonland permanent you control becomes a copy of target non-Aura permanent."
-        }
-      },
       "cost": null,
+      "description": "Each nonland permanent you control becomes a copy of target non-Aura permanent.",
+      "effect": {
+        "description": "Each nonland permanent you control becomes a copy of target non-Aura permanent.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent.nonAura",
-        "Defined": "Targeted",
-        "CloneTarget": "Valid Permanent.nonLand+YouCtrl",
-        "TgtPrompt": "Select target non-Aura permanent",
-        "SpellDescription": "Each nonland permanent you control becomes a copy of target non-Aura permanent."
-      }
+      "target_prompt": "Select target non-Aura permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

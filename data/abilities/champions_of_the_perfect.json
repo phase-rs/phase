@@ -1,41 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "As an additional cost to cast this spell, behold an Elf and exile it. (Exile an Elf you control or an Elf card from your hand.)",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "TriggerDescription": "Whenever you cast a creature spell, draw a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "RaiseCost",
-      "params": {
-        "EffectZone": "All",
-        "Cost": "BeholdExile<1/Elf>",
-        "Activator": "You",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "As an additional cost to cast this spell, behold an Elf and exile it. (Exile an Elf you control or an Elf card from your hand.)"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

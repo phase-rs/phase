@@ -1,56 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Sigil of Corruption — When you lose control of CARDNAME, draw two cards.",
-        "Destination": "Any"
-      }
-    },
-    {
-      "mode": "ChangesController",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerController": "TriggeredOriginalController",
-        "TriggerDescription": "Sigil of Corruption — When you lose control of CARDNAME, draw two cards."
-      }
+      "description": "The Betrayer — If damage would be dealt to CARDNAME, prevent that damage and an opponent of your choice gains control of it.",
+      "event": "DamageDone"
     }
   ],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "Berzerker — CARDNAME attacks or blocks each combat if able.",
-        "ValidCreature": "Card.Self"
+      "description": "Berzerker — CARDNAME attacks or blocks each combat if able.",
+      "mode": "MustAttack"
+    },
+    {
+      "mode": "MustBlock"
+    }
+  ],
+  "triggers": [
+    {
+      "description": "Sigil of Corruption — When you lose control of CARDNAME, draw two cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "MustBlock",
-      "params": {
-        "ValidCreature": "Card.Self"
+      "description": "Sigil of Corruption — When you lose control of CARDNAME, draw two cards.",
+      "mode": "ChangesController",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "replacements": [
-    {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "ChoosePlayer",
-        "ValidTarget": "Card.Self",
-        "PreventionEffect": "True",
-        "AlwaysReplace": "True",
-        "Description": "The Betrayer — If damage would be dealt to CARDNAME, prevent that damage and an opponent of your choice gains control of it.",
-        "ActiveZones": "Battlefield"
-      }
-    }
-  ],
-  "faces": []
+  ]
 }

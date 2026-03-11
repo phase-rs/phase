@@ -1,29 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Players can't cast spells from graveyards.",
-        "Origin": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidLKI": "Creature.Other",
-        "Origin": "Graveyard",
-        "ActiveZones": "Battlefield",
-        "Description": "Creature cards in graveyards can't enter the battlefield.",
-        "Layer": "CantHappen",
-        "Prevent": "True"
-      }
+      "description": "Creature cards in graveyards can't enter the battlefield.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Players can't cast spells from graveyards.",
+      "mode": "CantBeCast"
+    }
+  ],
+  "triggers": []
 }

@@ -1,63 +1,87 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When NICKNAME enters, look at the top five cards of your library. You may put a creature card with mana value 4 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDig",
-            "TriggerDescription": "When NICKNAME enters, look at the top five cards of your library. You may put a creature card with mana value 4 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "When another creature you control leaves the battlefield, transform NICKNAME at the beginning of the next upkeep.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "ValidCard": "Creature.Other+YouCtrl",
-            "Destination": "Any",
-            "Execute": "TrigDelayTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "When another creature you control leaves the battlefield, transform NICKNAME at the beginning of the next upkeep."
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "Execute": "TrigEarthbend",
-            "Phase": "BeginCombat",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "TriggerDescription": "At the beginning of combat on your turn, earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Land"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Land creatures you control have vigilance.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Vigilance",
-            "Affected": "Creature.Land+YouCtrl",
-            "Description": "Land creatures you control have vigilance."
-          }
+          "modifications": [
+            {
+              "keyword": "Vigilance",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of combat on your turn, earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+          "mode": "Phase",
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Vampire"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Target Vampire gains haste until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Vampire",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Vampire",
-        "KW": "Haste",
-        "SpellDescription": "Target Vampire gains haste until end of turn."
-      }
+      "target_prompt": "Select target Vampire"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

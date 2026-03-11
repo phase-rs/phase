@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, each opponent can't cast instant or sorcery spells during that player's next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, each opponent can't cast instant or sorcery spells during that player's next turn.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME attacks, you may pay {X}{W}{U}{U}. If you do, you gain X life and draw X cards.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME attacks, you may pay {X}{W}{U}{U}. If you do, you gain X life and draw X cards.",
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

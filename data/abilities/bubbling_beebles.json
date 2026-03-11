@@ -1,19 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Enchantment",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "DefenderCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't be blocked as long as defending player controls an enchantment.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "IsPresent": "Enchantment.DefenderCtrl",
-        "ValidAttacker": "Card.Self",
-        "Description": "CARDNAME can't be blocked as long as defending player controls an enchantment."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

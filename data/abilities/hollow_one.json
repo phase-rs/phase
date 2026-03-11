@@ -1,20 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Description": "This spell costs {2} less to cast for each card you've cycled or discarded this turn.",
-        "Relative": "True",
-        "Amount": "Y",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {2} less to cast for each card you've cycled or discarded this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

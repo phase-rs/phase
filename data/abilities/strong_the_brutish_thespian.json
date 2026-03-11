@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Enrage — Whenever NICKNAME is dealt damage, you get three rad counters and put three +1/+1 counters on NICKNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You gain life rather than lose life from radiation.",
       "mode": {
         "Other": "GainLifeRadiation"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "Description": "You gain life rather than lose life from radiation."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Enrage — Whenever NICKNAME is dealt damage, you get three rad counters and put three +1/+1 counters on NICKNAME.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

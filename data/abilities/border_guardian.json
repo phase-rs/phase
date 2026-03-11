@@ -1,39 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a silver-bordered spell, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.BorderColorSilver",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you cast a silver-bordered spell, put a +1/+1 counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "BorderColorSilver"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a black-bordered spell, CARDNAME can't be blocked this turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.BorderColorBlack",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUnblock",
-        "TriggerDescription": "Whenever you cast a black-bordered spell, CARDNAME can't be blocked this turn.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "BorderColorBlack"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a white-bordered spell, CARDNAME gains double strike until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.BorderColorWhite",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDS",
-        "TriggerDescription": "Whenever you cast a white-bordered spell, CARDNAME gains double strike until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "BorderColorWhite"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

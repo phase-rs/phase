@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "RepeatSVarCompare": "GT0",
-          "RepeatCheckSVar": "CheckRepeat",
-          "RepeatSubAbility": "DBLoseLife",
-          "SpellDescription": "You lose 2 life and draw two cards, then clash with an opponent. If you win, repeat this process."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "RepeatSVarCompare": "GT0",
-        "RepeatCheckSVar": "CheckRepeat",
-        "RepeatSubAbility": "DBLoseLife",
-        "SpellDescription": "You lose 2 life and draw two cards, then clash with an opponent. If you win, repeat this process."
-      }
+      "description": "You lose 2 life and draw two cards, then clash with an opponent. If you win, repeat this process.",
+      "effect": {
+        "description": "You lose 2 life and draw two cards, then clash with an opponent. If you win, repeat this process.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

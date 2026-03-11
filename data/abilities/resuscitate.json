@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Abilities": "ABRegen",
-          "SpellDescription": "Until end of turn, creatures you control gain \"{1}: Regenerate this creature.\"",
-          "ValidCards": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Abilities": "ABRegen",
-        "SpellDescription": "Until end of turn, creatures you control gain \"{1}: Regenerate this creature.\"",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Until end of turn, creatures you control gain \"{1}: Regenerate this creature.\"",
+      "effect": {
+        "description": "Until end of turn, creatures you control gain \"{1}: Regenerate this creature.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

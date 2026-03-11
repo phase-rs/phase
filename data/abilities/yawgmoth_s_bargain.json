@@ -2,38 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PayLife<1>"
+        "cost": "PayLife<1>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "YawgmothsBargain",
-        "AILifeThreshold": "1",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Skip your draw step.",
       "event": {
         "Other": "BeginPhase"
-      },
-      "params": {
-        "Description": "Skip your draw step.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Draw",
-        "Skip": "True"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

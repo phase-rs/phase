@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if you gained 3 or more life this turn, the Ring tempts you. Then if NICKNAME is your Ring-bearer and the Ring has tempted you two or more times this game, draw a card.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, if you gained 3 or more life this turn, the Ring tempts you. Then if NICKNAME is your Ring-bearer and the Ring has tempted you two or more times this game, draw a card.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTempt",
-        "CheckSVar": "YouLifeGained",
-        "SVarCompare": "GE3"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

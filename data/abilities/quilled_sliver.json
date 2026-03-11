@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"{T}: This permanent deals 1 damage to target attacking or blocking creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Damage",
-        "Affected": "Sliver",
-        "Description": "All Slivers have \"{T}: This permanent deals 1 damage to target attacking or blocking creature.\""
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

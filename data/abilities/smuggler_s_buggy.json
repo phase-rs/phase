@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may cast the exiled card without paying its mana cost. If you do, return CARDNAME to its owner's hand.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPlay",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may cast the exiled card without paying its mana cost. If you do, return CARDNAME to its owner's hand.",
-        "CombatDamage": "True",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

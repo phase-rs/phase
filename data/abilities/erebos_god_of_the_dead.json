@@ -2,50 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<2>"
+            "cost": "PayLife<2>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to black is less than 5, NICKNAME isn't a creature. (Each {B} in the mana costs of permanents you control counts towards your devotion to black.)",
       "mode": "Continuous",
-      "params": {
-        "RemoveType": "Creature",
-        "Description": "As long as your devotion to black is less than 5, NICKNAME isn't a creature. (Each {B} in the mana costs of permanents you control counts towards your devotion to black.)",
-        "SVarCompare": "LT5",
-        "Affected": "Card.Self",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     },
     {
-      "mode": "CantGainLife",
-      "params": {
-        "ValidPlayer": "Player.Opponent",
-        "Description": "Your opponents can't gain life."
-      }
+      "description": "Your opponents can't gain life.",
+      "mode": "CantGainLife"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

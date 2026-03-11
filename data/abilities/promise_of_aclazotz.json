@@ -1,51 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, you may sacrifice a non-Demon creature. If you do, populate. (Create a token that's a copy of a creature token you control.)",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPopulate",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "TriggerDescription": "At the beginning of your end step, you may sacrifice a non-Demon creature. If you do, populate. (Create a token that's a copy of a creature token you control.)"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Sacrifice a non-Demon creature. If you do, create a 4/3 white and black Vampire Demon creature token with flying.",
           "effect": {
-            "type": "Sacrifice",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "You",
-            "SpellDescription": "Sacrifice a non-Demon creature. If you do, create a 4/3 white and black Vampire Demon creature token with flying.",
-            "SacValid": "Creature.nonDemon",
-            "RememberSacrificed": "True",
-            "SubAbility": "DBToken"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

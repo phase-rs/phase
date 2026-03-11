@@ -1,40 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "You don't lose unspent red mana as steps and phases end.",
+      "mode": {
+        "Other": "UnspentMana"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, add {R}.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, add {R}.",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigMana"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     },
     {
+      "description": "When NICKNAME leaves the battlefield, you may pay {X}. When you do, he deals X damage to target player.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigImmediateTrig",
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When NICKNAME leaves the battlefield, you may pay {X}. When you do, he deals X damage to target player."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "UnspentMana"
-      },
-      "params": {
-        "ManaType": "Red",
-        "Description": "You don't lose unspent red mana as steps and phases end.",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

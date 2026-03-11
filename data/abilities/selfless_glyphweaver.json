@@ -1,70 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Creatures you control gain indestructible until end of turn.",
-            "ValidCards": "Creature.YouCtrl",
-            "KW": "Indestructible"
-          }
+          "description": "Creatures you control gain indestructible until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Choose a creature or planeswalker,",
           "effect": {
-            "type": "ChooseCard",
             "choices": [
               "Creature",
               "Planeswalker"
             ],
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChooseCard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDestroyAll",
-            "ChoiceZone": "Battlefield",
-            "StackDescription": "SpellDescription",
-            "Amount": "1",
-            "Defined": "You",
-            "Mandatory": "True",
-            "SpellDescription": "Choose a creature or planeswalker,",
-            "ChoiceTitle": "Choose a creature or planeswalker"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

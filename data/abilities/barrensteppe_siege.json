@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "• Abzan — At the beginning of your end step, put a +1/+1 counter on each creature you control.",
-        "AddTrigger": "AbzanTrigger",
-        "Affected": "Card.Self+ChosenModeAbzan"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeAbzan"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Abzan — At the beginning of your end step, put a +1/+1 counter on each creature you control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+ChosenModeMardu",
-        "AddTrigger": "MarduTrigger",
-        "Description": "• Mardu — At the beginning of your end step, if a creature died under your control this turn, each opponent sacrifices a creature of their choice."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeMardu"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Mardu — At the beginning of your end step, if a creature died under your control this turn, each opponent sacrifices a creature of their choice.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

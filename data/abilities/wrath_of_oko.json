@@ -2,43 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "ValidCards": "Creature",
-          "RemoveCreatureTypes": "True",
-          "Duration": "Permanent",
-          "Colors": "Green",
-          "OverwriteColors": "True",
-          "SpellDescription": "All creatures loose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)",
-          "Toughness": "3",
-          "RemoveAllAbilities": "True",
-          "Types": "Creature,Elk",
-          "Power": "3",
-          "RemoveCardTypes": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "RemoveCreatureTypes": "True",
-        "Duration": "Permanent",
-        "Colors": "Green",
-        "OverwriteColors": "True",
-        "SpellDescription": "All creatures loose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)",
-        "Toughness": "3",
-        "RemoveAllAbilities": "True",
-        "Types": "Creature,Elk",
-        "Power": "3",
-        "RemoveCardTypes": "True"
-      }
+      "description": "All creatures loose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)",
+      "duration": "Permanent",
+      "effect": {
+        "description": "All creatures loose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

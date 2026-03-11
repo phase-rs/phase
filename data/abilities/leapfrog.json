@@ -1,18 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME has flying as long as you've cast an instant or sorcery spell this turn.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has flying as long as you've cast an instant or sorcery spell this turn."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

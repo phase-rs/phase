@@ -2,46 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4",
+        "type": "Mana"
+      },
+      "description": "Put two +1/+1 counters on CARDNAME. Then you may have it become a 0/0 Elemental creature until end of turn. It's still a land.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimate",
-        "AILogic": "CrawlingBarrens",
-        "SpellDescription": "Put two +1/+1 counters on CARDNAME. Then you may have it become a 0/0 Elemental creature until end of turn. It's still a land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

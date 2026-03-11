@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Each other Samurai creature you control gets +1/+1 for each point of bushido it has.",
-        "AddPower": "AffectedX",
-        "Affected": "Creature.Samurai+Other+YouCtrl",
-        "AffectedZone": "Battlefield",
-        "AddToughness": "AffectedX"
-      }
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Samurai"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Each other Samurai creature you control gets +1/+1 for each point of bushido it has.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

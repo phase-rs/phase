@@ -1,140 +1,118 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "4 U B R",
+            "type": "Mana"
+          },
+          "description": "Exile CARDNAME, then return him to the battlefield transformed under his owner's control. Activate only as a sorcery.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "4 U B R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBReturn",
-            "RememberChanged": "True",
-            "SorcerySpeed": "True",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Exile CARDNAME, then return him to the battlefield transformed under his owner's control. Activate only as a sorcery."
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, each opponent discards a card.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDiscard",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, each opponent discards a card.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw two cards.",
-            "Planeswalker": "True"
-          }
+          "description": "Draw two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -3,
+            "type": "Loyalty"
+          },
+          "description": "CARDNAME deals 10 damage to target creature or planeswalker.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 10
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature,Planeswalker"
-            }
+              "card_type": "Creature,Planeswalker",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -3
-          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 10 damage to target creature or planeswalker.",
-            "TgtPrompt": "Select target creature or planeswalker",
-            "Planeswalker": "True"
-          }
+          "target_prompt": "Select target creature or planeswalker"
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -4,
+            "type": "Loyalty"
+          },
+          "description": "Put target creature or planeswalker card from a graveyard onto the battlefield under your control.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
             "destination": "Battlefield",
+            "origin": "Graveyard",
             "target": {
-              "type": "Filtered",
-              "filter": "Creature,Planeswalker"
-            }
+              "card_type": "Creature,Planeswalker",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -4
-          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SpellDescription": "Put target creature or planeswalker card from a graveyard onto the battlefield under your control.",
-            "GainControl": "True",
-            "TgtPrompt": "Select target creature or planeswalker card in a graveyard"
-          }
+          "target_prompt": "Select target creature or planeswalker card in a graveyard"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 1,
-            "destination": "Exile"
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -12
+            "amount": -12,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SpellDescription": "Exile all but the bottom card of target player's library.",
-            "Ultimate": "True",
-            "ChangeNum": "All",
-            "ValidTgts": "Player"
-          }
+          "description": "Exile all but the bottom card of target player's library.",
+          "effect": {
+            "count": 1,
+            "destination": "Exile",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

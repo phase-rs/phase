@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, suspect up to one other target creature you control. (A suspected creature has menace and can't block.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSuspect",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, suspect up to one other target creature you control. (A suspected creature has menace and can't block.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more suspected creatures you control attack, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever one or more suspected creatures you control attack, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
-        "ValidAttackers": "Creature.IsSuspected+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSurveil"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

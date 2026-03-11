@@ -1,42 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Eminence — At the beginning of combat on your turn, if CARDNAME is in the command zone or on the battlefield, another target Cat you control gets +3/+3 until end of turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "PresentZone": "Battlefield",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.StrictlySelf",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Eminence — At the beginning of combat on your turn, if CARDNAME is in the command zone or on the battlefield, another target Cat you control gets +3/+3 until end of turn.",
-        "Execute": "TrigPump1"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "IsPresent": "Card.StrictlySelf",
-        "PresentZone": "Command",
-        "Execute": "TrigPump1",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Secondary": "True"
-      }
+      "phase": "BeginCombat",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever another Cat you control attacks, you may pay {1}{G}{W}. If you do, it gains trample and gets +X/+X until end of turn, where X is its power.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Cat+Other+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another Cat you control attacks, you may pay {1}{G}{W}. If you do, it gains trample and gets +X/+X until end of turn, where X is its power.",
-        "Execute": "TrigPump2"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Cat"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

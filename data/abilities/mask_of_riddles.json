@@ -1,30 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.EquippedBy",
-        "OptionalDecider": "You",
-        "ValidTarget": "Player",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has fear.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Fear",
-        "Description": "Equipped creature has fear."
-      }
+      "modifications": [
+        {
+          "keyword": "Fear",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, you may draw a card.",
+      "mode": "DamageDone",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

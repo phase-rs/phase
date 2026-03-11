@@ -1,26 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever a creature is dealt damage, destroy it. It can't be regenerated.",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature",
-        "AddSVar": "DeathDestroy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature is dealt damage, destroy it. It can't be regenerated.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

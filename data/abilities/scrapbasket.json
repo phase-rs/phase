@@ -2,30 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes all colors until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "All",
-        "SpellDescription": "CARDNAME becomes all colors until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

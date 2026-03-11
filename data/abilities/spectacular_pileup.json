@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "RemoveKeywords": "Indestructible",
-          "ValidCards": "Creature,Vehicle",
-          "SubAbility": "DBDestroyAll",
-          "SpellDescription": "All creatures and Vehicles lose indestructible until end of turn, then destroy all creatures and Vehicles."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveKeywords": "Indestructible",
-        "ValidCards": "Creature,Vehicle",
-        "SubAbility": "DBDestroyAll",
-        "SpellDescription": "All creatures and Vehicles lose indestructible until end of turn, then destroy all creatures and Vehicles."
-      }
+      "description": "All creatures and Vehicles lose indestructible until end of turn, then destroy all creatures and Vehicles.",
+      "effect": {
+        "description": "All creatures and Vehicles lose indestructible until end of turn, then destroy all creatures and Vehicles.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

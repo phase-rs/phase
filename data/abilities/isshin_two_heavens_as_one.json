@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "Description": "If a creature attacking causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidMode": "Attacks,AttackersDeclared,AttackersDeclaredOneTarget",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidCause": "Creature"
-      }
+      "description": "If a creature attacking causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

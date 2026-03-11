@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Max speed — {B}, Sacrifice another creature or Vehicle: Draw a card.",
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddAbility": "ABDraw"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This creature enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "Description": "This creature enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — {B}, Sacrifice another creature or Vehicle: Draw a card.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "ABDraw",
+          "type": "AddAbility"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

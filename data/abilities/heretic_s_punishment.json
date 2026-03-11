@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "Choose any target, then mill three cards. CARDNAME deals damage to that permanent or player equal to the highest mana value among the milled cards.",
       "effect": {
-        "type": "Mill",
         "count": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberMilled": "True",
-        "SubAbility": "DBHereticDamage",
-        "SpellDescription": "Choose any target, then mill three cards. CARDNAME deals damage to that permanent or player equal to the highest mana value among the milled cards."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

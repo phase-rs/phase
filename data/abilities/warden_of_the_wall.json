@@ -2,50 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "AddType": "Creature & Gargoyle",
-        "Condition": "NotPlayerTurn",
-        "SetToughness": "3",
-        "Description": "As long as it's not your turn, CARDNAME is a 2/3 Gargoyle artifact creature with flying.",
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self",
-        "SetPower": "2"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as it's not your turn, CARDNAME is a 2/3 Gargoyle artifact creature with flying.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature & Gargoyle",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

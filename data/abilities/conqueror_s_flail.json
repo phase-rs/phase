@@ -1,28 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Equipped creature gets +1/+1 for each color among permanents you control.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each color among permanents you control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "As long as CARDNAME is attached to a creature, your opponents can't cast spells during your turn.",
-        "Condition": "PlayerTurn",
-        "ValidCard": "Card",
-        "Caster": "Opponent",
-        "IsPresent": "Card.Self+AttachedTo Creature"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is attached to a creature, your opponents can't cast spells during your turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

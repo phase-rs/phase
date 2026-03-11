@@ -2,40 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Samurai",
-          "TgtPrompt": "Select target Samurai.",
-          "SpellDescription": "Regenerate target Samurai."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Regenerate target Samurai.",
+      "effect": {
+        "description": "Regenerate target Samurai.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Samurai",
-        "TgtPrompt": "Select target Samurai.",
-        "SpellDescription": "Regenerate target Samurai."
-      }
+      "target_prompt": "Select target Samurai."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,52 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Venture",
-        "params": {
-          "SpellDescription": "Venture into the dungeon and you gain 3 life.",
-          "Defined": "You",
-          "SubAbility": "DBGainLife",
-          "ActivationZone": "Hand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W"
+            "cost": "W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Venture into the dungeon and you gain 3 life.",
-        "Defined": "You",
-        "SubAbility": "DBGainLife",
-        "ActivationZone": "Hand"
-      }
+      "description": "Venture into the dungeon and you gain 3 life.",
+      "effect": {
+        "description": "Venture into the dungeon and you gain 3 life.",
+        "name": "Venture",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another nontoken creature you control enters, venture into the dungeon. (Enter the first room or advance to the next room.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Creature.Other+!token+YouCtrl",
-        "Origin": "Any",
-        "Execute": "DBVenture",
-        "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control enters, venture into the dungeon. (Enter the first room or advance to the next room.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

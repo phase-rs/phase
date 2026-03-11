@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, CARDNAME gets +1/+1 until end of turn.",
       "mode": "LifeGained",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever you gain life, CARDNAME gets +1/+1 until end of turn.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

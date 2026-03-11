@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+3 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "AddKeyword": "Vigilance",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +0/+3 and has vigilance."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

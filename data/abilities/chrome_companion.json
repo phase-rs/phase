@@ -2,48 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put target card from a graveyard on the bottom of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "-1",
-        "SpellDescription": "Put target card from a graveyard on the bottom of its owner's library.",
-        "TgtPrompt": "Select target card in a graveyard"
-      }
+      "target_prompt": "Select target card in a graveyard"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped, you gain 1 life.",
       "mode": "Taps",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever this creature becomes tapped, you gain 1 life.",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

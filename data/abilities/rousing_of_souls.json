@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "Defined": "Player",
-          "SpellDescription": "Parley — Each player reveals the top card of their library.",
-          "SubAbility": "DBToken",
-          "RememberRevealed": "True",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "SpellDescription": "Parley — Each player reveals the top card of their library.",
-        "SubAbility": "DBToken",
-        "RememberRevealed": "True",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Parley — Each player reveals the top card of their library.",
+      "effect": {
+        "description": "Parley — Each player reveals the top card of their library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

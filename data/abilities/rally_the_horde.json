@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "RepeatSubAbility": "DBExileThree",
-          "RepeatCheckSVar": "X",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Exile the top card of your library. Exile the top card of your library. Exile the top card of your library. If the last card exiled isn't a land card, repeat this process. Create a 1/1 red Warrior creature token for each nonland card exiled this way.",
-          "RepeatSVarCompare": "EQ0",
-          "SubAbility": "DBToken"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBExileThree",
-        "RepeatCheckSVar": "X",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Exile the top card of your library. Exile the top card of your library. Exile the top card of your library. If the last card exiled isn't a land card, repeat this process. Create a 1/1 red Warrior creature token for each nonland card exiled this way.",
-        "RepeatSVarCompare": "EQ0",
-        "SubAbility": "DBToken"
-      }
+      "description": "Exile the top card of your library. Exile the top card of your library. Exile the top card of your library. If the last card exiled isn't a land card, repeat this process. Create a 1/1 red Warrior creature token for each nonland card exiled this way.",
+      "effect": {
+        "description": "Exile the top card of your library. Exile the top card of your library. Exile the top card of your library. If the last card exiled isn't a land card, repeat this process. Create a 1/1 red Warrior creature token for each nonland card exiled this way.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

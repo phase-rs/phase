@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever CARDNAME is dealt damage, choose an opponent at random. NICKNAME deals damage equal to its power to that player unless they sacrifice a nontoken creature.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, choose an opponent at random. NICKNAME deals damage equal to its power to that player unless they sacrifice a nontoken creature.",
-        "Execute": "TrigChoose",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDmg",
-        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals 2 damage to it. If a Dinosaur is dealt damage this way, CARDNAME gets +2/+0 until end of turn.",
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.Other+YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Description": "Creature spells you cast cost {1} less to cast.",
-        "Activator": "You",
-        "Type": "Spell",
-        "ValidCard": "Creature"
-      }
+      "description": "Creature spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature you control enters, CARDNAME deals 2 damage to it. If a Dinosaur is dealt damage this way, CARDNAME gets +2/+0 until end of turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

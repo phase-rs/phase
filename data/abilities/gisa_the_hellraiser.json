@@ -1,30 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CommitCrime",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ActivationLimit": "1",
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you commit a crime, create two tapped 2/2 blue and black Zombie Rogue creature tokens. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyard is a crime.)"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Zombie",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Skeleton.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Skeletons and Zombies you control get +1/+1 and have menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Zombie.YouCtrl,Skeleton.YouCtrl",
-        "Description": "Skeletons and Zombies you control get +1/+1 and have menace.",
-        "AddKeyword": "Menace",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you commit a crime, create two tapped 2/2 blue and black Zombie Rogue creature tokens. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyard is a crime.)",
+      "mode": "CommitCrime",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

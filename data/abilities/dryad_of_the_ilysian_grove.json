@@ -1,25 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You may play an additional land on each of your turns.",
-        "AdjustLandPlays": "1"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control are every basic land type in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "AllBasicLandType",
-        "Description": "Lands you control are every basic land type in addition to their other types.",
-        "Affected": "Land.YouCtrl"
-      }
+      "modifications": [
+        {
+          "core_type": "AllBasicLandType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

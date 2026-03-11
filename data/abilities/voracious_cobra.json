@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a creature, destroy that creature.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, destroy that creature.",
-        "ValidTarget": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

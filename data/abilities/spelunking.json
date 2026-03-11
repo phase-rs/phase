@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw a card, then you may put a land card from your hand onto the battlefield. If you put a Cave onto the battlefield this way, you gain 4 life.",
-        "Execute": "TrigDraw",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "description": "Lands you control enter untapped.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ETBUntapped",
-        "ValidCard": "Land.YouCtrl",
-        "Description": "Lands you control enter untapped.",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield"
+      "description": "When CARDNAME enters, draw a card, then you may put a land card from your hand onto the battlefield. If you put a Cave onto the battlefield this way, you gain 4 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

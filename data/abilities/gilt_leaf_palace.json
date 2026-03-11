@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G B",
-        "params": {
-          "SpellDescription": "Add {G} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G} or {B}."
-      }
+      "description": "Add {G} or {B}.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may reveal an Elf card from your hand. If you don't, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "As CARDNAME enters, you may reveal an Elf card from your hand. If you don't, CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "DBTap",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

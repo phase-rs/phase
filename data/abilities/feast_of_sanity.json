@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discard a card, CARDNAME deals 1 damage to any target and you gain 1 life.",
       "mode": "Discarded",
-      "params": {
-        "TriggerDescription": "Whenever you discard a card, CARDNAME deals 1 damage to any target and you gain 1 life.",
-        "Execute": "TrigDealDamage",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, create a Treasure token for each artifact they control.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a Treasure token for each artifact they control.",
-        "Execute": "TrigTreasure",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

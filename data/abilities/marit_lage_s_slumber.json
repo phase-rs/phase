@@ -1,31 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another snow permanent you control enters, scry 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigScry",
-        "TriggerDescription": "Whenever CARDNAME or another snow permanent you control enters, scry 1.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Permanent.Snow+Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Permanent.Snow"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "At the beginning of your upkeep, if you control ten or more snow permanents, sacrifice CARDNAME. If you do, create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if you control ten or more snow permanents, sacrifice CARDNAME. If you do, create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible.",
-        "PresentCompare": "GE10",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "IsPresent": "Permanent.Snow+YouCtrl",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

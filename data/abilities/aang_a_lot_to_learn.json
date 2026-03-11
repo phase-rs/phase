@@ -1,31 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.Other+YouCtrl",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever another creature you control dies, put a +1/+1 counter on NICKNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Lesson",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "NICKNAME has vigilance as long as there's a Lesson card in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "PresentZone": "Graveyard",
-        "AddKeyword": "Vigilance",
-        "Description": "NICKNAME has vigilance as long as there's a Lesson card in your graveyard.",
-        "IsPresent": "Lesson.YouOwn",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature you control dies, put a +1/+1 counter on NICKNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

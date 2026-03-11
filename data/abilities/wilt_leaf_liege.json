@@ -1,40 +1,89 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Other green creatures you control get +1/+1.",
-        "AddPower": "1",
-        "Affected": "Creature.Green+Other+YouCtrl"
-      }
-    },
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Other white creatures you control get +1/+1.",
-        "Affected": "Creature.White+Other+YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield instead of putting it into your graveyard.",
       "event": "Moved",
-      "params": {
-        "EffectOnly": "True",
-        "ReplaceWith": "SurpriseETB",
-        "ValidCause": "SpellAbility.OppCtrl",
-        "Description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield instead of putting it into your graveyard.",
-        "Discard": "True",
-        "ValidCard": "Card.Self",
-        "ActiveZones": "Hand"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Green"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other green creatures you control get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "White"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other white creatures you control get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

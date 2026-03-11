@@ -2,79 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.",
+      "duration": "UntilYourNextTurn",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.OppCtrl"
-        }
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Prevent all damage that would be dealt to and dealt by CARDNAME.",
-        "Duration": "UntilYourNextTurn",
-        "SpellDescription": "Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.",
-        "Planeswalker": "True",
-        "IsCurse": "True",
-        "TgtPrompt": "Select target permanent an opponent controls"
-      }
+      "target_prompt": "Select target permanent an opponent controls"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Draw a card. You may play an additional land this turn."
-      }
+      "description": "Draw a card. You may play an additional land this turn.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Name": "Emblem — Kiora, the Crashing Wave",
-          "AILogic": "Always",
-          "Triggers": "EOTTrig",
-          "Duration": "Permanent",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "SpellDescription": "You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Emblem — Kiora, the Crashing Wave",
-        "AILogic": "Always",
-        "Triggers": "EOTTrig",
-        "Duration": "Permanent",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\""
-      }
+      "description": "You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

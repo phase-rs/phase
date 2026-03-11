@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a Goblin or Orc, destroy that creature.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDestroy",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Goblin,Orc",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a Goblin or Orc, destroy that creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Goblin,Orc",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

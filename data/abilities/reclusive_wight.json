@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control another nonland permanent, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if you control another nonland permanent, sacrifice CARDNAME.",
-        "ValidPlayer": "You",
-        "IsPresent": "Permanent.nonLand+YouCtrl",
-        "PresentCompare": "GE2",
-        "Phase": "Upkeep",
-        "Execute": "TrigSacrifice",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

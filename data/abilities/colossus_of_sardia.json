@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "9",
+        "type": "Mana"
+      },
+      "description": "Untap this creature. Activate only during your upkeep.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "9"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "PlayerTurn": "True",
-        "SpellDescription": "Untap this creature. Activate only during your upkeep."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This creature doesn't untap during your untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "Description": "This creature doesn't untap during your untap step."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

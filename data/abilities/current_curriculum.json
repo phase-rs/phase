@@ -1,33 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, conjure a card named Stonybrook Schoolmaster onto the battlefield tapped.",
-        "IsPresent": "Creature.YouCtrl+tapped",
-        "PresentCompare": "GE2",
-        "Phase": "End of Turn",
-        "Execute": "TrigConjure",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Merfolk",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "The first Merfolk spell you cast each turn has convoke.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "EQ0",
-        "AddKeyword": "Convoke",
-        "Affected": "Merfolk.YouCtrl",
-        "Description": "The first Merfolk spell you cast each turn has convoke.",
-        "AffectedZone": "Stack",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Convoke",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you control two or more tapped creatures, conjure a card named Stonybrook Schoolmaster onto the battlefield tapped.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

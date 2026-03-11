@@ -2,35 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 10
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 B B"
+        "cost": "4 B B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent with no cards in hand loses 10 life.",
-        "Defined": "Player.Opponent+HasCardsInHand_Card_EQ0"
-      }
+      "description": "Each opponent with no cards in hand loses 10 life.",
+      "effect": {
+        "amount": 10,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if an opponent discarded a card this turn, you draw a card and you lose 1 life.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each end step, if an opponent discarded a card this turn, you draw a card and you lose 1 life.",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

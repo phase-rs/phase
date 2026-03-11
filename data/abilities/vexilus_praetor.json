@@ -1,17 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Aegis of the Emperor — Commanders you control have protection from everything.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.IsCommander+YouCtrl",
-        "Description": "Aegis of the Emperor — Commanders you control have protection from everything.",
-        "AddKeyword": "Protection from everything"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "everything",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

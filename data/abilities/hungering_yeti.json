@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "Description": "As long as you control a green or blue permanent, you may cast CARDNAME as though it had flash.",
-        "IsPresent": "Permanent.Green+YouCtrl,Permanent.Blue+YouCtrl",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "ValidSA": "Spell"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green"
+            },
+            {
+              "type": "Other",
+              "value": "YouCtrl,Permanent.Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a green or blue permanent, you may cast CARDNAME as though it had flash.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

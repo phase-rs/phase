@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target creature whose combat damage will be prevented",
-          "ReplacementEffects": "RPrevent",
-          "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
-          "ExileOnMoved": "Battlefield",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
+      "description": "Prevent all combat damage that would be dealt by target creature this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature whose combat damage will be prevented",
-        "ReplacementEffects": "RPrevent",
-        "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
-        "ExileOnMoved": "Battlefield",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted"
-      }
+      "target_prompt": "Select target creature whose combat damage will be prevented"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

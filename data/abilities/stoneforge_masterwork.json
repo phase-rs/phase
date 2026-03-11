@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "AffectedX",
-        "AddToughness": "AffectedX",
-        "EffectZone": "Battlefield",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+1 for each other creature you control that shares a creature type with it."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each other creature you control that shares a creature type with it.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

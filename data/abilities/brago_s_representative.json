@@ -1,17 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "While voting, you get an additional vote. (The votes can be for different choices or for the same choice.)",
-        "Affected": "You",
-        "AdditionalVote": "1"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "While voting, you get an additional vote. (The votes can be for different choices or for the same choice.)",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

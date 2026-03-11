@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, take an extra turn after this one. Skip the untap step of that turn.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, take an extra turn after this one. Skip the untap step of that turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExtraTurn"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

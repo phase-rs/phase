@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When this creature dies, if there's a Lesson card in your graveyard, draw a card.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "Y"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "Description": "This creature's power is equal to the number of noncreature, nonland cards in your graveyard.",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "This creature's power is equal to the number of noncreature, nonland cards in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this creature dies, if there's a Lesson card in your graveyard, draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

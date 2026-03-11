@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "X",
-          "SpellDescription": "Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "X",
-        "SpellDescription": "Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead."
-      }
+      "description": "Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

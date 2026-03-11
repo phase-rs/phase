@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, create a 3/3 black Horror creature token.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigHorror",
-        "TriggerZones": "Command",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, create a 3/3 black Horror creature token."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "At the beginning of your opponents' end step, they may sacrifice two creatures. If they do, abandon this scheme.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your opponents' end step, they may sacrifice two creatures. If they do, abandon this scheme.",
-        "Execute": "SacToAbandon",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

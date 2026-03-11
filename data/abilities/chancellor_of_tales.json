@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an Adventure spell, you may copy it. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast an Adventure spell, you may copy it. You may choose new targets for the copy.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Adventure",
-        "Execute": "TrigCopySpell"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Adventure"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

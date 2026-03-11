@@ -2,81 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1. You may tap an untapped artifact you control. If you do, draw a card.",
-        "SubAbility": "DBDraw",
-        "Planeswalker": "True"
-      }
+      "description": "Scry 1. You may tap an untapped artifact you control. If you do, draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create two 1/1 colorless Thopter artifact creature tokens with flying. They gain haste until end of turn.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_1_1_a_thopter_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create two 1/1 colorless Thopter artifact creature tokens with flying. They gain haste until end of turn.",
-        "Planeswalker": "True",
-        "PumpDuration": "EOT",
-        "TokenAmount": "2",
-        "PumpKeywords": "Haste"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Stackable": "False",
-          "SpellDescription": "You get an emblem with \"Artifact creatures you control get +1/+1\" and \"Artifact spells you cast cost {1} less to cast.\"",
-          "Ultimate": "True",
-          "StaticAbilities": "EmblemArtifactPump,ReduceCost",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "Name": "Emblem — Saheeli, Filigree Master"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Stackable": "False",
-        "SpellDescription": "You get an emblem with \"Artifact creatures you control get +1/+1\" and \"Artifact spells you cast cost {1} less to cast.\"",
-        "Ultimate": "True",
-        "StaticAbilities": "EmblemArtifactPump,ReduceCost",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "Name": "Emblem — Saheeli, Filigree Master"
-      }
+      "description": "You get an emblem with \"Artifact creatures you control get +1/+1\" and \"Artifact spells you cast cost {1} less to cast.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,42 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+YouDontCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 W"
+        "cost": "5 W",
+        "type": "Mana"
       },
+      "description": "Exile target nonland permanent you don't control until CARDNAME leaves the battlefield. Activate only as a sorcery and only once.",
+      "duration": "UntilHostLeavesPlay",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            },
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "GameActivationLimit": "1",
-        "SpellDescription": "Exile target nonland permanent you don't control until CARDNAME leaves the battlefield. Activate only as a sorcery and only once.",
-        "TgtPrompt": "Choose target nonland permanent you don't control",
-        "Duration": "UntilHostLeavesPlay",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Choose target nonland permanent you don't control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Creatures you control get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

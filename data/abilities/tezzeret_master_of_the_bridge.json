@@ -2,86 +2,84 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals X damage to each opponent, where X is the number of artifacts you control. You gain X life.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player.Opponent",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "CARDNAME deals X damage to each opponent, where X is the number of artifacts you control. You gain X life.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Return target artifact card from your graveyard to your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Hand",
+        "origin": "Graveyard",
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl"
-        }
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target artifact card from your graveyard to your hand.",
-        "TgtPrompt": "Choose target artifact card in your graveyard",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Choose target artifact card in your graveyard"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 10,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile the top ten cards of your library. Put all artifact cards from among them onto the battlefield.",
-        "Defined": "You",
-        "ChangeNum": "All",
-        "RememberChanged": "True",
-        "SubAbility": "DBChangeZoneAll",
-        "Ultimate": "True",
-        "Planeswalker": "True"
-      }
+      "description": "Exile the top ten cards of your library. Put all artifact cards from among them onto the battlefield.",
+      "effect": {
+        "count": 10,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Creature and planeswalker spells you cast have affinity for artifacts. (They cost {1} less to cast for each artifact you control.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Creature+YouCtrl+wasCast,Card.Planeswalker+YouCtrl+wasCast",
-        "AffectedZone": "Stack",
-        "AddKeyword": "Affinity:Artifact",
-        "Description": "Creature and planeswalker spells you cast have affinity for artifacts. (They cost {1} less to cast for each artifact you control.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Affinity:Artifact",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,53 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AddAllCreatureTypes": "True",
-        "SpellDescription": "Target creature gains all creature types until end of turn."
-      }
+      "description": "Target creature gains all creature types until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature loses all creature types until end of turn.",
-        "RemoveCreatureTypes": "True",
-        "IsCurse": "True"
-      }
+      "description": "Target creature loses all creature types until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Creature"
+        ]
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

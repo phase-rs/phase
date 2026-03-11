@@ -1,31 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature and you become the monarch.",
-        "Execute": "TrigTap"
+      "description": "Enchanted creature doesn't untap during its controller's untap step unless that player is the monarch.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          },
+          {
+            "type": "Other",
+            "value": "ControlledBy EnchantedController.!isMonarch"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "Enchanted creature doesn't untap during its controller's untap step unless that player is the monarch.",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.EnchantedBy+ControlledBy EnchantedController.!isMonarch"
+      "description": "When CARDNAME enters, tap enchanted creature and you become the monarch.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

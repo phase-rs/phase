@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "Description": "Domain — CARDNAME's toughness is equal to the number of basic land types among lands you control.",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "Domain — CARDNAME's toughness is equal to the number of basic land types among lands you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

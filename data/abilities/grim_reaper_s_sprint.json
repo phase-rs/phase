@@ -1,41 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, untap each creature you control. If it's your main phase, there is an additional combat phase after this phase.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigUntap"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Morbid — This spell costs {3} less to cast if a creature died this turn.",
-        "Amount": "3",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "CheckSVar": "X"
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Morbid — This spell costs {3} less to cast if a creature died this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +2/+2 and has haste.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, untap each creature you control. If it's your main phase, there is an additional combat phase after this phase.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

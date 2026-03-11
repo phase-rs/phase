@@ -1,20 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1 and has first strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "Condition": "Threshold",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1 and has first strike."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

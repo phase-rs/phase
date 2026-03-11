@@ -1,53 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a source you control deals noncombat damage to an opponent, you may exile that many cards from the top of your library. You may play those cards this turn.",
           "mode": "DamageDone",
-          "params": {
-            "OptionalDecider": "You",
-            "TriggerZones": "Battlefield",
-            "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-            "TriggerDescription": "Whenever a source you control deals noncombat damage to an opponent, you may exile that many cards from the top of your library. You may play those cards this turn.",
-            "Execute": "TrigExile",
-            "ValidTarget": "Opponent",
-            "CombatDamage": "False"
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Emblem.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 2 damage to any target. (Then exile this card. You may cast the enchantment later from exile.)",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 2
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 2 damage to any target. (Then exile this card. You may cast the enchantment later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

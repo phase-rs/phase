@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "NotFirstCardInDrawStep": "True",
-        "Description": "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "Player",
-        "ReplaceWith": "DiscardOne"
-      }
+      "description": "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

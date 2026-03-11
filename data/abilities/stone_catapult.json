@@ -2,29 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack+tapped"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Destroy target tapped nonblack creature. Activate only during your turn, before attackers are declared.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target tapped nonblack creature",
-        "ActivationPhases": "Upkeep->BeginCombat",
-        "PlayerTurn": "True",
-        "SpellDescription": "Destroy target tapped nonblack creature. Activate only during your turn, before attackers are declared.",
-        "ActivationFirstCombat": "True"
-      }
+      "target_prompt": "Select target tapped nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

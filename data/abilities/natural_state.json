@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.cmcLE3,Enchantment.cmcLE3"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact or enchantment with mana value 3 or less.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact or enchantment with mana value 3 or less.",
-        "TgtPrompt": "Select target artifact or enchantment with mana value 3 or less"
-      }
+      "target_prompt": "Select target artifact or enchantment with mana value 3 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "SVarCompare": "LTZ",
-        "Amount": "X",
-        "Type": "Spell",
-        "Description": "If your life total is less than your starting life total, this spell costs {X} less to cast, where X is the difference.",
-        "EffectZone": "All",
-        "CheckSVar": "Y"
-      }
+      "condition": {
+        "compare": "LTZ",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "If your life total is less than your starting life total, this spell costs {X} less to cast, where X is the difference.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,32 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks while you control a Dinosaur, CARDNAME gets +1/+1 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Dinosaur.YouCtrl",
-        "ValidCard": "Card.Self",
-        "NoResolvingCheck": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks while you control a Dinosaur, CARDNAME gets +1/+1 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks while you control a Dinosaur, CARDNAME gets +1/+1 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "NoResolvingCheck": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks while you control a Dinosaur, CARDNAME gets +1/+1 until end of turn.",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "IsPresent": "Dinosaur.YouCtrl"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

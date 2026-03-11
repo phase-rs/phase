@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, return CARDNAME to its owner's hand.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of the end step, return CARDNAME to its owner's hand.",
-        "Execute": "TrigReturn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

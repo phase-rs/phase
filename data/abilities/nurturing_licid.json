@@ -2,67 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Enchantment",
-          "Aura"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {G} to end this effect.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Enchantment",
+          "Aura"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCardTypes": "True",
-        "RevertCost": "G",
-        "SubAbility": "DBAttach",
-        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {G} to end this effect.",
-        "Keywords": "Enchant:Creature",
-        "RemoveEnchantmentTypes": "True",
-        "Duration": "Permanent",
-        "RemoveThisAbility": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "Defined": "Enchanted",
-          "SpellDescription": "Regenerate enchanted creature."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Enchanted",
-        "SpellDescription": "Regenerate enchanted creature."
-      }
+      "description": "Regenerate enchanted creature.",
+      "effect": {
+        "description": "Regenerate enchanted creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

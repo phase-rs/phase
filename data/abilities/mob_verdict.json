@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Vote",
-        "params": {
-          "Defined": "Player",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Secret council — Each player secretly votes for another player, then those votes are revealed. For each vote an opponent received, CARDNAME deals 2 damage to that player and each creature that player controls. For each vote you received, draw a card.",
-          "Secret": "True",
-          "SubAbility": "DBRepeatOpp",
-          "VotePlayer": "Other",
-          "StoreVoteNum": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Secret council — Each player secretly votes for another player, then those votes are revealed. For each vote an opponent received, CARDNAME deals 2 damage to that player and each creature that player controls. For each vote you received, draw a card.",
-        "Secret": "True",
-        "SubAbility": "DBRepeatOpp",
-        "VotePlayer": "Other",
-        "StoreVoteNum": "True"
-      }
+      "description": "Secret council — Each player secretly votes for another player, then those votes are revealed. For each vote an opponent received, CARDNAME deals 2 damage to that player and each creature that player controls. For each vote you received, draw a card.",
+      "effect": {
+        "description": "Secret council — Each player secretly votes for another player, then those votes are revealed. For each vote an opponent received, CARDNAME deals 2 damage to that player and each creature that player controls. For each vote you received, draw a card.",
+        "name": "Vote",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

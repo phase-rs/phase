@@ -1,27 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Your opponents can't cast spells with even mana values. (Zero is even.)",
-        "Caster": "Opponent",
-        "ValidCard": "Card.cmcEven"
-      }
+      "description": "Your opponents can't cast spells with even mana values. (Zero is even.)",
+      "mode": "CantBeCast"
     },
     {
+      "description": "Your opponents can't block with creatures with even mana values.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature",
-        "ValidBlocker": "Creature.OppCtrl+cmcEven",
-        "Description": "Your opponents can't block with creatures with even mana values."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

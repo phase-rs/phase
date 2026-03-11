@@ -1,31 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals damage equal to that creature's power to any target."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Activator": "Player.Opponent",
-        "ValidTarget": "Card.Self",
-        "Description": "Spells your opponents cast that target CARDNAME cost an additional 3 life to cast.",
-        "Cost": "PayLife<3>",
-        "Type": "Spell"
-      }
+      "description": "Spells your opponents cast that target CARDNAME cost an additional 3 life to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another creature you control enters, CARDNAME deals damage equal to that creature's power to any target.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

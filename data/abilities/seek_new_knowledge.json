@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "Num": "2",
-          "Type": "Card.nonLand",
-          "SubAbility": "DBBottomCard",
-          "SpellDescription": "Seek two nonland cards, then put a card from your hand on the bottom of your library."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "Num": "2",
-        "Type": "Card.nonLand",
-        "SubAbility": "DBBottomCard",
-        "SpellDescription": "Seek two nonland cards, then put a card from your hand on the bottom of your library."
-      }
+      "description": "Seek two nonland cards, then put a card from your hand on the bottom of your library.",
+      "effect": {
+        "description": "Seek two nonland cards, then put a card from your hand on the bottom of your library.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

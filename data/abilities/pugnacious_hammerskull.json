@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks while you don't control another Dinosaur, put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
       "mode": "Attacks",
-      "params": {
-        "NoResolvingCheck": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigStunCounter",
-        "PresentCompare": "EQ0",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Dinosaur.YouCtrl+Other",
-        "TriggerDescription": "Whenever CARDNAME attacks while you don't control another Dinosaur, put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

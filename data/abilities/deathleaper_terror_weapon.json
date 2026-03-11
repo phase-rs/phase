@@ -1,17 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ThisTurnEntered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Flesh Hooks — Creatures you control that entered this turn have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Flesh Hooks — Creatures you control that entered this turn have double strike.",
-        "Affected": "Creature.YouCtrl+ThisTurnEntered",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

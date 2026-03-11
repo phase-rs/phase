@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Spirit or Arcane spell, you may gain control of target creature with that spell's mana value until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may gain control of target creature with that spell's mana value until end of turn.",
-        "Execute": "TrigChange",
-        "ValidCard": "Spirit,Arcane",
-        "ValidActivatingPlayer": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spirit,Arcane",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

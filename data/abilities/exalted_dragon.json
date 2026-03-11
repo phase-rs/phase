@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't attack unless you sacrifice a land. (This cost is paid as attackers are declared.)",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't attack unless you sacrifice a land. (This cost is paid as attackers are declared.)",
-        "Cost": "Sac<1/Land>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

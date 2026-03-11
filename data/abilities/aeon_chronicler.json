@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CounterRemoved",
-      "params": {
-        "TriggerZones": "Exile",
-        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, draw a card.",
-        "Execute": "TrigDraw",
-        "CounterType": "TIME",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
-        "SetPower": "Y",
-        "CharacteristicDefining": "True",
-        "SetToughness": "Y"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a time counter is removed from CARDNAME while it's exiled, draw a card.",
+      "mode": "CounterRemoved",
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

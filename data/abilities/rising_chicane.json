@@ -2,46 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "PhaseTrig",
-        "Description": "Max speed — At the beginning of combat on your turn, this land becomes a 2/2 Construct creature in addition to its other types until end of turn.",
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you were the starting player, this land enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "If you were the starting player, this land enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "LandTapped",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — At the beginning of combat on your turn, this land becomes a 2/2 Construct creature in addition to its other types until end of turn.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

@@ -1,26 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
-        "SetPower": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Nontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Forest & Land",
-        "Affected": "Creature.!token+YouCtrl",
-        "Description": "Nontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)"
-      }
+      "modifications": [
+        {
+          "core_type": "Forest & Land",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

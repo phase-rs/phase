@@ -2,42 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a spell, if CARDNAME is suspended, that player may put a time counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever an opponent casts a spell, if CARDNAME is suspended, that player may put a time counter on CARDNAME.",
-        "PresentZone": "Exile",
-        "ValidCard": "Card",
-        "IsPresent": "Card.suspended+Self",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Exile",
-        "OptionalDecider": "TriggeredActivator",
-        "ValidActivatingPlayer": "Opponent"
+      "optional": true,
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

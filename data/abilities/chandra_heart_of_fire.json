@@ -2,79 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Discard your hand, then exile the top three cards of your library. Until end of turn, you may play cards exiled this way.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDig",
-        "Planeswalker": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Discard your hand, then exile the top three cards of your library. Until end of turn, you may play cards exiled this way.",
-        "Defined": "You",
-        "Mode": "Hand"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 2 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 2 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -9,
+        "type": "Loyalty"
+      },
+      "description": "Search your graveyard and library for any number of red instant and/or sorcery cards, exile them, then shuffle. You may cast them this turn. Add six {R}.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard,Library",
         "destination": "Exile",
+        "origin": "Graveyard,Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -9
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SubAbility": "DBEffect2",
-        "Planeswalker": "True",
-        "ChangeNum": "Z",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Search your graveyard and library for any number of red instant and/or sorcery cards, exile them, then shuffle. You may cast them this turn. Add six {R}.",
-        "RememberChanged": "True",
-        "ChangeType": "Instant.Red,Sorcery.Red"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

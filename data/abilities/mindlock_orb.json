@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Players can't search libraries.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "CantSearchLibrary",
-        "Affected": "Player",
-        "Description": "Players can't search libraries."
-      }
+      "modifications": [
+        {
+          "keyword": "CantSearchLibrary",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

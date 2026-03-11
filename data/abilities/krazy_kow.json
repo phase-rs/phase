@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, roll a six-sided die. If you a roll a 1, sacrifice CARDNAME and it deals 3 damage to each creature and each player.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, roll a six-sided die. If you a roll a 1, sacrifice CARDNAME and it deals 3 damage to each creature and each player.",
-        "Execute": "TrigRoll",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player discards a card.",
-        "Execute": "TrigDiscard",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of cards in the chosen player's hand.",
-        "SetToughness": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of cards in the chosen player's hand.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME deals damage to a player, that player discards a card.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

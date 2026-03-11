@@ -2,24 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player sacrifices an attacking or blocking creature.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacMessage": "attacking or blocking Creature",
-        "SacValid": "Creature.attacking,Creature.blocking",
-        "SpellDescription": "Target player sacrifices an attacking or blocking creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

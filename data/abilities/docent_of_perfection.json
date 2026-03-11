@@ -1,54 +1,75 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token. Then if you control three or more Wizards, transform CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "ValidCard": "Instant,Sorcery",
-            "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token. Then if you control three or more Wizards, transform CARDNAME."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "SpellCast",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token.",
-            "Execute": "TrigToken",
-            "ValidCard": "Instant,Sorcery",
-            "ValidActivatingPlayer": "You"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Wizard"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Wizards you control get +2/+1 and have flying.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Flying",
-            "AddToughness": "1",
-            "Description": "Wizards you control get +2/+1 and have flying.",
-            "Affected": "Card.Wizard+YouCtrl",
-            "AddPower": "2"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            },
+            {
+              "keyword": "Flying",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token.",
+          "mode": "SpellCast",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery",
+            "type": "Typed"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

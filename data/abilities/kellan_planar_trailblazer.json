@@ -2,64 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "If NICKNAME is a Scout, it becomes a Human Faerie Detective and gains \"Whenever NICKNAME deals combat damage to a player, exile the top card of your library. You may play that card this turn.\"",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Human",
           "Faerie",
           "Detective"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If NICKNAME is a Scout, it becomes a Human Faerie Detective and gains \"Whenever NICKNAME deals combat damage to a player, exile the top card of your library. You may play that card this turn.\"",
-        "Duration": "Permanent",
-        "Triggers": "KellanCombat",
-        "RemoveCreatureTypes": "True",
-        "ConditionPresent": "Card.Self+Scout"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "If NICKNAME is a Detective, it becomes a 3/2 Human Faerie Rogue and gains double strike.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Human",
           "Faerie",
           "Rogue"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Double Strike",
-        "RemoveCreatureTypes": "True",
-        "ConditionPresent": "Card.Self+Detective",
-        "SpellDescription": "If NICKNAME is a Detective, it becomes a 3/2 Human Faerie Rogue and gains double strike.",
-        "Duration": "Permanent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

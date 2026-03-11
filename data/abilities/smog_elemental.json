@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Creatures with flying your opponents control get -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "-1",
-        "Affected": "Creature.withFlying+OppCtrl",
-        "AddToughness": "-1",
-        "Description": "Creatures with flying your opponents control get -1/-1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,55 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "BecomeMonarch",
-        "params": {
-          "ValidTgts": "Player",
-          "SpellDescription": "Target player becomes the monarch. NICKNAME deals 3 damage to any target.",
-          "SubAbility": "DBDamage"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 R"
+            "cost": "3 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player becomes the monarch. NICKNAME deals 3 damage to any target.",
-        "SubAbility": "DBDamage"
-      }
+      "description": "Target player becomes the monarch. NICKNAME deals 3 damage to any target.",
+      "effect": {
+        "description": "Target player becomes the monarch. NICKNAME deals 3 damage to any target.",
+        "name": "BecomeMonarch",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, scry 2.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, scry 2.",
-        "Destination": "Battlefield",
-        "Execute": "TrigScry"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

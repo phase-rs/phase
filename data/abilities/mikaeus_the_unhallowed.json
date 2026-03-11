@@ -1,31 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Human",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever a Human deals damage to you, destroy it.",
-        "ValidTarget": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Other non-Human creatures you control get +1/+1 and have undying.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "AddToughness": "1",
-        "Description": "Other non-Human creatures you control get +1/+1 and have undying.",
-        "AddPower": "1",
-        "AddKeyword": "Undying",
-        "Affected": "Creature.nonHuman+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Undying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Human deals damage to you, destroy it.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Human",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

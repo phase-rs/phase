@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for a creature card, reveal it, then shuffle and put the card on top.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Library",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Search your library for a creature card, reveal it, then shuffle and put the card on top.",
-        "LibraryPosition": "0",
-        "ChangeType": "Creature",
-        "ChangeNum": "1"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

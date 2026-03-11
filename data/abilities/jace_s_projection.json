@@ -2,39 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "LOYALTY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Planeswalker.Jace"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
+      "description": "Put a loyalty counter on target Jace planeswalker.",
+      "effect": {
+        "count": 1,
+        "counter_type": "LOYALTY",
+        "target": {
+          "card_type": "Planeswalker",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Jace"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Jace",
-        "SpellDescription": "Put a loyalty counter on target Jace planeswalker."
-      }
+      "target_prompt": "Select target Jace"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a card, put a +1/+1 counter on CARDNAME.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

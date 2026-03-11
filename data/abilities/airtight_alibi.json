@@ -1,39 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "When CARDNAME enters, untap enchanted creature. It gains hexproof until end of turn. If it's suspected, it's no longer suspected.",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and can't become suspected.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "2",
-        "Description": "Enchanted creature gets +2/+2 and can't become suspected.",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "description": "Enchanted creature gets +2/+2 and can't become suspected.",
       "mode": {
         "Other": "CantBeSuspected"
-      },
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +2/+2 and can't become suspected.",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, untap enchanted creature. It gains hexproof until end of turn. If it's suspected, it's no longer suspected.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

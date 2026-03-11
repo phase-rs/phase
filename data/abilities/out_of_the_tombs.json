@@ -1,32 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, put two eon counters on CARDNAME, then mill cards equal to the number of eon counters on it.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "BuildCounter"
-      }
+      "description": "If you would draw a card while your library has no cards in it, instead return a creature card from your graveyard to the battlefield. If you can't, you lose the game.",
+      "event": "Draw"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "IsPresent": "Card.YouOwn",
-        "ValidPlayer": "You",
-        "Description": "If you would draw a card while your library has no cards in it, instead return a creature card from your graveyard to the battlefield. If you can't, you lose the game.",
-        "ActiveZones": "Battlefield",
-        "PresentZone": "Library",
-        "PresentCompare": "EQ0",
-        "ReplaceWith": "Reanimate"
-      }
+      "description": "At the beginning of your upkeep, put two eon counters on CARDNAME, then mill cards equal to the number of eon counters on it.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

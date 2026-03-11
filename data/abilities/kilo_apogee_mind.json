@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever NICKNAME becomes tapped, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME becomes tapped, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
-        "Execute": "TrigProliferate",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

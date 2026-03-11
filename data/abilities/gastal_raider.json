@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigDiscard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When this creature enters, target opponent reveals their hand. You choose an instant or sorcery card from it. That player discards that card.",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Max speed — This creature gets +1/+1 and has menace.",
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddStaticAbility": "MaxSpeedStatic"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — This creature gets +1/+1 and has menace.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this creature enters, target opponent reveals their hand. You choose an instant or sorcery card from it. That player discards that card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "Nonbasic lands are Mountains.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Mountain",
-        "RemoveLandTypes": "True",
-        "Affected": "Land.nonBasic",
-        "Description": "Nonbasic lands are Mountains."
-      }
+      "modifications": [
+        {
+          "core_type": "Mountain",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

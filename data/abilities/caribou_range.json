@@ -2,34 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You gain 1 life."
-      }
+      "description": "You gain 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{W}{W}, {T}: Create a 0/1 white Caribou creature token.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.AttachedBy",
-        "Description": "Enchanted land has \"{W}{W}, {T}: Create a 0/1 white Caribou creature token.\"",
-        "AddAbility": "Token"
-      }
+      "modifications": [
+        {
+          "ability": "Token",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, conjure a duplicate of target nontoken creature into exile.",
-        "ValidTarget": "Player",
-        "ValidSource": "Creature.YouCtrl",
-        "Execute": "TrigConjure"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "MaxSpeed",
-        "AddTrigger": "PhaseTrig",
-        "Description": "Max speed — At the beginning of combat on your turn, put all cards exiled with this creature onto the battlefield. They gain haste. Sacrifice them at the beginning of the next end step.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — At the beginning of combat on your turn, put all cards exiled with this creature onto the battlefield. They gain haste. Sacrifice them at the beginning of the next end step.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, conjure a duplicate of target nontoken creature into exile.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

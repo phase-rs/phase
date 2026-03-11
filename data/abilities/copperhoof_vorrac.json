@@ -1,25 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 for each untapped permanent your opponents control.",
-        "Affected": "Card.Self",
-        "AddToughness": "X",
-        "AddPower": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each untapped permanent your opponents control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.OppCtrl",
-        "AddSVar": "AITap"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

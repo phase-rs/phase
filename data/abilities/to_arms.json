@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Untap all creatures you control.",
-          "ValidCards": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Untap all creatures you control.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Untap all creatures you control.",
+      "effect": {
+        "description": "Untap all creatures you control.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

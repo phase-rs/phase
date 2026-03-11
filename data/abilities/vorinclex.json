@@ -1,56 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "6 G G",
+            "type": "Mana"
+          },
+          "description": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "6 G G"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBReturn",
-            "RememberChanged": "True",
-            "StackDescription": "SpellDescription",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery."
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, search your library for up to two Forest cards, reveal them, put them into your hand, then shuffle.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigChange",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, search your library for up to two Forest cards, reveal them, put them into your hand, then shuffle."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withFlying+blockedBySource"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Tap target creature with flying blocked by CARDNAME. That creature doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature with flying blocked by CARDNAME. That creature doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
-        "TgtPrompt": "Select target creature with flying blocked by CARDNAME",
-        "SubAbility": "DBEffect",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target creature with flying blocked by CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

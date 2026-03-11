@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add an amount of {C} equal to CARDNAME's toughness. This mana can't be spent to cast spells from your hand.",
-          "RestrictValid": "CantCastSpellFromHand",
-          "Amount": "X"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add an amount of {C} equal to CARDNAME's toughness. This mana can't be spent to cast spells from your hand.",
-        "RestrictValid": "CantCastSpellFromHand",
-        "Amount": "X"
-      }
+      "description": "Add an amount of {C} equal to CARDNAME's toughness. This mana can't be spent to cast spells from your hand.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

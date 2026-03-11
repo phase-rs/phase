@@ -2,35 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeText",
-        "params": {
-          "TgtPrompt": "Choose target white enchantment you control that doesn't have cumulative upkeep",
-          "ChangeColorWord": "Choose Choose",
-          "SpellDescription": "Change the text of target white enchantment you control that doesn't have cumulative upkeep by replacing all instances of one color word with another. (For example, you may change \"black creatures can't attack\" to \"blue creatures can't attack.\") That enchantment gains \"Cumulative upkeep 1.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)",
-          "Duration": "Permanent",
-          "ValidTgts": "Enchantment.YouCtrl+White+withoutCumulative upkeep",
-          "SubAbility": "DBCumUpkeep"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Change the text of target white enchantment you control that doesn't have cumulative upkeep by replacing all instances of one color word with another. (For example, you may change \"black creatures can't attack\" to \"blue creatures can't attack.\") That enchantment gains \"Cumulative upkeep 1.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)",
+      "duration": "Permanent",
+      "effect": {
+        "description": "Change the text of target white enchantment you control that doesn't have cumulative upkeep by replacing all instances of one color word with another. (For example, you may change \"black creatures can't attack\" to \"blue creatures can't attack.\") That enchantment gains \"Cumulative upkeep 1.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)",
+        "name": "ChangeText",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target white enchantment you control that doesn't have cumulative upkeep",
-        "ChangeColorWord": "Choose Choose",
-        "SpellDescription": "Change the text of target white enchantment you control that doesn't have cumulative upkeep by replacing all instances of one color word with another. (For example, you may change \"black creatures can't attack\" to \"blue creatures can't attack.\") That enchantment gains \"Cumulative upkeep 1.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)",
-        "Duration": "Permanent",
-        "ValidTgts": "Enchantment.YouCtrl+White+withoutCumulative upkeep",
-        "SubAbility": "DBCumUpkeep"
-      }
+      "target_prompt": "Choose target white enchantment you control that doesn't have cumulative upkeep"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

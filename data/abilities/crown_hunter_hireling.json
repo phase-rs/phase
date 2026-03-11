@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMonarch"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "isMonarch",
-        "Description": "CARDNAME can't attack unless defending player is the monarch.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't attack unless defending player is the monarch.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you become the monarch.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

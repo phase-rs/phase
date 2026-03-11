@@ -2,61 +2,93 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "c_0_1_eldrazi_spawn_sac",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 C"
+            "cost": "1 C",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\""
-      }
+      "description": "Create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "c_0_1_eldrazi_spawn_sac",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME has eight or more +1/+1 counters on it, it's a 0/0 creature in addition to its other types and it has annihilator 2.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 0
+        },
+        {
+          "type": "SetToughness",
+          "value": 0
+        },
+        {
+          "keyword": "Annihilator:2",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever another Eldrazi you control dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Eldrazi.Other+YouCtrl",
-        "Execute": "TrigPutCounter",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another Eldrazi you control dies, put a +1/+1 counter on CARDNAME."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Eldrazi",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Annihilator:2",
-        "SetPower": "0",
-        "SetToughness": "0",
-        "Affected": "Card.Self+counters_GE8_P1P1",
-        "AddType": "Creature",
-        "Description": "As long as CARDNAME has eight or more +1/+1 counters on it, it's a 0/0 creature in addition to its other types and it has annihilator 2."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

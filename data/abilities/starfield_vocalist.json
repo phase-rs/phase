@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "Destination": "Battlefield",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidCause": "Permanent",
-        "Description": "If a permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."
-      }
+      "description": "If a permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

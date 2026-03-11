@@ -2,36 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B B"
+            "cost": "2 B B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Target player loses 2 life plus 2 life for each Spirit sacrificed this way. You gain that much life.",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player loses 2 life plus 2 life for each Spirit sacrificed this way. You gain that much life.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

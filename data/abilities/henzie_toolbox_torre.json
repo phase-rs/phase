@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each creature spell you cast with mana value 4 or greater has blitz. The blitz cost is equal to its mana cost. (You may choose to cast that spell for its blitz cost. If you do, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+wasCast",
-        "AddKeyword": "Blitz:CardManaCost:Spell.Creature+cmcGE4",
-        "AffectedZone": "Stack",
-        "Description": "Each creature spell you cast with mana value 4 or greater has blitz. The blitz cost is equal to its mana cost. (You may choose to cast that spell for its blitz cost. If you do, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Blitz:CardManaCost:Spell.Creature+cmcGE4",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Description": "Blitz costs you pay cost {1} less for each time you've cast your commander from the command zone this game.",
-        "Amount": "CommanderCast",
-        "ValidCard": "Card",
-        "ValidSpell": "Spell.Blitz"
-      }
+      "description": "Blitz costs you pay cost {1} less for each time you've cast your commander from the command zone this game.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

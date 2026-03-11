@@ -2,89 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -2,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Until your next turn, up to one target creature gets -2/-0 and loses flying.",
-        "SubAbility": "DBDebuff",
-        "IsCurse": "True",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "Duration": "UntilYourNextTurn"
-      }
+      "description": "Until your next turn, up to one target creature gets -2/-0 and loses flying.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "power": -2,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Create a 4/4 blue Elemental Bird creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_4_4_elemental_bird_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 4/4 blue Elemental Bird creature token with flying.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "AILogic": "Always",
-          "Name": "Emblem — Mu Yanling, Sky Dancer",
-          "Duration": "Permanent",
-          "Stackable": "False",
-          "Image": "emblem_mu_yanling_sky_dancer",
-          "SpellDescription": "You get an emblem with \"Islands you control have '{T}: Draw a card.'\"",
-          "Planeswalker": "True",
-          "StaticAbilities": "STDraw"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "AILogic": "Always",
-        "Name": "Emblem — Mu Yanling, Sky Dancer",
-        "Duration": "Permanent",
-        "Stackable": "False",
-        "Image": "emblem_mu_yanling_sky_dancer",
-        "SpellDescription": "You get an emblem with \"Islands you control have '{T}: Draw a card.'\"",
-        "Planeswalker": "True",
-        "StaticAbilities": "STDraw"
-      }
+      "description": "You get an emblem with \"Islands you control have '{T}: Draw a card.'\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast or cycle CARDNAME, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast or cycle CARDNAME, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\""
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you cast or cycle CARDNAME, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
       "mode": "Cycled",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "When you cast or cycle CARDNAME, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
-        "Secondary": "True",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

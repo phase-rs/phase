@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ExchangeControl",
-        "params": {
-          "TargetMax": "2",
-          "ValidTgts": "Permanent",
-          "TargetsWithSameCardType": "True",
-          "TgtPrompt": "Select target permanents that share a permanent type",
-          "SpellDescription": "Exchange control of two target permanents that share a permanent type.",
-          "TargetMin": "2"
-        }
-      },
       "cost": null,
+      "description": "Exchange control of two target permanents that share a permanent type.",
+      "effect": {
+        "description": "Exchange control of two target permanents that share a permanent type.",
+        "name": "ExchangeControl",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "ValidTgts": "Permanent",
-        "TargetsWithSameCardType": "True",
-        "TgtPrompt": "Select target permanents that share a permanent type",
-        "SpellDescription": "Exchange control of two target permanents that share a permanent type.",
-        "TargetMin": "2"
-      }
+      "target_prompt": "Select target permanents that share a permanent type"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

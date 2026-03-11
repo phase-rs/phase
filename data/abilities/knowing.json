@@ -1,53 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 3
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw three cards."
-          }
+          "description": "Draw three cards.",
+          "effect": {
+            "count": 3,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Search your library for a Battle card, reveal it, put it into your hand, then shuffle.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
             "destination": "Hand",
+            "origin": "Library",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Search your library for a Battle card, reveal it, put it into your hand, then shuffle.",
-            "ChangeType": "Battle",
-            "ChangeNum": "1"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

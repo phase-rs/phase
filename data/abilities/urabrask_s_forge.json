@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, put an oil counter on CARDNAME, then create an X/1 red Phyrexian Horror creature token with trample and haste, where X is the number of oil counters on CARDNAME. Sacrifice that token at the beginning of the next end step.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, put an oil counter on CARDNAME, then create an X/1 red Phyrexian Horror creature token with trample and haste, where X is the number of oil counters on CARDNAME. Sacrifice that token at the beginning of the next end step.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

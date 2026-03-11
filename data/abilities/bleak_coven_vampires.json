@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Metalcraft — When CARDNAME enters, if you control three or more artifacts, target player loses 4 life and you gain 4 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Metalcraft": "True",
-        "TriggerDescription": "Metalcraft — When CARDNAME enters, if you control three or more artifacts, target player loses 4 life and you gain 4 life.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDrain",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

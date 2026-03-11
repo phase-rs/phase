@@ -1,42 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, scry 2.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, scry 2.",
-            "Execute": "TrigScry",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, target attacking creature without flying gains flying until end of turn.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME attacks, target attacking creature without flying gains flying until end of turn.",
-            "Execute": "TrigPump"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 GU GU",
+        "type": "Mana"
+      },
+      "description": "Mill two cards, then return a nonland card of an opponent's choice from your graveyard to your hand.",
       "effect": {
-        "type": "Mill",
         "count": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 GU GU"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Mill two cards, then return a nonland card of an opponent's choice from your graveyard to your hand.",
-        "SubAbility": "DBReturn",
-        "Defined": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power is equal to the number of artifacts you control.",
-        "SetPower": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of artifacts you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "MayLookAt": "You",
-        "AffectedZone": "Library",
-        "Description": "You may look at the top card of your library any time."
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+AttachedTo Creature",
-        "AffectedZone": "Library",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "As long as CARDNAME is attached to a creature, you may play lands and cast spells from the top of your library.",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is attached to a creature, you may play lands and cast spells from the top of your library.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AdvanceCrank",
-        "params": {
-          "SpellDescription": "Move the CRANK! counter to your Contraption deck's next sprocket and crank any number of that sprocket's Contraptions.",
-          "AILogic": "AtOppEOT"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Move the CRANK! counter to your Contraption deck's next sprocket and crank any number of that sprocket's Contraptions.",
-        "AILogic": "AtOppEOT"
-      }
+      "description": "Move the CRANK! counter to your Contraption deck's next sprocket and crank any number of that sprocket's Contraptions.",
+      "effect": {
+        "description": "Move the CRANK! counter to your Contraption deck's next sprocket and crank any number of that sprocket's Contraptions.",
+        "name": "AdvanceCrank",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

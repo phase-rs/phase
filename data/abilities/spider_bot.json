@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, you may search your library for a basic land card, reveal it, then shuffle and put that card on top.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When this creature enters, you may search your library for a basic land card, reveal it, then shuffle and put that card on top.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

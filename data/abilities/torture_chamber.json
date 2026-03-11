@@ -2,63 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Variable",
-          "value": "Y"
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<All/PAIN>"
+            "cost": "SubCounter<All/PAIN>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "It deals damage to target creature equal to the number of pain counters removed this way."
-      }
+      "description": "It deals damage to target creature equal to the number of pain counters removed this way.",
+      "effect": {
+        "amount": {
+          "type": "Variable",
+          "value": "Y"
+        },
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a pain counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, put a pain counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "Execute": "TrigPutCounter"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your end step, CARDNAME deals damage to you equal to the number of pain counters on it.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "At the beginning of your end step, CARDNAME deals damage to you equal to the number of pain counters on it.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

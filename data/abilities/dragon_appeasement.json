@@ -1,32 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you sacrifice a creature, you may draw a card.",
-        "Execute": "TrigDrawCard",
-        "TriggerZones": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "Skip": "True",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Draw",
-        "Description": "Skip your draw step."
+      "description": "Whenever you sacrifice a creature, you may draw a card.",
+      "mode": "Sacrificed",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

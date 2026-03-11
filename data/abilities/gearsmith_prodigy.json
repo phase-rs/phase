@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+0 as long as you control an artifact.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Artifact.YouCtrl",
-        "Description": "CARDNAME gets +1/+0 as long as you control an artifact.",
-        "AddPower": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

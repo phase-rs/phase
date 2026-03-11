@@ -1,28 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, create a 2/2 white Knight creature token with vigilance.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Prevent the next 1 damage that would be dealt to you this turn.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "PreventDamage",
-        "Description": "Enchanted land has \"{T}: Prevent the next 1 damage that would be dealt to you this turn.\"",
-        "Affected": "Land.AttachedBy"
-      }
+      "modifications": [
+        {
+          "ability": "PreventDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create a 2/2 white Knight creature token with vigilance.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

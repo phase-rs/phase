@@ -2,35 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G U R",
-        "params": {
-          "SpellDescription": "Add {G}, {U}, or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}, {U}, or {R}."
-      }
+      "description": "Add {G}, {U}, or {R}.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, add {G}{U}{R}.",
       "mode": "TurnFaceUp",
-      "params": {
-        "Execute": "TrigMana",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME is turned face up, add {G}{U}{R}."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

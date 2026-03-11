@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may sacrifice a creature. When you do, CARDNAME deals 2 damage to target opponent or planeswalker.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice a creature. When you do, CARDNAME deals 2 damage to target opponent or planeswalker.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigSacrifice",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

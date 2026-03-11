@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Beast enters, you may draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Beast",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a Beast enters, you may draw a card.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigDraw"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Beast",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

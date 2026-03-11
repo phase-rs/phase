@@ -2,37 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G G",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "3"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes monstrous, create a token that's a copy of CARDNAME. (The token has no counters and isn't monstrous.)",
       "mode": "BecomeMonstrous",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME becomes monstrous, create a token that's a copy of CARDNAME. (The token has no counters and isn't monstrous.)",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

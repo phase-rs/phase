@@ -2,50 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Target player gains control of CARDNAME.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Player"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is indestructible.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
         }
-      },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player gains control of CARDNAME.",
-        "StackDescription": "{p:Targeted} gains control of CARDNAME.",
-        "AILogic": "Curse",
-        "SubAbility": "DBGainControl"
-      }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "At the end of your turn, CARDNAME deals 7 damage to you.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDamage",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the end of your turn, CARDNAME deals 7 damage to you."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Indestructible",
-        "Description": "CARDNAME is indestructible."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

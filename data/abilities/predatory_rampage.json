@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 3,
-        "toughness": 3,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "OppBlock",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control get +3/+3 until end of turn. Each creature your opponents control blocks this turn if able."
-      }
+      "description": "Creatures you control get +3/+3 until end of turn. Each creature your opponents control blocks this turn if able.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 3,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

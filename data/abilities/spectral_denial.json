@@ -2,37 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell unless its controller pays {X}.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target spell unless its controller pays {X}.",
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "UnlessCost": "X"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "This spell costs {1} less to cast for each creature you control with power 4 or greater.",
-        "Amount": "Y",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {1} less to cast for each creature you control with power 4 or greater.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

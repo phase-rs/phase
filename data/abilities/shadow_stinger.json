@@ -2,41 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Rogue.Other>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains deathtouch until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Rogue.Other>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Deathtouch",
-        "SpellDescription": "CARDNAME gains deathtouch until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player mills three cards. (They put the top three cards of their library into their graveyard.)",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigMill",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player mills three cards. (They put the top three cards of their library into their graveyard.)",
-        "ValidSource": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each opponent's upkeep, you may discard a card. If you do, draw a card.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Instant"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn,Card.Sorcery"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Each instant and sorcery card in your hand has miracle {2}. (You may cast a card for its miracle cost when you draw it if it's the first card you drew this turn.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Miracle:2",
-        "Affected": "Card.Instant+YouOwn,Card.Sorcery+YouOwn",
-        "Description": "Each instant and sorcery card in your hand has miracle {2}. (You may cast a card for its miracle cost when you draw it if it's the first card you drew this turn.)",
-        "AffectedZone": "Hand"
-      }
+      "modifications": [
+        {
+          "keyword": "Miracle:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each opponent's upkeep, you may discard a card. If you do, draw a card.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

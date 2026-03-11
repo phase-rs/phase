@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Artifact",
-          "SpellDescription": "Tap all artifacts."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Artifact",
-        "SpellDescription": "Tap all artifacts."
-      }
+      "description": "Tap all artifacts.",
+      "effect": {
+        "description": "Tap all artifacts.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

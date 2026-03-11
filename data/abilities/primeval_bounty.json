@@ -1,40 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, create a 3/3 green Beast creature token.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Creature",
-        "Execute": "BountysGift",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a creature spell, create a 3/3 green Beast creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a noncreature spell, put three +1/+1 counters on target creature you control.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.nonCreature",
-        "TriggerDescription": "Whenever you cast a noncreature spell, put three +1/+1 counters on target creature you control."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Landfall — Whenever a land you control enters, you gain 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, you gain 3 life.",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigGainLife",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

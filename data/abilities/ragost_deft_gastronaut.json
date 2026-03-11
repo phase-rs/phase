@@ -2,66 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "NICKNAME deals 3 damage to each opponent.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
           "type": "Any"
+        },
+        "type": "DealDamage"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Artifacts you control are Foods in addition to their other types and have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "FoodSac",
+          "type": "AddAbility"
+        },
+        {
+          "core_type": "Food",
+          "type": "AddType"
         }
-      },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "NICKNAME deals 3 damage to each opponent.",
-        "Defined": "Player.Opponent"
-      }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if you gained life this turn, untap NICKNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "At the beginning of each end step, if you gained life this turn, untap NICKNAME.",
-        "CheckSVar": "X"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "Description": "Artifacts you control are Foods in addition to their other types and have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
-        "Affected": "Artifact.YouCtrl",
-        "AddType": "Food",
-        "AddAbility": "FoodSac"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

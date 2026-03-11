@@ -1,30 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more permanents you control leave the battlefield, perpetually increase NICKNAME's intensity and the intensity of cards named Minthara of the Absolute in your hand, graveyard, and library by 1. This ability triggers only once each turn.",
-        "Destination": "Any",
-        "Execute": "TrigIntensify",
-        "Origin": "Battlefield",
-        "ActivationLimit": "1",
-        "ValidCard": "Permanent.YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control get +X/+0, where X is CARDNAME's intensity.",
-        "AddPower": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +X/+0, where X is CARDNAME's intensity.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more permanents you control leave the battlefield, perpetually increase NICKNAME's intensity and the intensity of cards named Minthara of the Absolute in your hand, graveyard, and library by 1. This ability triggers only once each turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

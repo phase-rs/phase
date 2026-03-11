@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 U",
+        "type": "Mana"
+      },
+      "description": "Put two +1/+1 counters on this creature. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Exhaust": "True",
-        "SpellDescription": "Put two +1/+1 counters on this creature. (Activate each exhaust ability only once.)",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,36 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "Execute": "TrigSac",
-        "IsPresent": "Island.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When you control no Islands, sacrifice CARDNAME.",
-        "PresentCompare": "EQ0"
-      }
-    },
-    {
-      "mode": "AttackerUnblocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you gain 2 life.",
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless defending player controls an Island.",
-        "UnlessDefender": "controlsIsland"
-      }
+      "description": "CARDNAME can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you control no Islands, sacrifice CARDNAME.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever CARDNAME attacks and isn't blocked, you gain 2 life.",
+      "mode": "AttackerUnblocked",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

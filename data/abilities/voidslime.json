@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell, activated ability, or triggered ability.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell,Activated,Triggered",
-        "SpellDescription": "Counter target spell, activated ability, or triggered ability.",
-        "TgtPrompt": "Select target spell or ability"
-      }
+      "target_prompt": "Select target spell or ability"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

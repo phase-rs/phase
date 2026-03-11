@@ -1,56 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMill",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, mill three cards."
-      }
-    },
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Secondary": "True",
-        "Static": "True",
-        "Execute": "DBAnimate",
-        "ValidSA": "Spell.MayPlaySource",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\""
-      }
-    },
-    {
-      "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
-        "Execute": "DBAnimate",
-        "Static": "True",
-        "Secondary": "True",
-        "ValidSA": "SpellAbility.MayPlaySource",
-        "ValidCard": "Land"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "MayPlay": "True",
-        "Description": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
-        "MayPlayLimit": "1",
-        "Affected": "Permanent.YouOwn+Historic,Land.YouOwn+Historic",
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Graveyard"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "Other",
+            "value": "Historic,Land.YouOwn"
+          },
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, mill three cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
+      "mode": "SpellCast",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
+      "mode": "LandPlayed",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
+      }
+    }
+  ]
 }

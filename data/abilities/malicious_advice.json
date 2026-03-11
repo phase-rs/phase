@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Land"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "X",
-        "TargetMin": "X",
-        "SpellDescription": "Tap X target artifacts, creatures, and/or lands. You lose X life.",
-        "SubAbility": "Drain"
-      }
+      "description": "Tap X target artifacts, creatures, and/or lands. You lose X life.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature,Land",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

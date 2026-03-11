@@ -1,32 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.OppCtrl",
-        "Execute": "TrigGainLife",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature an opponent controls enters, you gain 1 life."
+      "description": "Creatures your opponents control enter tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Creature.OppCtrl",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "Description": "Creatures your opponents control enter tapped."
+      "description": "Whenever a creature an opponent controls enters, you gain 1 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

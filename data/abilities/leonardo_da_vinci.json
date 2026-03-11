@@ -2,56 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Toughness": "X",
-          "Power": "X",
-          "ValidCards": "Thopter.YouCtrl",
-          "SpellDescription": "Until end of turn, Thopters you control have base power and toughness X/X, where X is the number of cards in your hand."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U U"
+        "cost": "3 U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Toughness": "X",
-        "Power": "X",
-        "ValidCards": "Thopter.YouCtrl",
-        "SpellDescription": "Until end of turn, Thopters you control have base power and toughness X/X, where X is the number of cards in your hand."
-      }
+      "description": "Until end of turn, Thopters you control have base power and toughness X/X, where X is the number of cards in your hand.",
+      "effect": {
+        "description": "Until end of turn, Thopters you control have base power and toughness X/X, where X is the number of cards in your hand.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U"
+            "cost": "2 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card, then discard a card. If the discarded card was an artifact card, exile it from your graveyard. If you do, create a token that's a copy of it, except it's a 0/2 Thopter artifact creature with flying in addition to its other types.",
-        "SubAbility": "DBDiscard"
-      }
+      "description": "Draw a card, then discard a card. If the discarded card was an artifact card, exile it from your graveyard. If you do, create a token that's a copy of it, except it's a 0/2 Thopter artifact creature with flying in addition to its other types.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

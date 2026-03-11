@@ -2,46 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to each creature and each player.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "ValidDescription": "each creature and each player.",
-        "ValidPlayers": "Player",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature and each player.",
-        "AILogic": "DmgAllCreaturesAndPlayers"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, if no creatures are on the battlefield, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of the end step, if no creatures are on the battlefield, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Creature",
-        "Phase": "End of Turn",
-        "PresentCompare": "EQ0",
-        "Execute": "TrigSac"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

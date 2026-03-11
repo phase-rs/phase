@@ -1,25 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+0.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Human",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as equipped creature is a Human, it gets an additional +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as equipped creature is a Human, it gets an additional +1/+0.",
-        "AddPower": "1",
-        "Affected": "Human.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

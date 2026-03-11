@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player discards two cards, then draws as many cards as they discarded this way.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberDiscarded": "True",
-        "SubAbility": "DBDraw",
-        "Mode": "TgtChoose",
-        "SpellDescription": "Target player discards two cards, then draws as many cards as they discarded this way."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

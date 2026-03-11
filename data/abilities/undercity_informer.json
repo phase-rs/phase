@@ -2,47 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "ValidTgts": "Player",
-          "Valid": "Land",
-          "ValidDescription": "land",
-          "RevealedDestination": "Graveyard",
-          "SpellDescription": "Target player reveals the top card of their library until they reveal a land card, then puts those cards into their graveyard.",
-          "Amount": "1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "Valid": "Land",
-        "ValidDescription": "land",
-        "RevealedDestination": "Graveyard",
-        "SpellDescription": "Target player reveals the top card of their library until they reveal a land card, then puts those cards into their graveyard.",
-        "Amount": "1"
-      }
+      "description": "Target player reveals the top card of their library until they reveal a land card, then puts those cards into their graveyard.",
+      "effect": {
+        "description": "Target player reveals the top card of their library until they reveal a land card, then puts those cards into their graveyard.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

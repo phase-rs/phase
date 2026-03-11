@@ -2,46 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChoosePlayer",
-        "params": {
-          "Choices": "Player.IsRemembered",
-          "Defined": "You",
-          "SubAbility": "DBChooseSpell",
-          "SpellDescription": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Player.IsRemembered",
-        "Defined": "You",
-        "SubAbility": "DBChooseSpell",
-        "SpellDescription": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down."
-      }
+      "description": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down.",
+      "effect": {
+        "description": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down.",
+        "name": "ChoosePlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
-      "mode": "Phase",
-      "params": {
-        "Static": "True",
-        "Execute": "DBForget",
-        "Phase": "Untap"
-      }
+      "mode": "Phase"
     },
     {
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Sorcery.!IsRemembered",
-        "Static": "True",
-        "Execute": "TrigRememberPlayer"
+      "valid_source": {
+        "card_type": "Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

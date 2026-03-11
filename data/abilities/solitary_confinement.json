@@ -1,50 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you discard a card.",
-        "Phase": "Upkeep",
-        "Execute": "TrigUpkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
+    },
+    {
+      "description": "Prevent all damage that would be dealt to you.",
+      "event": "DamageDone"
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You have shroud. (You can't be the target of spells or abilities.)",
-        "AddKeyword": "Shroud"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "BeginPhase"
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
       },
-      "params": {
-        "Phase": "Draw",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "ValidPlayer": "You",
-        "Description": "Skip your draw step."
-      }
-    },
-    {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "You",
-        "Description": "Prevent all damage that would be dealt to you.",
-        "Prevent": "True",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "You have shroud. (You can't be the target of spells or abilities.)",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you discard a card.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

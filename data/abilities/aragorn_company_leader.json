@@ -1,28 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever the Ring tempts you, if you chose a creature other than CARDNAME as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on NICKNAME.",
       "mode": "RingTemptsYou",
-      "params": {
-        "Execute": "TrigPutCounters",
-        "TriggerDescription": "Whenever the Ring tempts you, if you chose a creature other than CARDNAME as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on NICKNAME.",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever you put one or more counters on NICKNAME, put one of each of those kinds of counters on up to one other target creature.",
       "mode": "CounterPlayerAddedAll",
-      "params": {
-        "Execute": "TrigPutCountersOther",
-        "ValidObject": "Card.Self+inRealZoneBattlefield",
-        "TriggerDescription": "Whenever you put one or more counters on NICKNAME, put one of each of those kinds of counters on up to one other target creature.",
-        "ValidSource": "You",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

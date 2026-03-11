@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may cast a spell with mana value equal to CARDNAME's intensity from your graveyard without paying its mana cost. If you do, perpetually increase NICKNAME's intensity by 1.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, you may cast a spell with mana value equal to CARDNAME's intensity from your graveyard without paying its mana cost. If you do, perpetually increase NICKNAME's intensity by 1.",
-        "ValidPlayer": "You",
-        "Execute": "TrigChoose"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

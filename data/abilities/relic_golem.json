@@ -2,46 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 2,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills two cards. (They put the top two cards of their library into their graveyard.)"
-      }
+      "description": "Target player mills two cards. (They put the top two cards of their library into their graveyard.)",
+      "effect": {
+        "count": 2,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "LT8",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack or block unless an opponent has eight or more cards in their graveyard.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "SVarCompare": "LT8",
-        "CheckSVar": "X",
-        "Description": "CARDNAME can't attack or block unless an opponent has eight or more cards in their graveyard."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

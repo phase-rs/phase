@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Undergrowth — When CARDNAME enters, choose up to one target creature with flying you don't control. CARDNAME gets +X/+0 until end of turn, where X is the number of creature cards in your graveyard, then you may have CARDNAME fight that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Undergrowth — When CARDNAME enters, choose up to one target creature with flying you don't control. CARDNAME gets +X/+0 until end of turn, where X is the number of creature cards in your graveyard, then you may have CARDNAME fight that creature.",
-        "Origin": "Any",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

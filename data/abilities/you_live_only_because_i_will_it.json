@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, you may redistribute any number of life totals.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, you may redistribute any number of life totals.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRedistribute"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

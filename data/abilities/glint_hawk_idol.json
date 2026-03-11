@@ -2,48 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 2/2 Bird artifact creature with flying until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature",
           "Bird"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "RemoveCreatureTypes": "True",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME becomes a 2/2 Bird artifact creature with flying until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another artifact you control enters, you may have CARDNAME become a 2/2 Bird artifact creature with flying until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Artifact.Other+YouCtrl",
-        "TriggerDescription": "Whenever another artifact you control enters, you may have CARDNAME become a 2/2 Bird artifact creature with flying until end of turn."
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Artifact",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

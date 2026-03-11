@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.SecondSpellCastThisTurn"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell that's the second spell cast this turn.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "SecondSpellCastThisTurn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell that's the second spell cast this turn",
-        "SpellDescription": "Counter target spell that's the second spell cast this turn."
-      }
+      "target_prompt": "Select target spell that's the second spell cast this turn"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

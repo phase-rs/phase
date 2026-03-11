@@ -2,80 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "1",
-          "RestrictValid": "Spell.Vehicle,Spell.Pilot",
-          "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Pilot or Vehicle spell."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "RestrictValid": "Spell.Vehicle,Spell.Pilot",
-        "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Pilot or Vehicle spell."
-      }
+      "description": "Add one mana of any color. Spend this mana only to cast a Pilot or Vehicle spell.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Artifact",
-          "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Vehicle"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target Vehicle becomes an artifact creature until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Vehicle",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Artifact",
+          "Creature"
         ]
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target Vehicle becomes an artifact creature until end of turn.",
-        "TgtPrompt": "Choose target Vehicle",
-        "StackDescription": "{c:Targeted} becomes an artifact creature until end of turn."
-      }
+      "target_prompt": "Choose target Vehicle"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

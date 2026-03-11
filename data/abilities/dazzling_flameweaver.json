@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, conjure a random card from CARDNAME's spellbook into exile. You may play that card until the end of your next turn.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, conjure a random card from CARDNAME's spellbook into exile. You may play that card until the end of your next turn.",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "ValidSource": "Creature.YouCtrl",
-        "Execute": "TrigConjure",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

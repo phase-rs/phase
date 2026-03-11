@@ -2,75 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "SpellDescription": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
-          "Type": "Card.namedAudacious Knuckleblade",
-          "SubAbility": "DBPut",
-          "Exhaust": "True",
-          "RememberFound": "True"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G"
+        "cost": "2 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
-        "Type": "Card.namedAudacious Knuckleblade",
-        "SubAbility": "DBPut",
-        "Exhaust": "True",
-        "RememberFound": "True"
-      }
+      "description": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
+      "effect": {
+        "description": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBUntap",
-        "SpellDescription": "Surveil 2, then untap this creature.",
-        "Exhaust": "True",
-        "Amount": "2"
-      }
+      "description": "Surveil 2, then untap this creature.",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "Creatures you control gain haste until end of turn.",
       "effect": {
-        "type": "PumpAll",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Haste",
-        "Exhaust": "True",
-        "SpellDescription": "Creatures you control gain haste until end of turn.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

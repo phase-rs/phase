@@ -1,20 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Lesson",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This creature gets +1/+1 as long as there's a Lesson card in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "PresentZone": "Graveyard",
-        "AddToughness": "1",
-        "Description": "This creature gets +1/+1 as long as there's a Lesson card in your graveyard.",
-        "IsPresent": "Lesson.YouOwn",
-        "AddPower": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,51 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": 5,
-        "toughness": 5,
-        "types": [
-          "Creature",
-          "Plant",
-          "Boar"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 G"
+            "cost": "3 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "CollectEvidence<4>"
+            "cost": "CollectEvidence<4>",
+            "type": "Mana"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as CARDNAME remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)",
+      "effect": {
+        "power": 5,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 5,
+        "type": "Animate",
+        "types": [
+          "Creature",
+          "Plant",
+          "Boar"
         ]
       },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilUntaps",
-        "OverwriteColors": "True",
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Select target land you control",
-        "Colors": "Green",
-        "Keywords": "Haste",
-        "SpellDescription": "Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as CARDNAME remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

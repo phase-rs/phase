@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Spell",
-        "Caster": "You",
-        "ValidCard": "Creature.Green",
-        "Description": "You may cast green creature spells as though they had flash."
-      }
+      "description": "You may cast green creature spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

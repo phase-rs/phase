@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control no creatures with decayed, create a 2/2 black Zombie creature token with decayed. (It can't block. When it attacks, sacrifice it at end of combat.)",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "PresentCompare": "EQ0",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Creature.YouCtrl+withDecayed",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your end step, if you control no creatures with decayed, create a 2/2 black Zombie creature token with decayed. (It can't block. When it attacks, sacrifice it at end of combat.)"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

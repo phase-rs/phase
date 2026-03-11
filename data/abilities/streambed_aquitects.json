@@ -2,52 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Merfolk"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target Merfolk creature gets +1/+1 and gains islandwalk until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Merfolk",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Landwalk:Island",
-        "TgtPrompt": "Select target Merfolk creature",
-        "SpellDescription": "Target Merfolk creature gets +1/+1 and gains islandwalk until end of turn."
-      }
+      "target_prompt": "Select target Merfolk creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Island"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target land becomes an Island until end of turn.",
-        "RemoveLandTypes": "True"
-      }
+      "description": "Target land becomes an Island until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Island"
+        ]
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

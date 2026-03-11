@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Discard",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "WindfallDraw",
-        "RememberDiscarded": "True",
-        "Defined": "Player",
-        "Mode": "Hand",
-        "SpellDescription": "Each player discards their hand, then draws cards equal to the greatest number of cards a player discarded this way."
-      }
+      "description": "Each player discards their hand, then draws cards equal to the greatest number of cards a player discarded this way.",
+      "effect": {
+        "count": 1,
+        "target": {
+          "type": "Any"
+        },
+        "type": "Discard"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

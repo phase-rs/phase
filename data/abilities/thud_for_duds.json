@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, roll two six-sided dice. CARDNAME deals damage to target creature equal to the difference between those results.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever you crank CARDNAME, roll two six-sided dice. CARDNAME deals damage to target creature equal to the difference between those results.",
-        "Execute": "TrigCrank"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

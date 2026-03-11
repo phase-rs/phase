@@ -2,62 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W",
-        "params": {
-          "SpellDescription": "Add {W}. Spend this mana only to cast an artifact spell or activate an ability of an artifact source.",
-          "RestrictValid": "Spell.Artifact,Activated.Artifact"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W}. Spend this mana only to cast an artifact spell or activate an ability of an artifact source.",
-        "RestrictValid": "Spell.Artifact,Activated.Artifact"
-      }
+      "description": "Add {W}. Spend this mana only to cast an artifact spell or activate an ability of an artifact source.",
+      "effect": {
+        "produced": [
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouOwn+cmcLEX"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W"
+            "cost": "2 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1+/Artifact.Other+withTotalCMCEQX/other artifacts you control with total mana value X>"
+            "cost": "Exile<1+/Artifact.Other+withTotalCMCEQX/other artifacts you control with total mana value X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target artifact card with mana value X or less from your graveyard to the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "Announce": "X",
-        "SpellDescription": "Return target artifact card with mana value X or less from your graveyard to the battlefield. Activate only as a sorcery.",
-        "TgtPrompt": "Select target artifact card with mana value X or less"
-      }
+      "target_prompt": "Select target artifact card with mana value X or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

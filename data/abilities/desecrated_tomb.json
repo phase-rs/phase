@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creature cards leave your graveyard, create a 1/1 black Bat creature token with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more creature cards leave your graveyard, create a 1/1 black Bat creature token with flying.",
-        "Destination": "Any",
-        "Origin": "Graveyard",
-        "ValidCards": "Creature.YouOwn"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Sliver spells you cast have cascade.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Sliver spells you cast have cascade.",
-        "AffectedZone": "Stack",
-        "Affected": "Card.Sliver+YouCtrl+wasCast",
-        "AddKeyword": "Cascade"
-      }
+      "modifications": [
+        {
+          "keyword": "Cascade",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

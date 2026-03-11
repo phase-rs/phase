@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent draws a card except the first one they draw in each of their draw steps, put a +1/+1 counter on CARDNAME.",
       "mode": "Drawn",
-      "params": {
-        "FirstCardInDrawStep": "False",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an opponent draws a card except the first one they draw in each of their draw steps, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Card.OppOwn"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

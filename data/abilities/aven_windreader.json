@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SpellDescription": "Target player reveals the top card of their library.",
-          "NoPeek": "True",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player reveals the top card of their library.",
-        "NoPeek": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player reveals the top card of their library.",
+      "effect": {
+        "description": "Target player reveals the top card of their library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

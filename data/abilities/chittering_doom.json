@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you roll a 4 or higher on a die, create a 1/1 green Squirrel creature token.",
       "mode": "RolledDie",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidResult": "GE4",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you roll a 4 or higher on a die, create a 1/1 green Squirrel creature token."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

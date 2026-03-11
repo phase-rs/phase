@@ -2,63 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Cleric>"
+        "cost": "tapXType<2/Cleric>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "KW": "Prevent all damage that would be dealt by CARDNAME.",
-        "SpellDescription": "Prevent all damage target creature would deal this turn."
-      }
+      "description": "Prevent all damage target creature would deal this turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "TargetedSource",
-          "TgtPrompt": "Select target spell",
-          "TargetType": "Spell",
-          "TgtZone": "Stack",
-          "ValidTgts": "Card",
-          "IsCurse": "True",
-          "StaticAbilities": "STNoDmg",
-          "SubAbility": "DBCleanup",
-          "SpellDescription": "Prevent all damage target spell would deal this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Wizard>"
+        "cost": "tapXType<2/Wizard>",
+        "type": "Mana"
       },
+      "description": "Prevent all damage target spell would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "TargetedSource",
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "TgtZone": "Stack",
-        "ValidTgts": "Card",
-        "IsCurse": "True",
-        "StaticAbilities": "STNoDmg",
-        "SubAbility": "DBCleanup",
-        "SpellDescription": "Prevent all damage target spell would deal this turn."
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

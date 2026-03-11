@@ -1,26 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, create a Treasure token.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME attacks, create a Treasure token.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you sacrifice a Treasure, CARDNAME gets +1/+0 until end of turn.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerDescription": "Whenever you sacrifice a Treasure, CARDNAME gets +1/+0 until end of turn.",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Treasure.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Treasure",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

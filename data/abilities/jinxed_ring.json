@@ -2,41 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Target opponent gains control of CARDNAME. (This effect lasts indefinitely.)"
-      }
+      "description": "Target opponent gains control of CARDNAME. (This effect lasts indefinitely.)",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nontoken permanent is put into your graveyard from the battlefield, CARDNAME deals 1 damage to you.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Permanent.!token+YouOwn",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a nontoken permanent is put into your graveyard from the battlefield, CARDNAME deals 1 damage to you.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

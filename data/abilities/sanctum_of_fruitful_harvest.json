@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first main phase, add X mana of any one color, where X is the number of Shrines you control.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigMana",
-        "TriggerDescription": "At the beginning of your first main phase, add X mana of any one color, where X is the number of Shrines you control.",
-        "Phase": "Main1",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

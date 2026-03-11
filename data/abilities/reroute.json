@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Activated.singleTarget",
-          "ValidTgts": "Card",
-          "TgtPrompt": "Select target activated ability with a single target",
-          "SpellDescription": "Change the target of target activated ability with a single target. (Mana abilities can't be targeted.) Draw a card.",
-          "SubAbility": "DBDraw"
-        }
-      },
       "cost": null,
+      "description": "Change the target of target activated ability with a single target. (Mana abilities can't be targeted.) Draw a card.",
+      "effect": {
+        "description": "Change the target of target activated ability with a single target. (Mana abilities can't be targeted.) Draw a card.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Activated.singleTarget",
-        "ValidTgts": "Card",
-        "TgtPrompt": "Select target activated ability with a single target",
-        "SpellDescription": "Change the target of target activated ability with a single target. (Mana abilities can't be targeted.) Draw a card.",
-        "SubAbility": "DBDraw"
-      }
+      "target_prompt": "Select target activated ability with a single target"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

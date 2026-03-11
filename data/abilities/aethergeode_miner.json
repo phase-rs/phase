@@ -2,38 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayEnergy<2>",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME, then return it to the battlefield under its owner's control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<2>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile CARDNAME, then return it to the battlefield under its owner's control.",
-        "RememberChanged": "True",
-        "SubAbility": "DBReturn"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you get {E}{E} (two energy counters).",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, you get {E}{E} (two energy counters).",
-        "Execute": "TrigEnergy",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

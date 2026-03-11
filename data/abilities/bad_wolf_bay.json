@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, exile up to one target creature. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Command",
-        "Execute": "TrigExile",
-        "TriggerDescription": "At the beginning of combat on your turn, exile up to one target creature. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "When chaos ensues, cards can't enter from exile this turn. Then planeswalk.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "TrigEffect",
-        "TriggerDescription": "When chaos ensues, cards can't enter from exile this turn. Then planeswalk."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

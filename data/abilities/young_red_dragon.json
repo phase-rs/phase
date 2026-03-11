@@ -1,47 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBlock",
-          "params": {
-            "Description": "CARDNAME can't block.",
-            "ValidCard": "Card.Self"
-          }
+          "description": "CARDNAME can't block.",
+          "mode": "CantBlock"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a Treasure token. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "c_a_treasure_sac",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a Treasure token. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

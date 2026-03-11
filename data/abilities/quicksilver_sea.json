@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, scry 4. (Look at the top four cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "Execute": "QuicksilverScry",
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, scry 4. (Look at the top four cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, scry 4. (Look at the top four cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)",
       "mode": "Phase",
-      "params": {
-        "Execute": "QuicksilverScry",
-        "Phase": "Upkeep",
-        "TriggerZones": "Command",
-        "Secondary": "True",
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, scry 4. (Look at the top four cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, reveal the top card of your library. You may play it without paying its mana cost.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, reveal the top card of your library. You may play it without paying its mana cost.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

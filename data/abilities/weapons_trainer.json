@@ -1,18 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Equipment"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Other creatures you control get +1/+0 as long as you control an Equipment.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "Description": "Other creatures you control get +1/+0 as long as you control an Equipment.",
-        "AddPower": "1",
-        "IsPresent": "Card.Equipment+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

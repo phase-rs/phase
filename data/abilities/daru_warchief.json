@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Activator": "You",
-        "Description": "Soldier spells you cast cost {1} less to cast.",
-        "Amount": "1",
-        "ValidCard": "Soldier"
-      }
+      "description": "Soldier spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Soldier"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Soldier creatures you control get +1/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "2",
-        "Description": "Soldier creatures you control get +1/+2.",
-        "Affected": "Creature.Soldier+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

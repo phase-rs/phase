@@ -1,43 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, you draw two cards and you lose 2 life.",
           "mode": "UnlockDoor",
-          "params": {
-            "Execute": "TrigDraw",
-            "ThisDoor": "True",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When you unlock this door, you draw two cards and you lose 2 life.",
-            "ValidPlayer": "You"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a creature you control attacks alone, it gets +1/+0 and gains deathtouch until end of turn.",
           "mode": "Attacks",
-          "params": {
-            "Alone": "True",
-            "ValidCard": "Creature.YouCtrl",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever a creature you control attacks alone, it gets +1/+0 and gains deathtouch until end of turn.",
-            "Execute": "TrigPump"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

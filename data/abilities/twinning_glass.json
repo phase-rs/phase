@@ -2,46 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Valid": "Card.nonLand+sharesNameWith ThisTurnCast",
-          "ValidSA": "Spell",
-          "Controller": "You",
-          "Optional": "True",
-          "WithoutManaCost": "True",
-          "SpellDescription": "You may cast a spell from your hand without paying its mana cost if it has the same name as a spell that was cast this turn.",
-          "ValidZone": "Hand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Card.nonLand+sharesNameWith ThisTurnCast",
-        "ValidSA": "Spell",
-        "Controller": "You",
-        "Optional": "True",
-        "WithoutManaCost": "True",
-        "SpellDescription": "You may cast a spell from your hand without paying its mana cost if it has the same name as a spell that was cast this turn.",
-        "ValidZone": "Hand"
-      }
+      "description": "You may cast a spell from your hand without paying its mana cost if it has the same name as a spell that was cast this turn.",
+      "effect": {
+        "description": "You may cast a spell from your hand without paying its mana cost if it has the same name as a spell that was cast this turn.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

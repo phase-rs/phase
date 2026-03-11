@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature",
-        "AddKeyword": "Landwalk:Forest",
-        "Description": "All creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Forest",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "SpellDescription": "Target opponent reveals their hand and discards a creature card at random. Activate only during your turn.",
-          "SubAbility": "DBDiscard",
-          "PlayerTurn": "True",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B B B"
+            "cost": "B B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent reveals their hand and discards a creature card at random. Activate only during your turn.",
-        "SubAbility": "DBDiscard",
-        "PlayerTurn": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Target opponent reveals their hand and discards a creature card at random. Activate only during your turn.",
+      "effect": {
+        "description": "Target opponent reveals their hand and discards a creature card at random. Activate only during your turn.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

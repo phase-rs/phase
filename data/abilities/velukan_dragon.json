@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, roll a six-sided die. CARDNAME gets +X/+0 until end of turn, where X is the result minus 1.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRoll",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, roll a six-sided die. CARDNAME gets +X/+0 until end of turn, where X is the result minus 1."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, roll a six-sided die. CARDNAME gets +X/+0 until end of turn, where X is the result minus 1.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, roll a six-sided die. CARDNAME gets +X/+0 until end of turn, where X is the result minus 1.",
-        "Execute": "TrigRoll",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

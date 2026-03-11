@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Cleric dies, create a 2/2 black Zombie creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "ValidCard": "Cleric.Other,Card.Self",
-        "TriggerDescription": "Whenever CARDNAME or another Cleric dies, create a 2/2 black Zombie creature token.",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Cleric",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Other,Card.Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

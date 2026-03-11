@@ -1,41 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, distribute three +1/+1 counters among one, two, or three target creatures you control.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, distribute three +1/+1 counters among one, two, or three target creatures you control.",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Execute": "TrigCounter"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you gain life equal to the mana value of the exiled card used to craft it.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigGainLife",
-            "TriggerDescription": "When CARDNAME enters, you gain life equal to the mana value of the exiled card used to craft it."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

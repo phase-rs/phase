@@ -2,43 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Legendary+counters_GE1_MEMORY"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Until your next turn, target legendary creature you control becomes a copy of target creature card in exile with a memory counter on it. Activate only as a sorcery.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBClone",
-        "TgtZone": "Exile",
-        "TgtPrompt": "Select target creature card in exile with a memory counter on it",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Until your next turn, target legendary creature you control becomes a copy of target creature card in exile with a memory counter on it. Activate only as a sorcery."
-      }
+      "target_prompt": "Select target creature card in exile with a memory counter on it"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, exile up to one target legendary creature card from a graveyard with a memory counter on it.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, exile up to one target legendary creature card from a graveyard with a memory counter on it.",
-        "Execute": "TrigExile"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

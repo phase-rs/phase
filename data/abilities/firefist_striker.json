@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Battalion — Whenever CARDNAME and at least two other creatures attack, target creature can't block this turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "PresentCompare": "GE2",
-        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, target creature can't block this turn.",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Creature.attacking+Other",
-        "NoResolvingCheck": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

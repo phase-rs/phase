@@ -2,60 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color. Put a nest counter on CARDNAME.",
-          "SubAbility": "DBPutCounter"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color. Put a nest counter on CARDNAME.",
-        "SubAbility": "DBPutCounter"
-      }
+      "description": "Add one mana of any color. Put a nest counter on CARDNAME.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "g_2_2_spider_reach",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 green Spider creature token with reach for each counter on CARDNAME. Activate only as a sorcery.",
-        "TokenAmount": "X",
-        "SorcerySpeed": "True"
-      }
+      "description": "Create a 2/2 green Spider creature token with reach for each counter on CARDNAME. Activate only as a sorcery.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "g_2_2_spider_reach",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

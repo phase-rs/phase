@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to any target. If CARDNAME would deal damage to a creature, that damage can't be prevented or dealt instead to another permanent or player.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "CreatureDmg",
-        "ConditionPresent": "Creature",
-        "ConditionCompare": "EQ0",
-        "ConditionDefined": "Targeted",
-        "SpellDescription": "CARDNAME deals X damage to any target. If CARDNAME would deal damage to a creature, that damage can't be prevented or dealt instead to another permanent or player."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

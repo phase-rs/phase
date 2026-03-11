@@ -2,38 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control a creature with power 5 or greater, you may gain 2 life.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigLife",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "IsPresent": "Creature.powerGE5+YouCtrl",
-        "TriggerDescription": "At the beginning of your end step, if you control a creature with power 5 or greater, you may gain 2 life.",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

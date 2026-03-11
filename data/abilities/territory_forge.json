@@ -1,30 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, if you cast it, exile target artifact or land.",
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOf": "Card.ExiledWithSource",
-        "GainsAbilitiesOfZones": "Exile",
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield",
-        "Description": "CARDNAME has all activated abilities of the exiled card."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of the exiled card.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if you cast it, exile target artifact or land.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

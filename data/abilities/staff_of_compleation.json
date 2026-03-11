@@ -2,123 +2,116 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "cost": "PayLife<1>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Destroy target permanent you own.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.YouOwn"
-        }
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
       },
+      "kind": "Activated",
+      "sub_ability": null,
+      "target_prompt": "Select target permanent you own"
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<2>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target permanent you own.",
-        "TgtPrompt": "Select target permanent you own"
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "Add one mana of any color.",
       "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
+        "produced": [],
+        "type": "Mana"
       },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<2>"
+            "cost": "PayLife<3>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "Proliferate.",
       "effect": {
         "type": "Proliferate"
       },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<3>"
+            "cost": "PayLife<4>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Proliferate."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Tap"
-          },
-          {
-            "type": "Mana",
-            "cost": "PayLife<4>"
-          }
-        ]
+        "cost": "5",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "Untap CARDNAME.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

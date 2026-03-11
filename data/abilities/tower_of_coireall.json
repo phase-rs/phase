@@ -2,30 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature",
-          "StaticAbilities": "KWPump",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Target creature can't be blocked by Walls this turn."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "StaticAbilities": "KWPump",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Target creature can't be blocked by Walls this turn."
-      }
+      "description": "Target creature can't be blocked by Walls this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

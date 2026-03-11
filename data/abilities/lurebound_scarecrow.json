@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you control no permanents of the chosen color, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSacrifice",
-        "TriggerDescription": "When you control no permanents of the chosen color, sacrifice CARDNAME.",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Permanent.YouCtrl+ChosenColor"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

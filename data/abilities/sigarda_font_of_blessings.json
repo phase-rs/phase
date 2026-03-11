@@ -1,35 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other permanents you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Description": "Other permanents you control have hexproof.",
-        "Affected": "Permanent.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "You",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "You may look at the top card of your library any time.",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may cast Angel spells and Human spells from the top of your library.",
-        "Affected": "Angel.TopLibrary+YouCtrl+nonLand,Human.TopLibrary+YouCtrl+nonLand",
-        "MayPlay": "True",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Angel",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may cast Angel spells and Human spells from the top of your library.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

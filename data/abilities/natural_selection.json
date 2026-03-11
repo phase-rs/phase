@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RearrangeTopOfLibrary",
-        "params": {
-          "MayShuffle": "True",
-          "ValidTgts": "Player",
-          "NumCards": "3",
-          "SpellDescription": "Look at the top 3 cards of target player's library and put them back in any order. You may have that player shuffle their library."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MayShuffle": "True",
-        "ValidTgts": "Player",
-        "NumCards": "3",
-        "SpellDescription": "Look at the top 3 cards of target player's library and put them back in any order. You may have that player shuffle their library."
-      }
+      "description": "Look at the top 3 cards of target player's library and put them back in any order. You may have that player shuffle their library.",
+      "effect": {
+        "description": "Look at the top 3 cards of target player's library and put them back in any order. You may have that player shuffle their library.",
+        "name": "RearrangeTopOfLibrary",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

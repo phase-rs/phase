@@ -1,31 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice a black creature, you may pay 2 life. If you do, each other player sacrifices a creature.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigSacrifice",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you sacrifice a black creature, you may pay 2 life. If you do, each other player sacrifices a creature.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "ValidCard": "Creature.Black"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you sacrifice a green creature, you may gain 2 life.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigGainLife",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you sacrifice a green creature, you may gain 2 life.",
-        "ValidCard": "Creature.Green"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

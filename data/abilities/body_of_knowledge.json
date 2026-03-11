@@ -1,35 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, draw that many cards."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You have no maximum hand size.",
-        "SetMaxHandSize": "Unlimited"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have no maximum hand size.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME is dealt damage, draw that many cards.",
+      "mode": "DamageDoneOnce",
+      "valid_target": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

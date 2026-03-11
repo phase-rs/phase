@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, you lose 2 life for each age counter on it."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You control enchanted creature.",
-        "Affected": "Card.EnchantedBy",
-        "GainControl": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, you lose 2 life for each age counter on it.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

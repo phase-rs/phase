@@ -2,40 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U"
+            "cost": "2 U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Counter target spell or ability unless its controller pays {3}.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Hand",
-        "PrecostDesc": "Channel —",
-        "UnlessCost": "3",
-        "TgtPrompt": "Select target spell or ability",
-        "SpellDescription": "Counter target spell or ability unless its controller pays {3}.",
-        "TargetType": "Spell,Activated,Triggered"
-      }
+      "target_prompt": "Select target spell or ability"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

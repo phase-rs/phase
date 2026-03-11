@@ -1,39 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has flying.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When this Equipment enters, create a 1/1 black Ninja creature token, then attach this Equipment to it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When this Equipment enters, create a 1/1 black Ninja creature token, then attach this Equipment to it.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, you may sacrifice it. If you do, draw cards equal to its power.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may sacrifice it. If you do, draw cards equal to its power.",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True",
-        "ValidSource": "Creature.AttachedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature has flying.",
-        "AddKeyword": "Flying",
-        "Affected": "Creature.EquippedBy"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

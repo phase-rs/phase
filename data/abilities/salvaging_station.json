@@ -2,41 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature+cmcLE1+YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Return target noncreature artifact card with mana value 1 or less from your graveyard to the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature artifact card with mana value 1 or less from your graveyard",
-        "SpellDescription": "Return target noncreature artifact card with mana value 1 or less from your graveyard to the battlefield."
-      }
+      "target_prompt": "Select target noncreature artifact card with mana value 1 or less from your graveyard"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature dies, you may untap CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature dies, you may untap CARDNAME.",
-        "Execute": "TrigUntap",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "OptionalDecider": "You",
-        "Origin": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

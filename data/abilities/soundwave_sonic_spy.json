@@ -1,54 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever one or more creature tokens you control deal combat damage to a player, exile target instant or sorcery card with mana value equal to the damage dealt from their graveyard. Copy it. You may cast the copy without paying its mana cost. If you do, convert NICKNAME.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigCast",
-            "CombatDamage": "True",
-            "ValidSource": "Creature.token+YouCtrl",
-            "ValidTarget": "Player",
-            "TriggerDescription": "Whenever one or more creature tokens you control deal combat damage to a player, exile target instant or sorcery card with mana value equal to the damage dealt from their graveyard. Copy it. You may cast the copy without paying its mana cost. If you do, convert NICKNAME."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Token"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell with an odd mana value, convert NICKNAME. If you do, create Ravage, a legendary 3/3 black Robot artifact creature token with menace and deathtouch.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast a spell with an odd mana value, convert NICKNAME. If you do, create Ravage, a legendary 3/3 black Robot artifact creature token with menace and deathtouch.",
-            "ValidCard": "Card.cmcOdd",
-            "Execute": "TrigConvertRavage",
-            "TriggerZones": "Battlefield",
-            "ValidActivatingPlayer": "You"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever you cast a spell with an even mana value, convert NICKNAME. If you do, create Laserbeak, a legendary 2/2 blue Robot artifact creature token with flying and hexproof.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast a spell with an even mana value, convert NICKNAME. If you do, create Laserbeak, a legendary 2/2 blue Robot artifact creature token with flying and hexproof.",
-            "ValidCard": "Card.cmcEven",
-            "Execute": "TrigConvertLaserbeak",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

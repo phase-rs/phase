@@ -1,29 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, another target attacking creature you control gains indestructible until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, another target attacking creature you control gains indestructible until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature or planeswalker you control becomes the target of a spell or ability an opponent controls, you may draw a card.",
       "mode": "BecomesTarget",
-      "params": {
-        "TriggerDescription": "Whenever a creature or planeswalker you control becomes the target of a spell or ability an opponent controls, you may draw a card.",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature.YouCtrl+inZoneBattlefield,Planeswalker.YouCtrl+inZoneBattlefield",
-        "Execute": "TrigDraw"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

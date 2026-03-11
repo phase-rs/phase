@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to defending player, it deals damage equal to its power to each blocking creature.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to defending player, it deals damage equal to its power to each blocking creature.",
-        "Execute": "TrigDmgBlockers",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player.TriggeredDefendingPlayer"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TriggeredDefendingPlayer"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

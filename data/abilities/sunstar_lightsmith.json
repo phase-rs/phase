@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your second spell each turn, put a +1/+1 counter on this creature and draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast your second spell each turn, put a +1/+1 counter on this creature and draw a card.",
-        "ActivatorThisTurnCast": "EQ2",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "TargetMin": "0",
-          "SpellDescription": "Choose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.",
-          "AtEOT": "Exile",
-          "TargetMax": "MaxTargets",
-          "ValidTgts": "Creature.YouCtrl",
-          "AddKeywords": "Haste",
-          "TgtPrompt": "Select target creature you control"
-        }
-      },
       "cost": null,
+      "description": "Choose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.",
+      "effect": {
+        "description": "Choose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "SpellDescription": "Choose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.",
-        "AtEOT": "Exile",
-        "TargetMax": "MaxTargets",
-        "ValidTgts": "Creature.YouCtrl",
-        "AddKeywords": "Haste",
-        "TgtPrompt": "Select target creature you control"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

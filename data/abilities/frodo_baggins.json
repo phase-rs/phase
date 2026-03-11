@@ -1,29 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self,Creature.Other+Legendary+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another legendary creature you control enters, the Ring tempts you.",
-        "Execute": "TrigTempt"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "As long as NICKNAME is your Ring-bearer, it must be blocked if able.",
-        "Affected": "Card.Self+IsRingbearer",
-        "AddHiddenKeyword": "CARDNAME must be blocked if able."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsRingbearer"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as NICKNAME is your Ring-bearer, it must be blocked if able.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another legendary creature you control enters, the Ring tempts you.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          },
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self,Card.EnchantedBy",
-        "AddToughness": "X",
-        "Description": "CARDNAME and enchanted creature each get +X/+X, where X is the number of creature cards in all graveyards.",
-        "AddPower": "X"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Card.EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME and enchanted creature each get +X/+X, where X is the number of creature cards in all graveyards.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

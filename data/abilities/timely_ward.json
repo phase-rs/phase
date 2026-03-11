@@ -1,27 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "EffectZone": "All",
-        "Description": "You may cast this spell as though it had flash if it targets a commander.",
-        "ValidSA": "Spell.IsTargeting Valid Card.IsCommander",
-        "Caster": "You",
-        "ValidCard": "Card.Self"
-      }
+      "description": "You may cast this spell as though it had flash if it targets a commander.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Indestructible",
-        "Description": "Enchanted creature has indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

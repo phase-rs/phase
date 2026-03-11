@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Amount": "2",
-        "ValidCard": "Card.NamedCard",
-        "Description": "Activated abilities of sources with the chosen name cost {2} more to activate.",
-        "ValidSpell": "Activated",
-        "EffectZone": "Battlefield"
-      }
+      "description": "Activated abilities of sources with the chosen name cost {2} more to activate.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

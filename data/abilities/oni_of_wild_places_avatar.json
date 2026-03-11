@@ -1,33 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "PresentPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, return a creature you control to its owner's hand.",
-        "PresentZone": "Battlefield",
-        "IsPresent": "Creature",
-        "Execute": "TrigBounce",
-        "TriggerZones": "Command"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Creatures you control have haste.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Command",
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Haste",
-        "Description": "Creatures you control have haste.",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, return a creature you control to its owner's hand.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

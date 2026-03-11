@@ -2,47 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "SubAbility": "DBEffect",
-          "AILogic": "NeedsPrevention",
-          "ChoiceTitle": "Choose a source",
-          "RememberChosen": "True",
-          "SpellDescription": "Prevent all damage that would be dealt to you this turn by a source of your choice."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<2>"
+        "cost": "PayEnergy<2>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "SubAbility": "DBEffect",
-        "AILogic": "NeedsPrevention",
-        "ChoiceTitle": "Choose a source",
-        "RememberChosen": "True",
-        "SpellDescription": "Prevent all damage that would be dealt to you this turn by a source of your choice."
-      }
+      "description": "Prevent all damage that would be dealt to you this turn by a source of your choice.",
+      "effect": {
+        "description": "Prevent all damage that would be dealt to you this turn by a source of your choice.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get {E}{E}{E}{E} (four energy counters).",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigEnergy",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E}{E} (four energy counters).",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

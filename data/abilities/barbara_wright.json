@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "History Teacher — Sagas you control have read ahead. (As a Saga enters, choose a chapter and start with that many lore counters. Skipped chapters don't trigger.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Read ahead",
-        "Affected": "Saga.YouCtrl",
-        "Description": "History Teacher — Sagas you control have read ahead. (As a Saga enters, choose a chapter and start with that many lore counters. Skipped chapters don't trigger.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Read",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "ahead",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

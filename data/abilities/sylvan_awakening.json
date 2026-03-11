@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.",
-          "Keywords": "Reach & Indestructible & Haste",
-          "Toughness": "2",
-          "Duration": "UntilYourNextTurn",
-          "Types": "Creature,Elemental",
-          "Power": "2",
-          "ValidCards": "Land.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.",
-        "Keywords": "Reach & Indestructible & Haste",
-        "Toughness": "2",
-        "Duration": "UntilYourNextTurn",
-        "Types": "Creature,Elemental",
-        "Power": "2",
-        "ValidCards": "Land.YouCtrl"
-      }
+      "description": "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "description": "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

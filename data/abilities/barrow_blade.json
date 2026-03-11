@@ -1,40 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidBlocker": "Creature.AttachedBy",
-        "Execute": "TrigAnimateAttacker",
-        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn.",
-        "ValidCard": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimateDefender",
-        "ValidCard": "Creature.AttachedBy",
-        "Secondary": "True",
-        "ValidBlocker": "Creature",
-        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+1.",
-        "AddToughness": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

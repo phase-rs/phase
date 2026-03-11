@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you put a counter on a creature you control, draw a card. This ability triggers only once each turn.",
       "mode": "CounterAdded",
-      "params": {
-        "TriggerDescription": "Whenever you put a counter on a creature you control, draw a card. This ability triggers only once each turn.",
-        "ValidSource": "You",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ActivationLimit": "1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

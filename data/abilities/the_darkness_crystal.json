@@ -2,65 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.ExiledWithSource"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 B B"
+            "cost": "4 B B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put target creature card exiled with CARDNAME onto the battlefield tapped under your control with two additional +1/+1 counters on it.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Exile",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "ExiledWithSource"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "WithCountersAmount": "2",
-        "Tapped": "True",
-        "TgtPrompt": "Select target creature card exiled with CARDNAME",
-        "GainControl": "True",
-        "SpellDescription": "Put target creature card exiled with CARDNAME onto the battlefield tapped under your control with two additional +1/+1 counters on it.",
-        "TgtZone": "Exile",
-        "WithCountersType": "P1P1"
-      }
+      "target_prompt": "Select target creature card exiled with CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Black spells you cast cost {1} less to cast.",
-        "ValidCard": "Card.Black",
-        "Type": "Spell"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a nontoken creature an opponent controls would die, instead exile it and you gain 2 life.",
       "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.Creature+!token+OppCtrl",
-        "Description": "If a nontoken creature an opponent controls would die, instead exile it and you gain 2 life.",
-        "Origin": "Battlefield",
-        "ReplaceWith": "Exile"
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "Opponent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Black spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

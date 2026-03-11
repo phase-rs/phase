@@ -1,26 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, target opponent loses X life, where X is the number of artifacts you control.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Command",
-        "AttackingPlayer": "You",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever you attack, target opponent loses X life, where X is the number of artifacts you control."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, for each opponent, you create a 3/3 black Dalek artifact creature token with menace that attacks that opponent this turn if able. Those tokens gain haste. Sacrifice them at the beginning of the next end step.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "TrigRepeat",
-        "TriggerDescription": "Whenever chaos ensues, for each opponent, you create a 3/3 black Dalek artifact creature token with menace that attacks that opponent this turn if able. Those tokens gain haste. Sacrifice them at the beginning of the next end step."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

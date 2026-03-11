@@ -1,17 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has first strike as long as it's attacking.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+attacking",
-        "AddKeyword": "First Strike",
-        "Description": "CARDNAME has first strike as long as it's attacking."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

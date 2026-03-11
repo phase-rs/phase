@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Tap X target creatures. CARDNAME deals 2 damage to each of those creatures with flying.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target creatures",
-        "SpellDescription": "Tap X target creatures. CARDNAME deals 2 damage to each of those creatures with flying.",
-        "RememberTargets": "True",
-        "TargetMax": "X",
-        "SubAbility": "DBDamage",
-        "TargetMin": "X"
-      }
+      "target_prompt": "Select X target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

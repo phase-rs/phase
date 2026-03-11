@@ -1,33 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.wasCastByYou+Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigLearn",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, learn. (You may reveal a Lesson card you own from outside the game and put it into your hand, or discard a card to draw a card.)"
+      "description": "As long as CARDNAME is in your graveyard, if you would learn, you may instead return CARDNAME to the battlefield.",
+      "event": {
+        "Other": "Learn"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Learn"
-      },
-      "params": {
-        "ReplaceWith": "Return",
-        "Optional": "True",
-        "ActiveZones": "Graveyard",
-        "ValidPlayer": "You",
-        "PresentZone": "Graveyard",
-        "Description": "As long as CARDNAME is in your graveyard, if you would learn, you may instead return CARDNAME to the battlefield.",
-        "IsPresent": "Card.Self"
+      "description": "When CARDNAME enters, if you cast it, learn. (You may reveal a Lesson card you own from outside the game and put it into your hand, or discard a card to draw a card.)",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

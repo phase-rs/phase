@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S",
+        "type": "Mana"
+      },
+      "description": "Put an age counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "AGE",
         "count": 1,
+        "counter_type": "AGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an age counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature",
-        "PreventionEffect": "True",
-        "ValidTarget": "You,Creature.YouCtrl",
-        "ReplaceWith": "DBReplace",
-        "Description": "If a creature would deal combat damage to you and/or one or more creatures you control, prevent X of that damage, where X is the number of age counters on CARDNAME.",
-        "ActiveZones": "Battlefield",
-        "IsCombat": "True"
-      }
+      "description": "If a creature would deal combat damage to you and/or one or more creatures you control, prevent X of that damage, where X is the number of age counters on CARDNAME.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,41 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When this Aura enters, tap enchanted permanent and investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      "description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
-        "ValidCard": "Card.EnchantedBy",
-        "Secondary": "True"
-      }
+      "description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.EnchantedBy",
-        "ActiveZones": "Battlefield"
+      "description": "When this Aura enters, tap enchanted permanent and investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

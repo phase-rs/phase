@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or enchantment. If an enchantment was destroyed this way, you lose 2 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Destroy target creature or enchantment. If an enchantment was destroyed this way, you lose 2 life.",
-        "RememberDestroyed": "True",
-        "TgtPrompt": "Select target creature or enchantment"
-      }
+      "target_prompt": "Select target creature or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

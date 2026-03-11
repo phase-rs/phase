@@ -2,47 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G W",
+        "type": "Mana"
+      },
+      "description": "Create a 3/3 green Centaur creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_centaur",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 3/3 green Centaur creature token.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Populate": "True"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G W"
+        "cost": "2 G W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Populate": "True"
-      }
+      "effect": {
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "Command",
-        "Type": "Spell",
-        "ValidCard": "Card",
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Spells you cast cost {1} less to cast."
-      }
+      "description": "Spells you cast cost {1} less to cast.",
+      "effect_zone": "Command",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

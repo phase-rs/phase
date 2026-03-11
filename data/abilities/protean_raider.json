@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Raid — If you attacked this turn, you may have CARDNAME enter as a copy of any creature on the battlefield.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Layer": "Copy",
-        "CheckSVar": "RaidTest",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "DBCopy",
-        "Optional": "True",
-        "Description": "Raid — If you attacked this turn, you may have CARDNAME enter as a copy of any creature on the battlefield."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

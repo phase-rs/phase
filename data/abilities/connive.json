@@ -1,53 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GainControl",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.powerLE2"
-            }
-          },
           "cost": null,
+          "description": "Gain control of target creature with power 2 or less.",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "GainControl"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Gain control of target creature with power 2 or less.",
-            "TgtPrompt": "Select target creature with power 2 or less"
-          }
+          "target_prompt": "Select target creature with power 2 or less"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Surveil",
-            "count": 1
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBReturn",
-            "Amount": "3",
-            "SpellDescription": "Surveil 3, then return a creature card from your graveyard to the battlefield."
-          }
+          "description": "Surveil 3, then return a creature card from your graveyard to the battlefield.",
+          "effect": {
+            "count": 1,
+            "type": "Surveil"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

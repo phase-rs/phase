@@ -2,40 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "MinCharmNum": "1",
-          "AdditionalDescription": ". If an opponent has eight or more cards in their graveyard, you may choose both.",
-          "Choices": "CopySpell,CopyCreature",
-          "CharmNum": "Count$Compare Y GE8.2.1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MinCharmNum": "1",
-        "AdditionalDescription": ". If an opponent has eight or more cards in their graveyard, you may choose both.",
-        "Choices": "CopySpell,CopyCreature",
-        "CharmNum": "Count$Compare Y GE8.2.1"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "This spell can't be copied.",
+      "effect_zone": "Stack",
       "mode": {
         "Other": "CantBeCopied"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "EffectZone": "Stack",
-        "Description": "This spell can't be copied."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

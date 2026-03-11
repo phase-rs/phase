@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — CARDNAME has flying as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Description": "Metalcraft — CARDNAME has flying as long as you control three or more artifacts.",
-        "Condition": "Metalcraft",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

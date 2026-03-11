@@ -1,22 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "ReplaceGraveyard": "Exile",
-        "MayPlay": "True",
-        "AffectedZone": "Graveyard",
-        "Description": "During each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.",
-        "MayPlayLimit": "1",
-        "Affected": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "EffectZone": "Battlefield",
-        "Condition": "PlayerTurn"
-      }
+      "affected": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,70 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "You have hexproof.",
-            "Affected": "You",
-            "AddKeyword": "Hexproof"
+          "description": "If your life total would be reduced to 0 or less, instead transform CARDNAME and your life total becomes 3. Then if CARDNAME didn't transform this way, you lose the game.",
+          "event": {
+            "Other": "LifeReduced"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": {
-            "Other": "LifeReduced"
+          "affected": {
+            "card_type": "You",
+            "type": "Typed"
           },
-          "params": {
-            "ReplaceWith": "Transform",
-            "ValidPlayer": "You",
-            "ActiveZones": "Battlefield",
-            "Result": "LE0",
-            "Description": "If your life total would be reduced to 0 or less, instead transform CARDNAME and your life total becomes 3. Then if CARDNAME didn't transform this way, you lose the game."
-          }
+          "description": "You have hexproof.",
+          "mode": "Continuous",
+          "modifications": [
+            {
+              "keyword": "Hexproof",
+              "type": "AddKeyword"
+            }
+          ]
         }
-      ]
+      ],
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Attacks",
-          "params": {
-            "Execute": "TrigDoubleLife",
-            "TriggerDescription": "Whenever CARDNAME attacks, double your life total.",
-            "ValidCard": "Card.Self"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "You",
+            "type": "Typed"
+          },
+          "description": "You have hexproof.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Hexproof",
-            "Affected": "You",
-            "Description": "You have hexproof."
-          }
+          "modifications": [
+            {
+              "keyword": "Hexproof",
+              "type": "AddKeyword"
+            }
+          ]
         },
         {
-          "mode": "Continuous",
-          "params": {
-            "SetPower": "X",
-            "SetToughness": "X",
-            "CharacteristicDefining": "True",
-            "Description": "CARDNAME's power and toughness are each equal to your life total."
-          }
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to your life total.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever CARDNAME attacks, double your life total.",
+          "mode": "Attacks",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

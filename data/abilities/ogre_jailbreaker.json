@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Gate",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can attack as though it didn't have defender as long as you control a Gate.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "IsPresent": "Gate.YouCtrl",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can attack as though it didn't have defender as long as you control a Gate."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "TgtPrompt": "Select target creature with morph.",
-          "SpellDescription": "Turn target creature with a morph ability face down.",
-          "Mode": "TurnFaceDown",
-          "ValidTgts": "Creature.withMorph,Creature.withMegamorph"
-        }
-      },
       "cost": null,
+      "description": "Turn target creature with a morph ability face down.",
+      "effect": {
+        "description": "Turn target creature with a morph ability face down.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature with morph.",
-        "SpellDescription": "Turn target creature with a morph ability face down.",
-        "Mode": "TurnFaceDown",
-        "ValidTgts": "Creature.withMorph,Creature.withMegamorph"
-      }
+      "target_prompt": "Select target creature with morph."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

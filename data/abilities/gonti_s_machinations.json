@@ -2,47 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "PayEnergy<2>"
+            "cost": "PayEnergy<2>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "Defined": "Player.Opponent",
-        "SpellDescription": "Each opponent loses 3 life. You gain life equal to the life lost this way."
-      }
+      "description": "Each opponent loses 3 life. You gain life equal to the life lost this way.",
+      "effect": {
+        "amount": 3,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you lose life for the first time each turn, you get {E}. (You get an energy counter. Damage causes loss of life.)",
       "mode": "LifeLost",
-      "params": {
-        "Execute": "TrigEnergy",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "FirstTime": "True",
-        "TriggerDescription": "Whenever you lose life for the first time each turn, you get {E}. (You get an energy counter. Damage causes loss of life.)"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,41 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "You",
-        "SpellDescription": "You may put a creature card with mana value equal to the number of charge counters on CARDNAME from your hand onto the battlefield.",
-        "ChangeType": "Creature.cmcEQX+YouCtrl",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "You may put a creature card with mana value equal to the number of charge counters on CARDNAME from your hand onto the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a charge counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, you may put a charge counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

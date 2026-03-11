@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each player returns a permanent they control to its owner's hand unless they pay 2 life.",
-          "RepeatSubAbility": "DBBounce",
-          "RepeatPlayers": "Player",
-          "ActivationZone": "Command"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player returns a permanent they control to its owner's hand unless they pay 2 life.",
-        "RepeatSubAbility": "DBBounce",
-        "RepeatPlayers": "Player",
-        "ActivationZone": "Command"
-      }
+      "description": "Each player returns a permanent they control to its owner's hand unless they pay 2 life.",
+      "effect": {
+        "description": "Each player returns a permanent they control to its owner's hand unless they pay 2 life.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

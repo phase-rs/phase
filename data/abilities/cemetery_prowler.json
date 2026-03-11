@@ -1,39 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Spells you cast cost {1} less to cast for each card type they share with cards exiled with CARDNAME.",
+      "mode": "ReduceCost"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters or attacks, exile a card from a graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME enters or attacks, exile a card from a graveyard."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, exile a card from a graveyard.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile a card from a graveyard.",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Description": "Spells you cast cost {1} less to cast for each card type they share with cards exiled with CARDNAME.",
-        "ValidCard": "Card",
-        "Amount": "AffectedX",
-        "Activator": "You"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,44 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-7 {T}: Add {W}, {B}, {G}, or {C}.",
       "mode": "Continuous",
-      "params": {
-        "Description": "LEVEL 1-7 {T}: Add {W}, {B}, {G}, or {C}.",
-        "AddAbility": "ABManaAbzan",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE7_LEVEL",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "ability": "ABManaAbzan",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 8+ {T}: Add {W}, {B}, {G}, or {C}. Scry 1.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE8_LEVEL",
-        "Description": "LEVEL 8+ {T}: Add {W}, {B}, {G}, or {C}. Scry 1.",
-        "AddAbility": "ABManaScry",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "ability": "ABManaScry",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Exile target artifact or creature, then return it to the battlefield under its owner's control with a +1/+1 counter on it.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Exile {c:Targeted}, then return it to the battlefield under its owner's control with a +1/+1 counter on it.",
-        "RememberTargets": "True",
-        "SpellDescription": "Exile target artifact or creature, then return it to the battlefield under its owner's control with a +1/+1 counter on it.",
-        "TgtPrompt": "Select target artifact or creature",
-        "SubAbility": "DBReturn"
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Players skip their upkeep steps.",
       "event": {
         "Other": "BeginPhase"
-      },
-      "params": {
-        "Description": "Players skip their upkeep steps.",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "Phase": "Upkeep"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

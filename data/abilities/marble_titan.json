@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Creatures with power 3 or greater don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.powerGE3",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Description": "Creatures with power 3 or greater don't untap during their controllers' untap steps."
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

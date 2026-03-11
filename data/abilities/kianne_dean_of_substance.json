@@ -1,94 +1,76 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 1,
-            "destination": "Exile"
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeValid": "Card",
-            "ChangeNum": "All",
-            "RememberChanged": "True",
-            "SpellDescription": "Exile the top card of your library. If it's a land card, put it into your hand. Otherwise, put a study counter on it.",
-            "StackDescription": "SpellDescription",
-            "SubAbility": "DBChangeZone"
-          }
+          "description": "Exile the top card of your library. If it's a land card, put it into your hand. Otherwise, put a study counter on it.",
+          "effect": {
+            "count": 1,
+            "destination": "Exile",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "4 G",
+            "type": "Mana"
+          },
+          "description": "Create a 0/0 green and blue Fractal creature token. Put a +1/+1 counter on it for each different mana value among nonland cards you own in exile with study counters on them.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "gu_0_0_fractal",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "4 G"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 0/0 green and blue Fractal creature token. Put a +1/+1 counter on it for each different mana value among nonland cards you own in exile with study counters on them.",
-            "ImprintTokens": "True",
-            "SubAbility": "DBCounters"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 1,
-            "destination": "Exile"
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "X U U"
+                "cost": "X U U",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberChanged": "True",
-            "Defined": "You",
-            "SubAbility": "DBCounter",
-            "StackDescription": "SpellDescription",
-            "ChangeNum": "All",
-            "SpellDescription": "Exile the top X cards of your library and put a study counter on each of them. Then you may put a card you own in exile with a study counter on it into your hand."
-          }
+          "description": "Exile the top X cards of your library and put a study counter on each of them. Then you may put a card you own in exile with a study counter on it into your hand.",
+          "effect": {
+            "count": 1,
+            "destination": "Exile",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

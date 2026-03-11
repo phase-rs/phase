@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may attach any number of Auras and Equipment you control to target permanent or player.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAttach",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, you may attach any number of Auras and Equipment you control to target permanent or player.",
-        "Phase": "BeginCombat"
-      }
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

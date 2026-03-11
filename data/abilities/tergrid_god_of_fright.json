@@ -1,81 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever an opponent sacrifices a nontoken permanent, you may put that card from a graveyard onto the battlefield under your control.",
           "mode": "Sacrificed",
-          "params": {
-            "TriggerDescription": "Whenever an opponent sacrifices a nontoken permanent, you may put that card from a graveyard onto the battlefield under your control.",
-            "OptionalDecider": "You",
-            "Execute": "TrigReturn",
-            "ValidCard": "Permanent.!token+OppCtrl",
-            "TriggerZones": "Battlefield"
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Permanent",
+            "controller": "Opponent",
+            "type": "Typed"
           }
         },
         {
+          "description": "Whenever an opponent discards a permanent card, you may put that card from a graveyard onto the battlefield under your control.",
           "mode": "Discarded",
-          "params": {
-            "ValidCard": "Permanent.!token+OppCtrl",
-            "OptionalDecider": "You",
-            "TriggerDescription": "Whenever an opponent discards a permanent card, you may put that card from a graveyard onto the battlefield under your control.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigReturn"
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Permanent",
+            "controller": "Opponent",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Player"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target player loses 3 life unless they sacrifice a nonland permanent or discard a card.",
-            "StackDescription": "{p:Targeted} loses 3 life unless they sacrifice a nonland permanent or discard a card.",
-            "SubAbility": "TrigGenericChoice",
-            "IsCurse": "True"
-          }
+          "description": "Target player loses 3 life unless they sacrifice a nonland permanent or discard a card.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Player"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "3 B",
+            "type": "Mana"
+          },
+          "description": "Untap CARDNAME.",
           "effect": {
-            "type": "Untap",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Untap"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "3 B"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Untap CARDNAME."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

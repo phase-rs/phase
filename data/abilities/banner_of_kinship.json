@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.ChosenType+YouCtrl",
-        "Description": "Creatures you control of the chosen type get +1/+1 for each fellowship counter on this artifact.",
-        "AddPower": "Y",
-        "AddToughness": "Y"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "As this artifact enters, choose a creature type. This artifact enters with a fellowship counter on it for each creature you control of the chosen type.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ChooseCT",
-        "ValidCard": "Card.Self",
-        "Description": "As this artifact enters, choose a creature type. This artifact enters with a fellowship counter on it for each creature you control of the chosen type.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control of the chosen type get +1/+1 for each fellowship counter on this artifact.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

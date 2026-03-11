@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, reveal the top card of your library and put that card into your hand. You gain life equal to its mana value.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, reveal the top card of your library and put that card into your hand. You gain life equal to its mana value.",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDig",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "IsCombat": "True",
-        "ReplaceWith": "DmgTwice",
-        "Description": "If equipped creature would deal combat damage, it deals double that damage instead.",
-        "ValidSource": "Creature.EquippedBy",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If equipped creature would deal combat damage, it deals double that damage instead.",
+      "event": "DamageDone"
     },
     {
-      "event": "DamageDone",
-      "params": {
-        "IsCombat": "True",
-        "Description": "If another creature would deal combat damage to equipped creature, it deals double that damage to equipped creature instead.",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Creature.EquippedBy",
-        "ValidSource": "Creature.Other",
-        "ReplaceWith": "DmgTwice"
-      }
+      "description": "If another creature would deal combat damage to equipped creature, it deals double that damage to equipped creature instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

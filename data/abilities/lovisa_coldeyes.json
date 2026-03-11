@@ -1,19 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Warrior,Creature.Berserker,Creature.Barbarian"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature that's a Barbarian, a Warrior, or a Berserker gets +2/+2 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Creature.Warrior,Creature.Berserker,Creature.Barbarian",
-        "AddToughness": "2",
-        "AddKeyword": "Haste",
-        "Description": "Each creature that's a Barbarian, a Warrior, or a Berserker gets +2/+2 and has haste."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

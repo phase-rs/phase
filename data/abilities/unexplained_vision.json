@@ -2,22 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AIManaPref": "U",
-        "SubAbility": "DBScry",
-        "SpellDescription": "Draw three cards. Adamant — If at least three blue mana was spent to cast this spell, scry 3."
-      }
+      "description": "Draw three cards. Adamant — If at least three blue mana was spent to cast this spell, scry 3.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

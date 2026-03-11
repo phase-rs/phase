@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may create a 1/1 white Spirit creature token with flying.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your upkeep, you may create a 1/1 white Spirit creature token with flying.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

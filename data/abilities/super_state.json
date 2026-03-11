@@ -1,30 +1,82 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigDmg",
-        "ValidSource": "Creature.EnchantedBy",
-        "ValidTarget": "Opponent",
-        "TriggerDescription": "Whenever enchanted creature deals combat damage to an opponent, it deals that much damage to each other opponent."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has base power and toughness 9/9 and has flying, first strike, trample, and haste.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "9",
-        "Description": "Enchanted creature has base power and toughness 9/9 and has flying, first strike, trample, and haste.",
-        "SetPower": "9",
-        "AddKeyword": "Flying & First Strike & Trample & Haste",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 9
+        },
+        {
+          "type": "SetToughness",
+          "value": 9
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever enchanted creature deals combat damage to an opponent, it deals that much damage to each other opponent.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

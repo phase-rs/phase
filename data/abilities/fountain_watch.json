@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Enchantment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Artifacts and enchantments you control have shroud.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.YouCtrl,Enchantment.YouCtrl",
-        "Description": "Artifacts and enchantments you control have shroud.",
-        "AddKeyword": "Shroud"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

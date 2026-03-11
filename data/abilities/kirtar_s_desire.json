@@ -1,24 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't attack."
-      }
+      "description": "Enchanted creature can't attack.",
+      "mode": "CantAttack"
     },
     {
-      "mode": "CantBlock",
-      "params": {
-        "Condition": "Threshold",
-        "Description": "Threshold — Enchanted creature can't block as long as there are seven or more cards in your graveyard.",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "description": "Threshold — Enchanted creature can't block as long as there are seven or more cards in your graveyard.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

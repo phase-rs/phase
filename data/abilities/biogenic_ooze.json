@@ -2,49 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G G G",
+        "type": "Mana"
+      },
+      "description": "Create a 2/2 green Ooze creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_2_2_ooze",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 green Ooze creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 2/2 green Ooze creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a 2/2 green Ooze creature token.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, put a +1/+1 counter on each Ooze you control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on each Ooze you control.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

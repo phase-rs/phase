@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an opponent would lose life during your turn, they lose twice that much life instead. (Damage causes loss of life.)",
       "event": {
         "Other": "LifeReduced"
-      },
-      "params": {
-        "Description": "If an opponent would lose life during your turn, they lose twice that much life instead. (Damage causes loss of life.)",
-        "ReplaceWith": "LoseTwice",
-        "ActiveZones": "Battlefield",
-        "PlayerTurn": "True",
-        "ValidPlayer": "Opponent"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

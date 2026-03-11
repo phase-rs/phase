@@ -1,27 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, other attacking creatures get +1/+1 until end of turn for each attacking creature other than CARDNAME.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, other attacking creatures get +1/+1 until end of turn for each attacking creature other than CARDNAME.",
-        "Execute": "TrigPumpAttack",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks, other blocking creatures get +1/+1 until end of turn for each blocking creature other than CARDNAME.",
       "mode": "Blocks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpBlock",
-        "TriggerDescription": "Whenever CARDNAME blocks, other blocking creatures get +1/+1 until end of turn for each blocking creature other than CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

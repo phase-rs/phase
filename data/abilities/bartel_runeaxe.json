@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of Aura spells.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "Description": "CARDNAME can't be the target of Aura spells.",
-        "ValidSource": "Aura",
-        "ValidTarget": "Card.Self",
-        "ValidSA": "Spell"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,41 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Enchantment.YouCtrl",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
       "mode": "FullyUnlock",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidPlayer": "You",
-        "ValidCard": "Card.Room"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Room"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies, it deals damage equal to its power to any target.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "When CARDNAME dies, it deals damage equal to its power to any target.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

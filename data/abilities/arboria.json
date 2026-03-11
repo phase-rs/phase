@@ -1,45 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
+      "mode": "CantAttack"
+    }
+  ],
   "triggers": [
     {
       "mode": "SpellCast",
-      "params": {
-        "Execute": "RememberCaster",
-        "ValidCard": "Card",
-        "ValidActivatingPlayer": "Player.Active+!IsRemembered",
-        "Static": "True"
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "RememberController",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.ActivePlayerCtrl+!token",
-        "Origin": "Any",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ActivePlayerCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Static": "True",
-        "Execute": "ClearActivePlayer",
-        "ValidPlayer": "Player"
-      }
+      "mode": "TurnBegin"
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature",
-        "Description": "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
-        "Target": "Player.!IsRemembered"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

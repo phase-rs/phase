@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerGE4,Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact, enchantment, or creature with power 4 or greater.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact, enchantment, or creature with power 4 or greater",
-        "SpellDescription": "Destroy target artifact, enchantment, or creature with power 4 or greater."
-      }
+      "target_prompt": "Select target artifact, enchantment, or creature with power 4 or greater"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

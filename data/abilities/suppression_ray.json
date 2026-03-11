@@ -1,76 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "TapAll",
-            "params": {
-              "RememberTapped": "True",
-              "SpellDescription": "Tap all creatures target player controls.",
-              "ValidCards": "Creature",
-              "StackDescription": "REP target player_{p:Targeted}",
-              "ValidTgts": "Player",
-              "SubAbility": "DBChooseNumber"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberTapped": "True",
-            "SpellDescription": "Tap all creatures target player controls.",
-            "ValidCards": "Creature",
-            "StackDescription": "REP target player_{p:Targeted}",
-            "ValidTgts": "Player",
-            "SubAbility": "DBChooseNumber"
-          }
+          "description": "Tap all creatures target player controls.",
+          "effect": {
+            "description": "Tap all creatures target player controls.",
+            "name": "TapAll",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Combo W U",
-            "params": {
-              "SpellDescription": "Add {W} or {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {W} or {U}."
+          "description": "Add {W} or {U}.",
+          "effect": {
+            "produced": [
+              "White",
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "ReplaceWith": "ETBTapped",
-            "Destination": "Battlefield",
-            "ReplacementResult": "Updated",
-            "Description": "CARDNAME enters tapped."
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

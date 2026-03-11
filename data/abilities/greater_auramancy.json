@@ -1,25 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Enchantment",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other enchantments you control have shroud.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Description": "Other enchantments you control have shroud.",
-        "Affected": "Enchantment.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Enchanted creatures you control have shroud.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Description": "Enchanted creatures you control have shroud.",
-        "Affected": "Creature.enchanted+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

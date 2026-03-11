@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 W U",
+        "type": "Mana"
+      },
+      "description": "Exile NICKNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 W U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Exile NICKNAME. Return it to the battlefield under its owner's control at the beginning of the next end step."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "ValidCard": "Card.ChosenType",
-        "Type": "Spell",
-        "Description": "Spells you cast of the chosen type cost {1} less to cast.",
-        "Activator": "You"
-      }
+      "description": "Spells you cast of the chosen type cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

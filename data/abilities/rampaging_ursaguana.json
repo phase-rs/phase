@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +2/+2 for each time this creature attacked this game.",
-        "AddToughness": "Count$CardNumAttacksThisGame/Twice",
-        "EffectZone": "Battlefield",
-        "AddPower": "Count$CardNumAttacksThisGame/Twice",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +2/+2 for each time this creature attacked this game.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

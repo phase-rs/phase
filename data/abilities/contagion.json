@@ -2,42 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "M2M1",
-        "count": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Distribute two -2/-1 counters among one or two target creatures.",
+      "effect": {
+        "count": 2,
+        "counter_type": "M2M1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature to distribute counters to",
-        "TargetMax": "2",
-        "DividedAsYouChoose": "2",
-        "IsCurse": "True",
-        "TargetMin": "1",
-        "SpellDescription": "Distribute two -2/-1 counters among one or two target creatures."
-      }
+      "target_prompt": "Select target creature to distribute counters to"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay 1 life and exile a black card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Cost": "PayLife<1> ExileFromHand<1/Card.Black+Other/black card>",
-        "Description": "You may pay 1 life and exile a black card from your hand rather than pay this spell's mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

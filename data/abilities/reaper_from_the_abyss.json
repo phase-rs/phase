@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Morbid — At the beginning of each end step, if a creature died this turn, destroy target non-Demon creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Morbid — At the beginning of each end step, if a creature died this turn, destroy target non-Demon creature.",
-        "Execute": "TrigDestroy",
-        "CheckSVar": "Morbid"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

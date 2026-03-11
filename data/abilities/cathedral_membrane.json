@@ -1,30 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies during combat, it deals 6 damage to each creature it blocked this combat.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME dies during combat, it deals 6 damage to each creature it blocked this combat.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Execute": "TrigDmg",
-        "Phase": "BeginCombat->EndCombat"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "Blocks",
-      "params": {
-        "Execute": "TrigRem",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Static": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

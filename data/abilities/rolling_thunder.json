@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage divided as you choose among any number of targets.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "DividedAsYouChoose": "X",
-        "TargetMax": "MaxTgts",
-        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of targets.",
-        "TgtPrompt": "Select any number of targets to distribute damage to"
-      }
+      "target_prompt": "Select any number of targets to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

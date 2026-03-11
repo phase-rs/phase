@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ActivateAbility",
-        "params": {
-          "ManaAbility": "True",
-          "SubAbility": "DBDrainMana",
-          "ValidTgts": "Player",
-          "SpellDescription": "Target player activates a mana ability of each land they control. Then that player loses all unspent mana and you add the mana lost this way.",
-          "Type": "Land"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ManaAbility": "True",
-        "SubAbility": "DBDrainMana",
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player activates a mana ability of each land they control. Then that player loses all unspent mana and you add the mana lost this way.",
-        "Type": "Land"
-      }
+      "description": "Target player activates a mana ability of each land they control. Then that player loses all unspent mana and you add the mana lost this way.",
+      "effect": {
+        "description": "Target player activates a mana ability of each land they control. Then that player loses all unspent mana and you add the mana lost this way.",
+        "name": "ActivateAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

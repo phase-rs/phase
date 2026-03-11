@@ -1,45 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, exile the top card of your library. You may play that card this turn.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDig",
-            "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. You may play that card this turn."
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "MayPlay": "True",
-            "Description": "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast from exile.",
-            "AffectedZone": "Exile",
-            "MayPlayDontGrantZonePermissions": "True",
-            "Affected": "Card.YouCtrl+nonLand",
-            "MayPlayAltManaCost": "0",
-            "MayPlayLimit": "1"
-          }
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "NonType",
+                "value": "Land"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Exile",
+          "description": "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast from exile.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

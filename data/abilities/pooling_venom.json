@@ -2,36 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 B",
+        "type": "Mana"
+      },
+      "description": "Destroy enchanted land.",
       "effect": {
-        "type": "Destroy",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Enchanted",
-        "SpellDescription": "Destroy enchanted land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted land becomes tapped, its controller loses 2 life.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLose",
-        "TriggerDescription": "Whenever enchanted land becomes tapped, its controller loses 2 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,34 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this Aura enters, tap enchanted creature and remove all counters from it.",
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature loses all abilities and is a Citizen with base power and toughness 1/1 and \"{T}: Add {C}\" named Humble Merchant. (It loses all other creature types and names.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature loses all abilities and is a Citizen with base power and toughness 1/1 and \"{T}: Add {C}\" named Humble Merchant. (It loses all other creature types and names.)",
-        "Affected": "Creature.EnchantedBy",
-        "AddType": "Citizen",
-        "SetPower": "1",
-        "SetToughness": "1",
-        "AddAbility": "Mana",
-        "RemoveAllAbilities": "True",
-        "SetName": "Humble Merchant",
-        "RemoveCreatureTypes": "True"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Citizen",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Aura enters, tap enchanted creature and remove all counters from it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

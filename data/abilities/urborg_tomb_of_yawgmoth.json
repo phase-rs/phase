@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "Each land is a Swamp in addition to its other land types.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each land is a Swamp in addition to its other land types.",
-        "AddType": "Swamp",
-        "Affected": "Land"
-      }
+      "modifications": [
+        {
+          "core_type": "Swamp",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

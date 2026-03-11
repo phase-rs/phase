@@ -2,59 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "Enchanted creature gets -1/-1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": -1,
-        "toughness": -1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Enchanted creature gets -1/-1 until end of turn.",
-        "Defined": "Enchanted",
-        "IsCurse": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "Enchanted creature can't block this turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Enchanted creature can't block this turn.",
-        "KW": "HIDDEN CARDNAME can't block.",
-        "Defined": "Enchanted",
-        "IsCurse": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "Enchanted creature can't attack.",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "description": "Enchanted creature can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

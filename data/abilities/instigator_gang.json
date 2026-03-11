@@ -1,61 +1,81 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "Phase": "Upkeep",
-            "WerewolfTransformCondition": "True"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Attacking"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Attacking creatures you control get +1/+0.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "1",
-            "Description": "Attacking creatures you control get +1/+0.",
-            "Affected": "Creature.attacking+YouCtrl"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "WerewolfUntransformCondition": "True",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Phase": "Upkeep"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Attacking"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Attacking creatures you control get +3/+0.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.attacking+YouCtrl",
-            "AddPower": "3",
-            "Description": "Attacking creatures you control get +3/+0."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 3
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

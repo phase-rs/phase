@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SubAbility": "DBShuffle",
-          "PeekAmount": "5",
-          "SpellDescription": "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
-          "NoReveal": "True",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBShuffle",
-        "PeekAmount": "5",
-        "SpellDescription": "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
-        "NoReveal": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+      "effect": {
+        "description": "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,30 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, put a soul counter on this Equipment for each player who lost life this turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "Y",
-        "AddType": "Assassin",
-        "Description": "Equipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.",
-        "AddToughness": "Y"
-      }
+      "modifications": [
+        {
+          "core_type": "Assassin",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, put a soul counter on this Equipment for each player who lost life this turn.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

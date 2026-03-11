@@ -1,41 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, discover X, where X is that damage.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, discover X, where X is that damage.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "Execute": "TrigDiscover"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
-        "ValidCard": "Card.wasCastFromExile+!token",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigConjure"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
       "mode": "LandPlayed",
-      "params": {
-        "Execute": "TrigConjure",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

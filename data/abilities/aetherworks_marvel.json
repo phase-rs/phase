@@ -2,56 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "PeekAmount": "6",
-          "Defined": "You",
-          "SubAbility": "DBPlay",
-          "NoReveal": "True",
-          "RememberPeeked": "True",
-          "SpellDescription": "Look at the top six cards of your library. You may cast a spell from among them without paying its mana cost. Put the rest on the bottom of your library in a random order."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayEnergy<6>"
+            "cost": "PayEnergy<6>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PeekAmount": "6",
-        "Defined": "You",
-        "SubAbility": "DBPlay",
-        "NoReveal": "True",
-        "RememberPeeked": "True",
-        "SpellDescription": "Look at the top six cards of your library. You may cast a spell from among them without paying its mana cost. Put the rest on the bottom of your library in a random order."
-      }
+      "description": "Look at the top six cards of your library. You may cast a spell from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.",
+      "effect": {
+        "description": "Look at the top six cards of your library. You may cast a spell from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a permanent you control is put into a graveyard, you get {E} (an energy counter).",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "ValidCard": "Permanent.YouCtrl",
-        "Execute": "TrigEnergy",
-        "TriggerDescription": "Whenever a permanent you control is put into a graveyard, you get {E} (an energy counter)."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

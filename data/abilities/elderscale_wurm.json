@@ -1,35 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLife",
-        "TriggerDescription": "When CARDNAME enters, if your life total is less than 7, your life total becomes 7.",
-        "Destination": "Battlefield",
-        "SVarCompare": "LT7",
-        "Origin": "Any",
-        "CheckSVar": "YourLife"
+      "description": "As long as you have 7 or more life, damage that would reduce your life total to less than 7 reduces it to 7 instead.",
+      "event": {
+        "Other": "LifeReduced"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "LifeReduced"
-      },
-      "params": {
-        "Result": "LT7",
-        "ReplaceWith": "ReduceLoss",
-        "IsDamage": "True",
-        "Description": "As long as you have 7 or more life, damage that would reduce your life total to less than 7 reduces it to 7 instead.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You.lifeGE7"
+      "description": "When CARDNAME enters, if your life total is less than 7, your life total becomes 7.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

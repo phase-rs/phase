@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if it doesn't have first strike, put a first strike counter on it.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Card.Self+withFirst Strike",
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "Whenever CARDNAME attacks, if it doesn't have first strike, put a first strike counter on it.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, if it has first strike, it gains double strike until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Card.Self+withFirst Strike",
-        "PresentCompare": "EQ1",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, if it has first strike, it gains double strike until end of turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

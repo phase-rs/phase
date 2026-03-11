@@ -2,42 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Indestructible",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gains indestructible until end of turn."
-      }
+      "description": "CARDNAME gains indestructible until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell from your graveyard, create a 1/1 white Spirit creature token with flying.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.wasCastFromYourGraveyard",
-        "TriggerDescription": "Whenever you cast a spell from your graveyard, create a 1/1 white Spirit creature token with flying.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

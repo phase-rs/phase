@@ -1,51 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile target player's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExileGrave",
-        "TriggerDescription": "When CARDNAME enters, exile target player's graveyard.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may put a creature card exiled with CARDNAME onto the battlefield under your control.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may put a creature card exiled with CARDNAME onto the battlefield under your control.",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigPut",
-        "ValidTarget": "Player"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Exile",
-        "Static": "True",
-        "Execute": "DBForget",
-        "Destination": "Any",
-        "ValidCard": "Card.IsRemembered"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBCleanup",
-        "Destination": "Any",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

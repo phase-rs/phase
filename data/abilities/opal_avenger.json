@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you have 10 or less life, if CARDNAME is an enchantment, CARDNAME becomes a 3/5 Soldier creature.",
       "mode": "Always",
-      "params": {
-        "ResolvingCheck": "IsPresent",
-        "IsPresent": "Card.Self+Enchantment",
-        "TriggerDescription": "When you have 10 or less life, if CARDNAME is an enchantment, CARDNAME becomes a 3/5 Soldier creature.",
-        "TriggerZones": "Battlefield",
-        "LifeTotal": "You",
-        "Execute": "TrigOpalAvengerAnimate",
-        "LifeAmount": "LE10"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

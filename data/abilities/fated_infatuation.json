@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "SubAbility": "DBScry",
-          "TgtPrompt": "Select target creature you control",
-          "SpellDescription": "Create a token that's a copy of target creature you control. If it's your turn, scry 2."
-        }
-      },
       "cost": null,
+      "description": "Create a token that's a copy of target creature you control. If it's your turn, scry 2.",
+      "effect": {
+        "description": "Create a token that's a copy of target creature you control. If it's your turn, scry 2.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "SubAbility": "DBScry",
-        "TgtPrompt": "Select target creature you control",
-        "SpellDescription": "Create a token that's a copy of target creature you control. If it's your turn, scry 2."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

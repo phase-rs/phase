@@ -1,89 +1,83 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "AILogic": "AristocratCounters",
-            "SubAbility": "DBConvert",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Put a +1/+1 counter on NICKNAME and convert it. Activate only as a sorcery."
-          }
+          "description": "Put a +1/+1 counter on NICKNAME and convert it. Activate only as a sorcery.",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "type": "Any"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Exile",
-            "destination": "Hand",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Hand>"
+                "cost": "Discard<1/Hand>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put all exiled cards you own with intel counters on them into your hand.",
-            "ChangeType": "Card.YouOwn+counters_GE1_INTEL"
-          }
+          "description": "Put all exiled cards you own with intel counters on them into your hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Exile",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZoneAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever NICKNAME deals combat damage to a player, exile that many cards from the top of your library face down. Put an intel counter on each of them. Convert NICKNAME.",
           "mode": "DamageDone",
-          "params": {
-            "ValidTarget": "Player",
-            "Execute": "TrigDig",
-            "CombatDamage": "True",
-            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, exile that many cards from the top of your library face down. Put an intel counter on each of them. Convert NICKNAME.",
-            "TriggerZones": "Battlefield",
-            "ValidSource": "Card.Self"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

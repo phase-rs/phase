@@ -2,56 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to target creature or planeswalker and you gain X life. [X is the number of creatures you control.]",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "Y"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to target creature or planeswalker and you gain X life. [X is the number of creatures you control.]",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SubAbility": "DBGainLife"
-      }
+      "target_prompt": "Select target creature or planeswalker"
     },
     {
-      "kind": "Spell",
+      "cost": {
+        "cost": "X R W",
+        "type": "Mana"
+      },
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X R W"
-      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Cleave",
-        "SubAbility": "DBGainLifeC",
-        "CostDesc": "{X}{R}{W}",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "NonBasicSpell": "True",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

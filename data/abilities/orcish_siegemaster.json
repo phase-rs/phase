@@ -1,27 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the greatest power among creatures you control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Goblin",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Other,Orc.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Orcs and Goblins you control have trample.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Goblin.YouCtrl+Other,Orc.YouCtrl+Other",
-        "Description": "Other Orcs and Goblins you control have trample.",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the greatest power among creatures you control.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

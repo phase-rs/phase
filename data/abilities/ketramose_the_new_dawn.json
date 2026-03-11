@@ -1,34 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigDraw",
-        "Origin": "Battlefield,Graveyard",
-        "Destination": "Exile",
-        "ValidCards": "Card.!token",
-        "PlayerTurn": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "NICKNAME can't attack or block unless there are seven or more cards in exile.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "IsPresent": "Card",
-        "PresentCompare": "LT7",
-        "Description": "NICKNAME can't attack or block unless there are seven or more cards in exile.",
-        "PresentZone": "Exile"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.",
+      "destination": "Exile",
+      "mode": "ChangesZoneAll",
+      "origin": "Battlefield,Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

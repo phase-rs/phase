@@ -2,36 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "6 U",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "6 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "4"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsMonstrous"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is monstrous, it has hexproof. (It can't be the target of spells or abilities your opponents control.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is monstrous, it has hexproof. (It can't be the target of spells or abilities your opponents control.)",
-        "AddKeyword": "Hexproof",
-        "Affected": "Card.Self+IsMonstrous"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

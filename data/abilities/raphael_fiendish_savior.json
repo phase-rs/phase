@@ -1,30 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each end step, if a creature card was put into your graveyard from anywhere this turn, create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Demon",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Devil.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Imp.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Tiefling.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Demons, Devils, Imps, and Tieflings you control get +1/+1 and have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Lifelink",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Affected": "Demon.Other+YouCtrl,Devil.Other+YouCtrl,Imp.Other+YouCtrl,Tiefling.Other+YouCtrl",
-        "Description": "Other Demons, Devils, Imps, and Tieflings you control get +1/+1 and have lifelink."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each end step, if a creature card was put into your graveyard from anywhere this turn, create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

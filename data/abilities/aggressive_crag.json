@@ -2,36 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo R W",
-        "params": {
-          "SpellDescription": "Add {R} or {W}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R} or {W}."
-      }
+      "description": "Add {R} or {W}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, tap CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, tap CARDNAME.",
-        "ValidPlayer": "You",
-        "Execute": "TapThis",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

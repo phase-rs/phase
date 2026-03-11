@@ -2,50 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLE3"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Tap target creature with mana value 3 or less.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature with mana value 3 or less.",
-        "TgtPrompt": "Select target creature with mana value 3 or less"
-      }
+      "target_prompt": "Select target creature with mana value 3 or less"
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Creature.Other",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever another creature enters, untap this creature."
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen"
+      "description": "Whenever another creature enters, untap this creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,40 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.Other",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever another creature dies, untap this creature.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "This creature attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "This creature attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen"
+      "description": "Whenever another creature dies, untap this creature.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "faces": []
+  ]
 }

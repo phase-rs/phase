@@ -2,45 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "10",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "10"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "10"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsMonstrous"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is monstrous, it has trample and can attack as though it didn't have defender.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+IsMonstrous",
-        "AddKeyword": "Trample",
-        "Description": "As long as CARDNAME is monstrous, it has trample and can attack as though it didn't have defender."
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "ValidCard": "Card.Self+IsMonstrous",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

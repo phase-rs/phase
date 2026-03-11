@@ -1,20 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Faerie",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Faerie, CARDNAME gets +1/+1 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "IsPresent": "Faerie.YouCtrl",
-        "Description": "As long as you control a Faerie, CARDNAME gets +1/+1 and has flying.",
-        "AddPower": "1",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

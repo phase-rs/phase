@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature blocks, you gain 3 life.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever enchanted creature blocks, you gain 3 life.",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,26 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2, has flying, and can't attack you or planeswalkers you control.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +2/+2, has flying, and can't attack you or planeswalkers you control.",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "AddKeyword": "Flying",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "CantAttack",
-      "params": {
-        "Target": "You,Planeswalker.YouCtrl",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

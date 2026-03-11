@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If damage would be dealt to you, prevent that damage and mill twice that many cards.",
-        "ValidTarget": "You",
-        "ActiveZones": "Battlefield",
-        "AlwaysReplace": "True",
-        "ReplaceWith": "DoubleMill",
-        "PreventionEffect": "True"
-      }
+      "description": "If damage would be dealt to you, prevent that damage and mill twice that many cards.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

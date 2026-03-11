@@ -2,45 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SpellDescription": "Add {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}."
-      }
+      "description": "Add {U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddAbility": "UthrosMana",
-        "Affected": "Card.Self+counters_GE12_CHARGE",
-        "Description": "STATION 12+ {U}, {T}: Add {U} for each artifact you control."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This land enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "This land enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 12+ {U}, {T}: Add {U} for each artifact you control.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "UthrosMana",
+          "type": "AddAbility"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

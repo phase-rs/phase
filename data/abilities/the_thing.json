@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever CARDNAME attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",
-        "Execute": "TrigImmediateTrig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

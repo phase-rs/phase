@@ -1,23 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Noncreature spells with mana value 4 or greater can't be cast.",
-        "ValidCard": "Card.nonCreature+cmcGE4"
-      }
+      "description": "Noncreature spells with mana value 4 or greater can't be cast.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Noncreature spells with {X} in their mana costs can't be cast.",
-        "ValidCard": "Card.nonCreature+hasXCost"
-      }
+      "description": "Noncreature spells with {X} in their mana costs can't be cast.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

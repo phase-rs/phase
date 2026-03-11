@@ -2,55 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains flying until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "KW": "Flying",
-        "SpellDescription": "CARDNAME gains flying until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 2 damage to target attacking or blocking creature. Activate only if CARDNAME is attacking or blocking and only once each turn.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking,Creature.blocking"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 2 damage to target attacking or blocking creature. Activate only if CARDNAME is attacking or blocking and only once each turn.",
-        "TgtPrompt": "Select target attacking or blocking creature",
-        "ActivationLimit": "1",
-        "IsPresent": "Card.Self+attacking,Card.Self+blocking",
-        "PresentCompare": "EQ1"
-      }
+      "target_prompt": "Select target attacking or blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

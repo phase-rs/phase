@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.untapped"
-        }
-      },
       "cost": null,
+      "description": "Tap target untapped creature. That creature deals damage equal to its power to its controller.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target untapped creature. That creature deals damage equal to its power to its controller.",
-        "TgtPrompt": "Select target untapped creature",
-        "SubAbility": "DBDamage"
-      }
+      "target_prompt": "Select target untapped creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,39 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Description": "You may cast legendary spells and artifact spells as though they had flash.",
-        "Caster": "You",
-        "ValidSA": "Spell",
-        "ValidCard": "Artifact,Card.Legendary"
-      }
+      "description": "You may cast legendary spells and artifact spells as though they had flash.",
+      "mode": "CastWithFlash"
     },
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "Description": "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "ValidCause": "Permanent.Legendary,Artifact",
-        "ValidCard": "Permanent.YouCtrl",
-        "Destination": "Battlefield"
-      }
+      "description": "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     },
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "Origin": "Battlefield",
-        "Secondary": "True",
-        "Description": "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidCause": "Permanent.Legendary,Artifact"
-      }
+      "description": "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

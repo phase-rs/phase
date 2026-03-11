@@ -2,42 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Defined": "You",
-          "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn.",
-          "SubAbility": "DBAnimate",
-          "Type": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn.",
-        "SubAbility": "DBAnimate",
-        "Type": "Creature"
-      }
+      "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+      "effect": {
+        "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "Description": "Creature spells you cast that share a creature type with CARDNAME cost {1} less to cast.",
-        "ValidCard": "Creature.sharesCreatureTypeWith",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Creature spells you cast that share a creature type with CARDNAME cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

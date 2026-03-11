@@ -2,56 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 7
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B B B"
+        "cost": "B B B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw seven cards."
-      }
+      "description": "Draw seven cards.",
+      "effect": {
+        "count": 7,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Exile",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B"
+        "cost": "B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return all cards exiled with CARDNAME to their owner's hand and you lose that much life.",
-        "SubAbility": "DBLoseLife",
-        "RememberChanged": "True",
-        "ChangeType": "Card.ExiledWithSource"
-      }
+      "description": "Return all cards exiled with CARDNAME to their owner's hand and you lose that much life.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Exile",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ReplaceWith": "ExileTop",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "Description": "Binding Contract — If you would draw a card, exile the top card of your library face down instead."
-      }
+      "description": "Binding Contract — If you would draw a card, exile the top card of your library face down instead.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

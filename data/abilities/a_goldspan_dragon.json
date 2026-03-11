@@ -1,26 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, create a Treasure token.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Treasure"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Treasures you control have \"{T}, Sacrifice this artifact: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Treasures you control have \"{T}, Sacrifice this artifact: Add two mana of any one color.\"",
-        "AddAbility": "Mana",
-        "Affected": "Card.Treasure+YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, create a Treasure token.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

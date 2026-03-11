@@ -2,42 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Self",
-          "ExileOnMoved": "Battlefield",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "CARDNAME can't be blocked this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Rogue.Other>"
+        "cost": "tapXType<1/Rogue.Other>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Self",
-        "ExileOnMoved": "Battlefield",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "CARDNAME can't be blocked this turn."
-      }
+      "description": "CARDNAME can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

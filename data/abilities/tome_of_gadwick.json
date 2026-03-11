@@ -1,27 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.EquippedBy",
-        "Execute": "TrigConjure",
-        "TriggerDescription": "Whenever equipped creature attacks, conjure a random card from CARDNAME's spellbook into your hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 and has ward {1}.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+0 and has ward {1}.",
-        "AddPower": "1",
-        "AddKeyword": "Ward:1",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Ward:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature attacks, conjure a random card from CARDNAME's spellbook into your hand.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

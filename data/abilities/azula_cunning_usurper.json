@@ -1,33 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "When NICKNAME enters, target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.",
-        "Execute": "TrigChangeZone"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Affected": "Card.ExiledWithSource",
-        "AffectedZone": "Exile",
-        "EffectZone": "Battlefield",
-        "MayPlayIgnoreType": "True",
-        "Description": "During your turn, you may cast cards exiled with NICKNAME and you may cast them as though they had flash. Mana of any type can be spent to cast those spells.",
-        "MayPlay": "True",
-        "MayPlayWithFlash": "True"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "During your turn, you may cast cards exiled with NICKNAME and you may cast them as though they had flash. Mana of any type can be spent to cast those spells.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

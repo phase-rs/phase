@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "SVarCompare": "LE4",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless there are five or more cards in your graveyard.",
-        "CheckSVar": "X"
-      }
+      "condition": {
+        "compare": "LE4",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack unless there are five or more cards in your graveyard.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

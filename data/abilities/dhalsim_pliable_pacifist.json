@@ -1,38 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Teleport — CARDNAME has hexproof unless he's attacking.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a creature you control with reach attacks, untap it and it can't be blocked by creatures with greater power this combat.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever a creature you control with reach attacks, untap it and it can't be blocked by creatures with greater power this combat.",
-        "ValidCard": "Creature.YouCtrl+withReach"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Fierce Punch — Whenever one or more creatures you control deal combat damage to a player, draw a card.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Fierce Punch — Whenever one or more creatures you control deal combat damage to a player, draw a card.",
-        "ValidSource": "Creature.YouCtrl",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+!attacking",
-        "Description": "Teleport — CARDNAME has hexproof unless he's attacking.",
-        "AddKeyword": "Hexproof"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

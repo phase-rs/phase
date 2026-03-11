@@ -1,32 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Gate.YouCtrl",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever a Gate you control enters, you may put CARDNAME from your graveyard on top of your library.",
-        "Execute": "TrigChange",
-        "Origin": "Any",
-        "TriggerZones": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by creatures with power 2 or less.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Creature.powerLE2"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Gate you control enters, you may put CARDNAME from your graveyard on top of your library.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Gate",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

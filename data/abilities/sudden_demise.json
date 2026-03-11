@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SpellDescription": "Choose a color. CARDNAME deals X damage to each creature of the chosen color.",
-          "SubAbility": "DBDmg",
-          "AILogic": "MostProminentHumanCreatures"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a color. CARDNAME deals X damage to each creature of the chosen color.",
-        "SubAbility": "DBDmg",
-        "AILogic": "MostProminentHumanCreatures"
-      }
+      "description": "Choose a color. CARDNAME deals X damage to each creature of the chosen color.",
+      "effect": {
+        "description": "Choose a color. CARDNAME deals X damage to each creature of the chosen color.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, target creature's owner puts it on the top or bottom of their library.",
       "mode": "Exploited",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSubmerge",
-        "ValidSource": "Card.Self",
-        "ValidCard": "Creature",
-        "TriggerDescription": "When CARDNAME exploits a creature, target creature's owner puts it on the top or bottom of their library."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

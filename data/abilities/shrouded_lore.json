@@ -2,31 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent chooses a card in your graveyard. You may pay {B}. If you do, repeat this process except that opponent can't choose a card already chosen for CARDNAME. Then put the last chosen card into your hand.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Card.YouOwn"
         ],
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent chooses a card in your graveyard. You may pay {B}. If you do, repeat this process except that opponent can't choose a card already chosen for CARDNAME. Then put the last chosen card into your hand.",
-        "ChoiceZone": "Graveyard",
-        "AILogic": "WorstCard",
-        "RememberChosen": "True",
-        "SubAbility": "DBRepeat",
-        "Mandatory": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power is equal to the number of instant and sorcery cards in your graveyard."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of instant and sorcery cards in your graveyard.",
+      "mode": "Continuous"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Instant,Sorcery",
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Instant and sorcery spells you cast cost {1} less to cast."
-      }
+      "description": "Instant and sorcery spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

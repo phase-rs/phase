@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a card in your graveyard is put into your hand, conjure a duplicate of that card into your hand.",
+      "destination": "Hand",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigConjure",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a card in your graveyard is put into your hand, conjure a duplicate of that card into your hand.",
-        "Destination": "Hand",
-        "Origin": "Graveyard",
-        "ValidCard": "Card.YouOwn"
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

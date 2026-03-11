@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "• Cosplay — Whenever you cast a creature or planeswalker spell, CARDNAME's base power and toughness each become equal to that spell's mana value until end of turn.",
-        "Affected": "Card.Self+ChosenModeCosplay",
-        "AddTrigger": "CosplayTrigger"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeCosplay"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Cosplay — Whenever you cast a creature or planeswalker spell, CARDNAME's base power and toughness each become equal to that spell's mana value until end of turn.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+ChosenModeScience",
-        "Description": "• Science — Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to each opponent.",
-        "AddTrigger": "ScienceTrigger"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeScience"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Science — Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to each opponent.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

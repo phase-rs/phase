@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "Create a token that's a copy of target creature you control, except the token has flying and isn't legendary.",
-          "AddKeywords": "Flying",
-          "NonLegendary": "True",
-          "ValidTgts": "Creature.YouCtrl",
-          "TgtPrompt": "Select target creature you control"
-        }
-      },
       "cost": null,
+      "description": "Create a token that's a copy of target creature you control, except the token has flying and isn't legendary.",
+      "effect": {
+        "description": "Create a token that's a copy of target creature you control, except the token has flying and isn't legendary.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a token that's a copy of target creature you control, except the token has flying and isn't legendary.",
-        "AddKeywords": "Flying",
-        "NonLegendary": "True",
-        "ValidTgts": "Creature.YouCtrl",
-        "TgtPrompt": "Select target creature you control"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

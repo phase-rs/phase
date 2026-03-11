@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "AITgts": "Card.SharesColorWith Valid Creature.YouCtrl",
-        "ConditionDefined": "Targeted",
-        "ConditionPresent": "Spell.SharesColorWith Valid Creature.YouCtrl",
-        "SpellDescription": "Counter target spell if it shares a color with a creature you control."
-      }
+      "description": "Counter target spell if it shares a color with a creature you control.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

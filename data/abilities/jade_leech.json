@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "Cost": "G",
-        "Description": "Green spells you cast cost {G} more to cast.",
-        "ValidCard": "Card.Green",
-        "Activator": "You"
-      }
+      "description": "Green spells you cast cost {G} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

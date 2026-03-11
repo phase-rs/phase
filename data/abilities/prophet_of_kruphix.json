@@ -1,27 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap all creatures and lands you control during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "Description": "Untap all creatures and lands you control during each other player's untap step.",
-        "ValidCard": "Creature.YouCtrl,Land.YouCtrl"
       }
     },
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidCard": "Creature",
-        "Caster": "You",
-        "Description": "You may cast creature spells as though they had flash.",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast creature spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

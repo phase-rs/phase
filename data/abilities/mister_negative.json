@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Darkforce Inversion — When CARDNAME enters, you may exchange life totals with target opponent. If you lost life this way, draw that many cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExchangeLife",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Darkforce Inversion — When CARDNAME enters, you may exchange life totals with target opponent. If you lost life this way, draw that many cards.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

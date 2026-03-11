@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature deals damage, you gain that much life.",
       "mode": "DamageDealtOnce",
-      "params": {
-        "ValidSource": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted creature deals damage, you gain that much life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGain"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

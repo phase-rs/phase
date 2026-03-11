@@ -1,50 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, seek two instant and/or sorcery cards with mana value 3, then exile them.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, seek two instant and/or sorcery cards with mana value 3, then exile them.",
-        "Execute": "TrigSeekTwo",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, you may copy a card exiled with CARDNAME. You may cast the copy without paying its mana cost.",
       "mode": "Phase",
-      "params": {
-        "Execute": "DBCopy",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, you may copy a card exiled with CARDNAME. You may cast the copy without paying its mana cost.",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "ValidCard": "Card.IsImprinted+ExiledWithSource",
-        "Execute": "DBForget",
-        "Origin": "Exile",
-        "Destination": "Any"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

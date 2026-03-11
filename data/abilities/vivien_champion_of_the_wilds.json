@@ -2,66 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Vigilance & Reach",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "Duration": "UntilYourNextTurn",
-        "SpellDescription": "Until your next turn, up to one target creature gains vigilance and reach.",
-        "Planeswalker": "True"
-      }
+      "description": "Until your next turn, up to one target creature gains vigilance and reach.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "WithMayLook": "True",
-        "AILogic": "DigForCreature",
-        "Planeswalker": "True",
-        "ExileFaceDown": "True",
-        "SpellDescription": "Look at the top three cards of your library. Exile one face down and put the rest on the bottom of your library in any order. For as long as it remains exiled, you may look at that card and you may cast it if it's a creature spell.",
-        "Defined": "You",
-        "SubAbility": "DBEffect",
-        "RememberChanged": "True"
-      }
+      "description": "Look at the top three cards of your library. Exile one face down and put the rest on the bottom of your library in any order. For as long as it remains exiled, you may look at that card and you may cast it if it's a creature spell.",
+      "effect": {
+        "count": 3,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Spell",
-        "ValidCard": "Creature",
-        "Caster": "You",
-        "Description": "You may cast creature spells as though they had flash."
-      }
+      "description": "You may cast creature spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, Wizards you control get +1/+1 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPumpAll",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, Wizards you control get +1/+1 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

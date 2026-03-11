@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, you may discard a card. When you do, put a +1/+1 counter on target attacking creature. It gains trample until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackingPlayer": "You",
-        "TriggerDescription": "Whenever you attack, you may discard a card. When you do, put a +1/+1 counter on target attacking creature. It gains trample until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigImmediateTrig"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you discard one or more cards, exile the top card of your library. You may play that card until your next end step.",
       "mode": "DiscardedAll",
-      "params": {
-        "TriggerDescription": "Whenever you discard one or more cards, exile the top card of your library. You may play that card until your next end step.",
-        "ValidPlayer": "You",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDig"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

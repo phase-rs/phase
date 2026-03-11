@@ -2,21 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "You draw two cards, lose 2 life, and get {E}{E} (two energy counters)."
-      }
+      "description": "You draw two cards, lose 2 life, and get {E}{E} (two energy counters).",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

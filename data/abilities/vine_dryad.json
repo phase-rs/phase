@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile one green card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Description": "You may exile one green card from your hand rather than pay this spell's mana cost.",
-        "Cost": "ExileFromHand<1/Card.Green+Other>",
-        "ValidSA": "Spell.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Wolf",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Werewolf.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Wolves and Werewolves you control have haste.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Wolf.YouCtrl,Werewolf.YouCtrl",
-            "Description": "Wolves and Werewolves you control have haste.",
-            "AddKeyword": "Haste"
-          }
+          "modifications": [
+            {
+              "keyword": "Haste",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

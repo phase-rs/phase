@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "STCantGain,STCantPrevent",
-          "SubAbility": "DBDamage",
-          "AILogic": "Burn",
-          "SpellDescription": "Players can't gain life this turn. Damage can't be prevented this turn. CARDNAME deals 3 damage to target player or planeswalker."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "STCantGain,STCantPrevent",
-        "SubAbility": "DBDamage",
-        "AILogic": "Burn",
-        "SpellDescription": "Players can't gain life this turn. Damage can't be prevented this turn. CARDNAME deals 3 damage to target player or planeswalker."
-      }
+      "description": "Players can't gain life this turn. Damage can't be prevented this turn. CARDNAME deals 3 damage to target player or planeswalker.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

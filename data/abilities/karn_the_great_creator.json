@@ -2,75 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Until your next turn, up to one target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value.",
+      "duration": "UntilYourNextTurn",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "TargetMax": "1",
-        "AILogic": "PTByCMC",
-        "Duration": "UntilYourNextTurn",
-        "TgtPrompt": "Select target noncreature artifact",
-        "SpellDescription": "Until your next turn, up to one target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value."
-      }
+      "target_prompt": "Select target noncreature artifact"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Sideboard,Exile",
         "destination": "Hand",
+        "origin": "Sideboard,Exile",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
-        "Planeswalker": "True",
-        "ChangeNum": "1",
-        "AILogic": "AnyMainPhase",
-        "ChangeTypeDesc": "artifact they own",
-        "Hidden": "True",
-        "StackDescription": "{p:You} may reveal an artifact card they own from outside the game or in exile and put it into their hand.",
-        "Reveal": "True",
-        "ChangeType": "Artifact.YouOwn"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidSA": "Activated",
-        "ValidCard": "Artifact.OppCtrl",
-        "AffectedZone": "Battlefield",
-        "Description": "Activated abilities of artifacts your opponents control can't be activated."
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of artifacts your opponents control can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

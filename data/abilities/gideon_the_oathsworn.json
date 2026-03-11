@@ -2,69 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
       "effect": {
-        "type": "Animate",
         "power": 5,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 5,
+        "type": "Animate",
         "types": [
           "Creature",
           "Soldier"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "GideonPrevent",
-        "Defined": "Self",
-        "Planeswalker": "True",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Exile CARDNAME and each creature your opponents control.",
-        "ChangeType": "Card.Self,Creature.OppCtrl"
-      }
+      "description": "Exile CARDNAME and each creature your opponents control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackingPlayer": "You",
-        "ValidAttackers": "Creature.nonGideon",
-        "ValidAttackersAmount": "GE2",
-        "TriggerDescription": "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.",
-        "Execute": "TrigCounter",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

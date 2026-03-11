@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "AddKeyword": "Hexproof",
-        "Description": "You have hexproof."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Prevent": "True",
-        "ValidTarget": "Creature.YouCtrl+Other",
-        "IsCombat": "False",
-        "Description": "Prevent all noncombat damage that would be dealt to other creatures you control."
-      }
+      "description": "Prevent all noncombat damage that would be dealt to other creatures you control.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have hexproof.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

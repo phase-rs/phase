@@ -2,47 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "0",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 4/4 Spirit artifact creature that's no longer an Equipment. Activate only if you control no creatures.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Artifact",
           "Spirit"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "0"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Creature.YouCtrl",
-        "RemoveCreatureTypes": "True",
-        "Defined": "Self",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 4/4 Spirit artifact creature that's no longer an Equipment. Activate only if you control no creatures.",
-        "PresentCompare": "EQ0",
-        "RemoveTypes": "Equipment"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +4/+4.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "4",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +4/+4.",
-        "AddToughness": "4"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

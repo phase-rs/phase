@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 6,
-        "toughness": 6,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample & HIDDEN All creatures able to block CARDNAME do so.",
-        "SpellDescription": "Until end of turn, target creature gets +6/+6 and gains trample, and all creatures able to block it this turn do so."
-      }
+      "description": "Until end of turn, target creature gets +6/+6 and gains trample, and all creatures able to block it this turn do so.",
+      "effect": {
+        "power": 6,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 6,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

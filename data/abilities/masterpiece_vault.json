@@ -2,36 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5",
+        "type": "Mana"
+      },
+      "description": "Sacrifice this artifact.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice this artifact."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this artifact is put into a graveyard from the battlefield, draft a card from CARDNAME's spellbook and put it onto the battlefield. When an Equipment enters this way, attach it to up to one target creature you control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraft",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When this artifact is put into a graveyard from the battlefield, draft a card from CARDNAME's spellbook and put it onto the battlefield. When an Equipment enters this way, attach it to up to one target creature you control.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

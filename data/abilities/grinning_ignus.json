@@ -2,39 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C C R",
-        "params": {
-          "SpellDescription": "Add {C}{C}{R}. Activate only as a sorcery.",
-          "Amount": "1",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/CARDNAME>"
+            "cost": "Return<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}{C}{R}. Activate only as a sorcery.",
-        "Amount": "1",
-        "SorcerySpeed": "True"
-      }
+      "description": "Add {C}{C}{R}. Activate only as a sorcery.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,50 +1,78 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME dies, return it to the battlefield transformed under your control.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigReturn",
-            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under your control.",
-            "Origin": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Equipped creature gets +1/+1.",
-            "AddPower": "1",
-            "AddToughness": "1",
-            "Affected": "Creature.EquippedBy"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         },
         {
+          "affected": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              },
+              {
+                "type": "Other",
+                "value": "Human"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "As long as equipped creature is a Human, it has menace. (It can't be blocked except by two or more creatures.)",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Card.EquippedBy+Human",
-            "Description": "As long as equipped creature is a Human, it has menace. (It can't be blocked except by two or more creatures.)",
-            "AddKeyword": "Menace"
-          }
+          "modifications": [
+            {
+              "keyword": "Menace",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

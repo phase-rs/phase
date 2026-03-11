@@ -1,61 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Discard a card, then draw two cards.",
           "effect": {
-            "type": "Discard",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Discard a card, then draw two cards.",
-            "SubAbility": "DBDraw",
-            "Mode": "TgtChoose"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 3 damage to each creature without flying.",
           "effect": {
-            "type": "DamageAll",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
-              "type": "All",
-              "filter": ""
-            }
+              "type": "Any"
+            },
+            "type": "DamageAll"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 3 damage to each creature without flying.",
-            "ValidCards": "Creature.withoutFlying",
-            "ValidDescription": "each creature without flying"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

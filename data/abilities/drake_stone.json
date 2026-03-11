@@ -2,69 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDiscard",
-        "SpellDescription": "Draw a card, then each player discards a card."
-      }
+      "description": "Draw a card, then each player discards a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Put target permanent on the bottom of its owner's library.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Library",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put target permanent on the bottom of its owner's library.",
-        "LibraryPosition": "-1",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control up to ten target permanents.",
-        "Ultimate": "True",
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "TargetMax": "10"
-      }
+      "description": "Gain control up to ten target permanents.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE10",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +4/+4 as long as an opponent has ten or more cards in their graveyard.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE10",
-        "Description": "CARDNAME gets +4/+4 as long as an opponent has ten or more cards in their graveyard.",
-        "AddToughness": "4",
-        "CheckSVar": "X",
-        "AddPower": "4",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

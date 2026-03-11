@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+cmcLE3"
-        }
-      },
       "cost": null,
+      "description": "Return target creature card with mana value 3 or less from your graveyard to the battlefield. Put a flying counter on it. It's a Spirit in addition to its other types.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StaticEffect": "Animate",
-        "SpellDescription": "Return target creature card with mana value 3 or less from your graveyard to the battlefield. Put a flying counter on it. It's a Spirit in addition to its other types.",
-        "RememberChanged": "True",
-        "TgtPrompt": "Select target creature card with mana value 3 or less",
-        "StackDescription": "REP Return_{p:You} returns & target creature card with mana value 3 or less_{c:Targeted} & your_their & Put_{p:You} puts & on it_on {c:Targeted}",
-        "SubAbility": "DBPutCounter"
-      }
+      "target_prompt": "Select target creature card with mana value 3 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

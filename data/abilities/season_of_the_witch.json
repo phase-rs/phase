@@ -1,44 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay 2 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay 2 life.",
-        "Phase": "Upkeep",
-        "Execute": "TrigUpkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigMarkCouldAttack",
-        "Phase": "Declare Attackers",
-        "Static": "True"
-      }
+      "phase": "DeclareAttackers"
+    },
+    {
+      "description": "At the beginning of the end step, destroy all untapped creatures that didn't attack this turn, except for creatures that couldn't attack.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDestroyAll",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of the end step, destroy all untapped creatures that didn't attack this turn, except for creatures that couldn't attack."
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Static": "True",
-        "Phase": "Cleanup",
-        "Execute": "DBCleanup"
-      }
+      "phase": "Cleanup"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Liliana"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has deathtouch as long as you control a Liliana planeswalker.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has deathtouch as long as you control a Liliana planeswalker.",
-        "IsPresent": "Planeswalker.Liliana+YouCtrl",
-        "AddKeyword": "Deathtouch",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

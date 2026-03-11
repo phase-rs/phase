@@ -1,17 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control have \"Whenever one or more counters are put on this creature for the first time each turn, draw a card.\"",
-        "Affected": "Creature.YouCtrl",
-        "AddTrigger": "CountersAdded"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have \"Whenever one or more counters are put on this creature for the first time each turn, draw a card.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

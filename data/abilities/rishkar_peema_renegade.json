@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPut",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each of up to two target creatures.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each creature you control with a counter on it has \"{T}: Add {G}.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Mana",
-        "Affected": "Creature.YouCtrl+HasCounters",
-        "Description": "Each creature you control with a counter on it has \"{T}: Add {G}.\""
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, put a +1/+1 counter on each of up to two target creatures.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

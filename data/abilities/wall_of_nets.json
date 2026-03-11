@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At end of combat, exile all creatures blocked by CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "EndCombat",
-        "TriggerDescription": "At end of combat, exile all creatures blocked by CARDNAME.",
-        "ValidPlayer": "Player",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME leaves the battlefield, return all cards exiled with CARDNAME to the battlefield under their owners' control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, return all cards exiled with CARDNAME to the battlefield under their owners' control.",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

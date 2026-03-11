@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if you have the city's blessing, put a +1/+1 counter on it.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, if you have the city's blessing, put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter",
-        "Blessing": "True"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

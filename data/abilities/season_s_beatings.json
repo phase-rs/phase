@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatCards": "Creature.TargetedPlayerCtrl",
-          "DamageMap": "True",
-          "ValidTgts": "Player",
-          "RepeatSubAbility": "DBChooseVictim",
-          "SpellDescription": "Family gathering — Each creature target player controls deals damage equal to its power to another random creature that player controls."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatCards": "Creature.TargetedPlayerCtrl",
-        "DamageMap": "True",
-        "ValidTgts": "Player",
-        "RepeatSubAbility": "DBChooseVictim",
-        "SpellDescription": "Family gathering — Each creature target player controls deals damage equal to its power to another random creature that player controls."
-      }
+      "description": "Family gathering — Each creature target player controls deals damage equal to its power to another random creature that player controls.",
+      "effect": {
+        "description": "Family gathering — Each creature target player controls deals damage equal to its power to another random creature that player controls.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

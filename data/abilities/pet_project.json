@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, put target creature card from an opponent's graveyard onto the battlefield under your control.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, put target creature card from an opponent's graveyard onto the battlefield under your control."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

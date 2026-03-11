@@ -2,42 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SVarCompare": "GE6",
-          "AILogic": "BlackLotus",
-          "SpellDescription": "Add three mana of any one color. You can't activate this ability until you've begun your sixth turn of the game. (Keep track if this is in your deck!)",
-          "Amount": "3",
-          "CheckSVar": "Count$YourTurns"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SVarCompare": "GE6",
-        "AILogic": "BlackLotus",
-        "SpellDescription": "Add three mana of any one color. You can't activate this ability until you've begun your sixth turn of the game. (Keep track if this is in your deck!)",
-        "Amount": "3",
-        "CheckSVar": "Count$YourTurns"
-      }
+      "description": "Add three mana of any one color. You can't activate this ability until you've begun your sixth turn of the game. (Keep track if this is in your deck!)",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

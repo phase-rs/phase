@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, conjure a card named Soldiers of the Watch onto the battlefield.",
-        "Destination": "Battlefield",
-        "Execute": "TrigConjure",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted permanent can't attack or block and its activated abilities can't be activated.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantBeActivated"
-      },
-      "params": {
-        "ValidCard": "Card.EnchantedBy",
-        "Description": "Enchanted permanent can't attack or block and its activated abilities can't be activated."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, conjure a card named Soldiers of the Watch onto the battlefield.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

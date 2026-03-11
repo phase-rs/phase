@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a Merfolk you control deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever a Merfolk you control deals combat damage to a player, draw a card.",
-        "ValidSource": "Permanent.Merfolk+YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Merfolk"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

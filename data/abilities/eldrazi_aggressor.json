@@ -1,18 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Colorless"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has haste as long as you control another colorless creature.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has haste as long as you control another colorless creature.",
-        "IsPresent": "Creature.YouCtrl+Colorless+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

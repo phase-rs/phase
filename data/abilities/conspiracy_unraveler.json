@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayAltManaCost": "CollectEvidence<10>",
-        "AffectedZone": "Hand,Graveyard,Exile,Library,Command",
-        "MayPlay": "True",
-        "Affected": "Card.YouCtrl+nonLand",
-        "MayPlayDontGrantZonePermissions": "True",
-        "Description": "You may collect evidence 10 rather than pay the mana cost for spells that you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "description": "You may collect evidence 10 rather than pay the mana cost for spells that you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

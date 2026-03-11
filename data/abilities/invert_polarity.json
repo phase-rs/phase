@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "LoseSubAbility": "CounterIt",
-          "ValidTgts": "Card",
-          "WinSubAbility": "GainControl",
-          "TgtZone": "Stack",
-          "SpellDescription": "Choose target spell, then flip a coin. If you win the flip, gain control of that spell and you may choose new targets for it. If you lose the flip, counter that spell.",
-          "TargetType": "Spell",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "LoseSubAbility": "CounterIt",
-        "ValidTgts": "Card",
-        "WinSubAbility": "GainControl",
-        "TgtZone": "Stack",
-        "SpellDescription": "Choose target spell, then flip a coin. If you win the flip, gain control of that spell and you may choose new targets for it. If you lose the flip, counter that spell.",
-        "TargetType": "Spell",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Choose target spell, then flip a coin. If you win the flip, gain control of that spell and you may choose new targets for it. If you lose the flip, counter that spell.",
+      "effect": {
+        "description": "Choose target spell, then flip a coin. If you win the flip, gain control of that spell and you may choose new targets for it. If you lose the flip, counter that spell.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

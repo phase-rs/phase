@@ -1,19 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When enchanted creature dies, return CARDNAME to its owner's hand and you create a 1/3 black Demon creature token named Plaguebearer of Nurgle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Card.EnchantedBy",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When enchanted creature dies, return CARDNAME to its owner's hand and you create a 1/3 black Demon creature token named Plaguebearer of Nurgle.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

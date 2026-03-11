@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Raid — When CARDNAME enters, if you attacked this turn, return target creature card with mana value 2 or less from your graveyard to the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "CheckSVar": "RaidTest",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Raid — When CARDNAME enters, if you attacked this turn, return target creature card with mana value 2 or less from your graveyard to the battlefield.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigChange"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

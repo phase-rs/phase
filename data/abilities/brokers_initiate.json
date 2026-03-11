@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 GU",
+        "type": "Mana"
+      },
+      "description": "CARDNAME has base power and toughness 5/5 until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 5,
-        "toughness": 5,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 5,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 GU"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME has base power and toughness 5/5 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

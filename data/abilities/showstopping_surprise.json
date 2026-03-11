@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "StackDescription": "None",
-          "Mode": "TurnFaceUp",
-          "SubAbility": "IgnitionDamage",
-          "ValidTgts": "Creature.YouCtrl",
-          "AILogic": "PowerDmg",
-          "SpellDescription": "Choose target creature you control. Turn it face up if it's face down. Then it deals damage equal to its power to each other creature."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "Mode": "TurnFaceUp",
-        "SubAbility": "IgnitionDamage",
-        "ValidTgts": "Creature.YouCtrl",
-        "AILogic": "PowerDmg",
-        "SpellDescription": "Choose target creature you control. Turn it face up if it's face down. Then it deals damage equal to its power to each other creature."
-      }
+      "description": "Choose target creature you control. Turn it face up if it's face down. Then it deals damage equal to its power to each other creature.",
+      "effect": {
+        "description": "Choose target creature you control. Turn it face up if it's face down. Then it deals damage equal to its power to each other creature.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

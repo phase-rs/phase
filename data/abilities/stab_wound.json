@@ -1,29 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player loses 2 life.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player.EnchantedController"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets -2/-2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "-2",
-        "Description": "Enchanted creature gets -2/-2.",
-        "AddToughness": "-2",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -2
+        },
+        {
+          "type": "AddToughness",
+          "value": -2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of the upkeep of enchanted creature's controller, that player loses 2 life.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

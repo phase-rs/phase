@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's draw step, if CARDNAME is untapped, that player draws an additional card.",
       "mode": "Phase",
-      "params": {
-        "PresentDefined": "Self",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "Player",
-        "IsPresent": "Card.untapped",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's draw step, if CARDNAME is untapped, that player draws an additional card.",
-        "Phase": "Draw"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

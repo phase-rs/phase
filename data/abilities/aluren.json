@@ -1,22 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.cmcLE3",
-        "MayPlay": "True",
-        "MayPlayWithoutManaCost": "True",
-        "MayPlayDontGrantZonePermissions": "True",
-        "AffectedZone": "Hand,Graveyard,Library,Exile,Command",
-        "Description": "Any player may cast creature spells with mana value 3 or less without paying their mana costs and as though they had flash.",
-        "MayPlayWithFlash": "True",
-        "MayPlayPlayer": "Player"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Library,Exile,Command",
+      "description": "Any player may cast creature spells with mana value 3 or less without paying their mana costs and as though they had flash.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

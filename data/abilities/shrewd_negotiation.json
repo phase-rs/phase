@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Exchange control of target artifact you control and target artifact or creature you don't control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBExchange",
-        "SpellDescription": "Exchange control of target artifact you control and target artifact or creature you don't control.",
-        "TgtPrompt": "Choose target artifact you control"
-      }
+      "target_prompt": "Choose target artifact you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,22 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBRepeat",
-        "RememberDrawn": "AllReplaced",
-        "SpellDescription": "Draw X cards. For each card drawn this way, discard a card unless you sacrifice a permanent."
-      }
+      "description": "Draw X cards. For each card drawn this way, discard a card unless you sacrifice a permanent.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

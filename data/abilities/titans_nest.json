@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
-          "RestrictValid": "Spell.nonColorless+!hasXCost"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "ExileFromGrave<1/Card>"
+        "cost": "ExileFromGrave<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
-        "RestrictValid": "Spell.nonColorless+!hasXCost"
-      }
+      "description": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigSurveil",
-        "TriggerDescription": "At the beginning of your upkeep, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

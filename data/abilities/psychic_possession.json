@@ -1,32 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Drawn",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever enchanted opponent draws a card, you may draw a card.",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.OwnedBy Player.EnchantedBy",
-        "TriggerZones": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "Phase": "Draw",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "Description": "Skip your draw step.",
-        "ValidPlayer": "You"
+      "description": "Whenever enchanted opponent draws a card, you may draw a card.",
+      "mode": "Drawn",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OwnedBy Player.EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

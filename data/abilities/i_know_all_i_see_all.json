@@ -1,31 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each end step, if three or more cards were put into your graveyard this turn from anywhere, abandon this scheme.",
-        "SVarCompare": "GE3",
-        "Execute": "Abandon",
-        "TriggerZones": "Command",
-        "Phase": "End of Turn",
-        "CheckSVar": "X"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap all permanents you control during each other player's untap step.",
+      "effect_zone": "Command",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "EffectZone": "Command",
-        "Description": "Untap all permanents you control during each other player's untap step.",
-        "ValidCard": "Permanent.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each end step, if three or more cards were put into your graveyard this turn from anywhere, abandon this scheme.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

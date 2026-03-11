@@ -1,17 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures attacking your opponents have double strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Description": "Creatures attacking your opponents have double strike.",
-        "Affected": "Creature.attacking Opponent"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

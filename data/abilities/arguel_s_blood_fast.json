@@ -1,105 +1,92 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 B"
+                "cost": "1 B",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "PayLife<2>"
+                "cost": "PayLife<2>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw a card."
-          }
+          "description": "Draw a card.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, if you have 5 or less life, you may transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "LifeAmount": "LE5",
-            "OptionalDecider": "You",
-            "LifeTotal": "You",
-            "TriggerDescription": "At the beginning of your upkeep, if you have 5 or less life, you may transform CARDNAME.",
-            "ValidPlayer": "You",
-            "Execute": "DBTransform",
-            "Phase": "Upkeep"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "B",
-            "params": {
-              "SpellDescription": "Add {B}.",
-              "Amount": "1"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {B}.",
-            "Amount": "1"
-          }
+          "description": "Add {B}.",
+          "effect": {
+            "produced": [
+              "Black"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GainLife",
-            "amount": 0
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "You gain life equal to the sacrificed creature's toughness."
-          }
+          "description": "You gain life equal to the sacrificed creature's toughness.",
+          "effect": {
+            "amount": 0,
+            "type": "GainLife"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

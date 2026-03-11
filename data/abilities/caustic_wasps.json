@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may destroy target artifact that player controls.",
       "mode": "DamageDone",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may destroy target artifact that player controls.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDestroy",
-        "CombatDamage": "True"
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

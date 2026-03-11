@@ -1,23 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may pay {B}{B}{B}. If you do, return CARDNAME to your hand.",
       "mode": "Phase",
-      "params": {
-        "PresentZone": "Graveyard",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigReturn",
-        "TriggerZones": "Graveyard",
-        "IsPresent": "Card.StrictlySelf",
-        "PresentPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may pay {B}{B}{B}. If you do, return CARDNAME to your hand."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell unless its controller pays {2}. If a Dragon was beheld, counter that spell unless its controller pays {4} instead.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "X",
-        "SpellDescription": "Counter target spell unless its controller pays {2}. If a Dragon was beheld, counter that spell unless its controller pays {4} instead.",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target spell"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may behold a Dragon. (You may choose a Dragon you control or reveal a Dragon card from your hand.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Cost": "Behold<1/Dragon>",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "As an additional cost to cast this spell, you may behold a Dragon. (You may choose a Dragon you control or reveal a Dragon card from your hand.)"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

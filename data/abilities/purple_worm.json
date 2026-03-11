@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "Description": "CARDNAME costs {2} less to cast if a creature died this turn.",
-        "CheckSVar": "X",
-        "Amount": "2"
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME costs {2} less to cast if a creature died this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

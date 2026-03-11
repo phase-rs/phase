@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "If target player has exactly 10 life, CARDNAME deals 10 damage to that player.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 10
         },
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionCheckSVar": "X",
-        "SpellDescription": "If target player has exactly 10 life, CARDNAME deals 10 damage to that player.",
-        "AILogic": "OppAtTenLife",
-        "ConditionSVarCompare": "EQ10"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

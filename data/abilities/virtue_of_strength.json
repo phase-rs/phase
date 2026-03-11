@@ -1,53 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [],
       "replacements": [
         {
+          "description": "If you tap a basic land for mana, it produces three times as much of that mana instead.",
           "event": {
             "Other": "ProduceMana"
           },
-          "params": {
-            "ActiveZones": "Battlefield",
-            "Description": "If you tap a basic land for mana, it produces three times as much of that mana instead.",
-            "ValidCard": "Land.Basic",
-            "ValidActivator": "You",
-            "ReplaceWith": "ProduceThrice"
+          "valid_card": {
+            "card_type": "Land",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Basic"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ]
+      ],
+      "statics": [],
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl,Land.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Return target creature or land card from your graveyard to your hand. (Then exile this card. You may cast the enchantment later from exile.)",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Land.YouCtrl"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target creature or land card in your graveyard",
-            "SpellDescription": "Return target creature or land card from your graveyard to your hand. (Then exile this card. You may cast the enchantment later from exile.)"
-          }
+          "target_prompt": "Select target creature or land card in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

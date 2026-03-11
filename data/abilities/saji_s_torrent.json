@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseNumber",
-        "params": {
-          "Min": "0",
-          "Random": "True",
-          "SubAbility": "DBChoose",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Tap X creatures, where X is a number from 0 to 5 chosen at random.",
-          "Max": "5",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Min": "0",
-        "Random": "True",
-        "SubAbility": "DBChoose",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Tap X creatures, where X is a number from 0 to 5 chosen at random.",
-        "Max": "5",
-        "Defined": "You"
-      }
+      "description": "Tap X creatures, where X is a number from 0 to 5 chosen at random.",
+      "effect": {
+        "description": "Tap X creatures, where X is a number from 0 to 5 chosen at random.",
+        "name": "ChooseNumber",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

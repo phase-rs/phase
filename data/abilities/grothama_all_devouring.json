@@ -1,29 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRepeat",
-        "TriggerDescription": "When NICKNAME leaves the battlefield, each player draws cards equal to the amount of damage dealt to NICKNAME this turn by sources they controlled.",
-        "Destination": "Any",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "HasAttackEffect",
-        "Affected": "Creature.Other",
-        "AddTrigger": "GrothamaAttack",
-        "Description": "Other creatures have \"Whenever this creature attacks, you may have it fight CARDNAME.\""
-      }
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures have \"Whenever this creature attacks, you may have it fight CARDNAME.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME leaves the battlefield, each player draws cards equal to the amount of damage dealt to NICKNAME this turn by sources they controlled.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

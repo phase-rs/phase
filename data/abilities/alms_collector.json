@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an opponent would draw two or more cards, instead you and that player each draw a card.",
       "event": {
         "Other": "DrawCards"
-      },
-      "params": {
-        "Number": "GE2",
-        "ValidPlayer": "Player.Opponent",
-        "ReplaceWith": "DrawEach",
-        "Description": "If an opponent would draw two or more cards, instead you and that player each draw a card.",
-        "ActiveZones": "Battlefield"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

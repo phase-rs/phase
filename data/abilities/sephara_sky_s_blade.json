@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {W} and tap four untapped creatures you control with flying rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Description": "You may pay {W} and tap four untapped creatures you control with flying rather than pay this spell's mana cost.",
-        "EffectZone": "All",
-        "Cost": "W tapXType<4/Creature.withFlying>"
       }
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control with flying have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.withFlying+Other+YouCtrl",
-        "AddKeyword": "Indestructible",
-        "Description": "Other creatures you control with flying have indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "AffectedX",
-        "Description": "Each non-Human creature you control gets +1/+1 for each of its creature types, to a maximum of 10.",
-        "AddPower": "AffectedX",
-        "Affected": "Creature.nonHuman+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each non-Human creature you control gets +1/+1 for each of its creature types, to a maximum of 10.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature loses first strike until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature loses first strike until end of turn.",
-        "ValidCard": "Creature",
-        "ValidBlocker": "Card.Self",
-        "Execute": "TrigBlocks"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature loses first strike until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidBlocker": "Creature",
-        "Secondary": "True",
-        "Execute": "TrigBlocked",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature loses first strike until end of turn."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,92 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDiscard",
-        "Planeswalker": "True",
-        "AILogic": "Main2",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Draw a card. Then discard a card unless you attacked this turn."
-      }
+      "description": "Draw a card. Then discard a card unless you attacked this turn.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 blue Ninja creature token with \"This creature can't be blocked.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_1_1_ninja_unblockable",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 1/1 blue Ninja creature token with \"This creature can't be blocked.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "Name": "Emblem — Kaito Shizuki",
-          "AILogic": "Always",
-          "Image": "emblem_kaito_shizuki",
-          "Stackable": "False",
-          "Triggers": "TrigDamage",
-          "Duration": "Permanent",
-          "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Name": "Emblem — Kaito Shizuki",
-        "AILogic": "Always",
-        "Image": "emblem_kaito_shizuki",
-        "Stackable": "False",
-        "Triggers": "TrigDamage",
-        "Duration": "Permanent",
-        "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
-      }
+      "description": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if CARDNAME entered this turn, he phases out.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "TrigPhase",
-        "IsPresent": "Card.Self+ThisTurnEntered",
-        "TriggerDescription": "At the beginning of your end step, if CARDNAME entered this turn, he phases out."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

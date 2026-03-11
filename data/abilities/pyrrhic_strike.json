@@ -2,40 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "AdditionalDescription": ". If this spell's additional cost was paid, choose both instead.",
-          "CharmNum": "X",
-          "Choices": "DBDestroy1,DBDestroy2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AdditionalDescription": ". If this spell's additional cost was paid, choose both instead.",
-        "CharmNum": "X",
-        "Choices": "DBDestroy1,DBDestroy2"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may blight 2. (You may put two -1/-1 counters on a creature you control.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "Cost": "Blight<2>",
-        "Description": "As an additional cost to cast this spell, you may blight 2. (You may put two -1/-1 counters on a creature you control.)",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

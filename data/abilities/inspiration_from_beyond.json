@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Mill three cards, then return an instant or sorcery card from your graveyard to your hand.",
       "effect": {
-        "type": "Mill",
         "count": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "Defined": "You",
-        "SpellDescription": "Mill three cards, then return an instant or sorcery card from your graveyard to your hand."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

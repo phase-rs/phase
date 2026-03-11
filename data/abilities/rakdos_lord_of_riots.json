@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "SVarCompare": "EQ0",
-        "Description": "You can't cast this spell unless an opponent lost life this turn.",
-        "CheckSVar": "X",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "You can't cast this spell unless an opponent lost life this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Creature",
-        "Type": "Spell",
-        "Description": "Creature spells you cast cost {1} less to cast for each 1 life your opponents have lost this turn.",
-        "Activator": "You",
-        "Amount": "X"
-      }
+      "description": "Creature spells you cast cost {1} less to cast for each 1 life your opponents have lost this turn.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

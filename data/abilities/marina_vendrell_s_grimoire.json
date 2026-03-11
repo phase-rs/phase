@@ -1,60 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigDraw1",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, draw five cards.",
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "LifeGained",
-      "params": {
-        "TriggerDescription": "Whenever you gain life, draw that many cards.",
-        "Execute": "TrigDraw2",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
-    },
-    {
-      "mode": "LifeLost",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDiscard",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you lose life, discard that many cards. Then if you have no cards in hand, you lose the game."
+      "description": "You have no maximum hand size and don't lose the game for having 0 or less life.",
+      "event": {
+        "Other": "GameLoss"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You have no maximum hand size and don't lose the game for having 0 or less life.",
-        "SetMaxHandSize": "Unlimited",
-        "Affected": "You"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "GameLoss"
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "Secondary": "True",
-        "Description": "You have no maximum hand size and don't lose the game for having 0 or less life.",
-        "ValidPlayer": "You",
-        "ValidLoseReason": "LifeReachedZero"
-      }
+      "description": "You have no maximum hand size and don't lose the game for having 0 or less life.",
+      "mode": "Continuous"
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if you cast it, draw five cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever you gain life, draw that many cards.",
+      "mode": "LifeGained",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever you lose life, discard that many cards. Then if you have no cards in hand, you lose the game.",
+      "mode": "LifeLost",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

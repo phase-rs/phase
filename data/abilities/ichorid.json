@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME.",
-        "Execute": "TrigSac"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may exile a black creature card other than CARDNAME from your graveyard. If you do, return CARDNAME to the battlefield.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may exile a black creature card other than CARDNAME from your graveyard. If you do, return CARDNAME to the battlefield.",
-        "OptionalDecider": "You",
-        "Execute": "TrigReturn",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

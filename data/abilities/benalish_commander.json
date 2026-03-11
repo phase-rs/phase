@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CounterRemoved",
-      "params": {
-        "TriggerZones": "Exile",
-        "CounterType": "TIME",
-        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 1/1 white Soldier creature token.",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "Y",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of Soldiers you control.",
-        "SetToughness": "Y"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of Soldiers you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 1/1 white Soldier creature token.",
+      "mode": "CounterRemoved",
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

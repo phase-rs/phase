@@ -2,30 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "IsCurse": "True",
-          "SpellDescription": "Until end of turn, if target player would draw a card, instead that player skips that draw and you draw a card.",
-          "ReplacementEffects": "EventDraw",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SpellDescription": "Until end of turn, if target player would draw a card, instead that player skips that draw and you draw a card.",
-        "ReplacementEffects": "EventDraw",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Player"
-      }
+      "description": "Until end of turn, if target player would draw a card, instead that player skips that draw and you draw a card.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

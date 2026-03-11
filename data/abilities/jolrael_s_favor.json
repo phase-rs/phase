@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "Defined": "Enchanted",
-          "SpellDescription": "Regenerate enchanted creature."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Enchanted",
-        "SpellDescription": "Regenerate enchanted creature."
-      }
+      "description": "Regenerate enchanted creature.",
+      "effect": {
+        "description": "Regenerate enchanted creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

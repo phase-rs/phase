@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped while it has a -1/-1 counter on it, remove a -1/-1 counter from it.",
       "mode": "Taps",
-      "params": {
-        "NoResolvingCheck": "True",
-        "TriggerDescription": "Whenever this creature becomes tapped while it has a -1/-1 counter on it, remove a -1/-1 counter from it.",
-        "IsPresent": "Card.Self+counters_GE1_M1M1",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRemoveCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

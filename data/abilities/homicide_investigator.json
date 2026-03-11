@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more nontoken creatures you control die, investigate. This ability triggers only once each turn. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCards": "Creature.!token+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever one or more nontoken creatures you control die, investigate. This ability triggers only once each turn. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
-        "Execute": "TrigInvestigate",
-        "ActivationLimit": "1"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

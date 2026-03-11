@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Instant and sorcery spells cost {2} less to cast.",
-        "Amount": "2",
-        "ValidCard": "Instant,Sorcery",
-        "Type": "Spell"
-      }
+      "description": "Instant and sorcery spells cost {2} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

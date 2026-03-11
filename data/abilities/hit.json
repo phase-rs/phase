@@ -1,58 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player sacrifices an artifact or creature. CARDNAME deals damage to that player equal to that permanent's mana value.",
           "effect": {
-            "type": "Sacrifice",
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberSacrificed": "True",
-            "SacValid": "Creature,Artifact",
-            "SubAbility": "DBDmg",
-            "SpellDescription": "Target player sacrifices an artifact or creature. CARDNAME deals damage to that player equal to that permanent's mana value."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PumpAll",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Attacking creatures you control get +1/+0 until end of turn for each other attacking creature.",
-            "ValidCards": "Creature.attacking+YouCtrl"
-          }
+          "description": "Attacking creatures you control get +1/+0 until end of turn for each other attacking creature.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "PumpAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, creatures target player controls can't block this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, creatures target player controls can't block this turn.",
-        "Destination": "Battlefield",
-        "Execute": "TrigEffect",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, exile the top card of your library face down. You may look at and play that card this turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library face down. You may look at and play that card this turn.",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

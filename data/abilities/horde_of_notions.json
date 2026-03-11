@@ -2,38 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Optional": "True",
-          "AILogic": "ReplaySpell",
-          "SpellDescription": "You may play target Elemental card from your graveyard without paying its mana cost.",
-          "TgtZone": "Graveyard",
-          "WithoutManaCost": "True",
-          "TgtPrompt": "Choose target Elemental card from your graveyard",
-          "ValidTgts": "Elemental.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
+        "cost": "W U B R G",
+        "type": "Mana"
       },
+      "description": "You may play target Elemental card from your graveyard without paying its mana cost.",
+      "effect": {
+        "description": "You may play target Elemental card from your graveyard without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "AILogic": "ReplaySpell",
-        "SpellDescription": "You may play target Elemental card from your graveyard without paying its mana cost.",
-        "TgtZone": "Graveyard",
-        "WithoutManaCost": "True",
-        "TgtPrompt": "Choose target Elemental card from your graveyard",
-        "ValidTgts": "Elemental.YouCtrl"
-      }
+      "target_prompt": "Choose target Elemental card from your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

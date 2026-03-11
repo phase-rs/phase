@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked, it gets -3/-0 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, it gets -3/-0 until end of turn.",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked, it gets -3/-0 until end of turn.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigPump",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, it gets -3/-0 until end of turn.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

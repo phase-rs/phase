@@ -1,31 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSearch",
-        "TriggerDescription": "When CARDNAME enters, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack or block unless you control seven or more lands.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "PresentCompare": "LT7",
-        "IsPresent": "Land.YouCtrl",
-        "Description": "CARDNAME can't attack or block unless you control seven or more lands."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, target creature an opponent controls gets -2/-2 until end of turn.",
       "mode": "Mutates",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever this creature mutates, target creature an opponent controls gets -2/-2 until end of turn.",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

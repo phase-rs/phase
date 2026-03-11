@@ -2,48 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 W",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "3"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters or becomes monstrous, exile up to two target artifacts and/or enchantments controlled by different players.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When this creature enters or becomes monstrous, exile up to two target artifacts and/or enchantments controlled by different players.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When this creature enters or becomes monstrous, exile up to two target artifacts and/or enchantments controlled by different players.",
       "mode": "BecomeMonstrous",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When this creature enters or becomes monstrous, exile up to two target artifacts and/or enchantments controlled by different players.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Secondary": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

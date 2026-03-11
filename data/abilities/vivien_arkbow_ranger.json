@@ -2,84 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Distribute two +1/+1 counters among up to two target creatures. They gain trample until end of turn.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Distribute two +1/+1 counters among up to two target creatures. They gain trample until end of turn.",
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "DividedAsYouChoose": "2",
-        "SubAbility": "DBPumpAll",
-        "TargetMax": "2"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Target creature you control deals damage equal to its power to target creature or planeswalker.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "TgtPrompt": "Select target creature you control",
-        "AILogic": "Fight",
-        "SubAbility": "SoulsDamage",
-        "Planeswalker": "True",
-        "SpellDescription": "Target creature you control deals damage equal to its power to target creature or planeswalker."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -5,
+        "type": "Loyalty"
+      },
+      "description": "You may reveal a creature card you own from outside the game and put it into your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Sideboard",
         "destination": "Hand",
+        "origin": "Sideboard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -5
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeTypeDesc": "creature card they own",
-        "Reveal": "True",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "You may reveal a creature card you own from outside the game and put it into your hand.",
-        "Hidden": "True",
-        "ChangeNum": "1",
-        "ChangeType": "Creature.YouOwn"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

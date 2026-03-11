@@ -1,52 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters).",
-        "Execute": "TrigEnergy",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, you may pay {E}. If you do, untap equipped creature, then put your choice of a menace, trample, or lifelink counter on it.",
-        "Phase": "Upkeep",
-        "Execute": "TrigUntap",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "description": "Equipped creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "AddPower": "3",
-        "Description": "Equipped creature gets +3/+3 and doesn't untap during its controller's untap step.",
-        "Affected": "Creature.EquippedBy"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.EquippedBy",
-        "ValidStepTurnToController": "You",
-        "Secondary": "True",
-        "Description": "Equipped creature doesn't untap during its controller's untap step."
-      }
+      "description": "Equipped creature gets +3/+3 and doesn't untap during its controller's untap step.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "At the beginning of your upkeep, you may pay {E}. If you do, untap equipped creature, then put your choice of a menace, trample, or lifelink counter on it.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

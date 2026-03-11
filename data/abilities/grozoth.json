@@ -2,42 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "Defined": "Self",
-          "SpellDescription": "CARDNAME loses defender until end of turn.",
-          "Keywords": "Defender"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4"
+        "cost": "4",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME loses defender until end of turn.",
-        "Keywords": "Defender"
-      }
+      "description": "CARDNAME loses defender until end of turn.",
+      "effect": {
+        "description": "CARDNAME loses defender until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for any number of cards that have mana value 9, reveal them, put them into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for any number of cards that have mana value 9, reveal them, put them into your hand, then shuffle.",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "Origin": "Any"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

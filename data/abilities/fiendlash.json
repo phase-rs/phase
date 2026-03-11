@@ -1,28 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature is dealt damage, it deals damage equal to its power to target player or planeswalker.",
-        "ValidTarget": "Creature.EquippedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0 and has reach.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Reach",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +2/+0 and has reach."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature is dealt damage, it deals damage equal to its power to target player or planeswalker.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

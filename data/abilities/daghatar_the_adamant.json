@@ -2,36 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "TargetMin": "2",
-          "TargetMax": "2",
-          "CounterType": "P1P1",
-          "TgtPrompt": "Select target creatures to move +1/+1 counters",
-          "SpellDescription": "Move a +1/+1 counter from target creature onto a second target creature.",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 BG BG"
+        "cost": "1 BG BG",
+        "type": "Mana"
       },
+      "description": "Move a +1/+1 counter from target creature onto a second target creature.",
+      "effect": {
+        "description": "Move a +1/+1 counter from target creature onto a second target creature.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TargetMax": "2",
-        "CounterType": "P1P1",
-        "TgtPrompt": "Select target creatures to move +1/+1 counters",
-        "SpellDescription": "Move a +1/+1 counter from target creature onto a second target creature.",
-        "ValidTgts": "Creature"
-      }
+      "target_prompt": "Select target creatures to move +1/+1 counters"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

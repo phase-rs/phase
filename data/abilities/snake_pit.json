@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a blue or black spell, you may create a 1/1 green Snake creature token.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever an opponent casts a blue or black spell, you may create a 1/1 green Snake creature token.",
-        "ValidActivatingPlayer": "Opponent",
-        "ValidCard": "Card.Blue,Card.Black"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue,Card.Black"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

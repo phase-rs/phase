@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by Dinosaurs.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.Dinosaur",
-        "ValidAttacker": "Creature.Self",
-        "Description": "CARDNAME can't be blocked by Dinosaurs."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

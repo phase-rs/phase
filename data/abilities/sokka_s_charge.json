@@ -1,18 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Ally",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, Allies you control have double strike and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "AddKeyword": "Double Strike & Lifelink",
-        "Affected": "Ally.YouCtrl",
-        "Description": "During your turn, Allies you control have double strike and lifelink."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

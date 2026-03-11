@@ -1,31 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for an artifact card, exile it, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for an artifact card, exile it, then shuffle.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, you may put the exiled card into its owner's hand.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, you may put the exiled card into its owner's hand.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "OptionalDecider": "TriggeredCardController",
-        "Execute": "TrigReturn"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

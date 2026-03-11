@@ -1,38 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes tapped, target player mills cards equal to its power.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, target player mills cards equal to its power.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMill"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you cast a spell from your graveyard or activate an ability of a card in your graveyard, draw a card and put a +1/+1 counter on NICKNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.wasCastFromYourGraveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell from your graveyard or activate an ability of a card in your graveyard, draw a card and put a +1/+1 counter on NICKNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a spell from your graveyard or activate an ability of a card in your graveyard, draw a card and put a +1/+1 counter on NICKNAME.",
       "mode": "AbilityCast",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever you cast a spell from your graveyard or activate an ability of a card in your graveyard, draw a card and put a +1/+1 counter on NICKNAME.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.inZoneGraveyard",
-        "Execute": "TrigDraw"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

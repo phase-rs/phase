@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield, where X is CARDNAME's Intensity.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield, where X is CARDNAME's Intensity.",
-        "SubAbility": "DBIntensify",
-        "ChangeNum": "Y",
-        "WithTotalCMC": "X",
-        "Hidden": "True",
-        "ChangeType": "Creature.YouOwn",
-        "AnyNumber": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

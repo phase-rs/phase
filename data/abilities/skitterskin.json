@@ -2,36 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME. Activate only if you control another colorless creature.",
-          "IsPresent": "Creature.Colorless+YouCtrl+Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 B"
+        "cost": "1 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME. Activate only if you control another colorless creature.",
-        "IsPresent": "Creature.Colorless+YouCtrl+Other"
-      }
+      "description": "Regenerate CARDNAME. Activate only if you control another colorless creature.",
+      "effect": {
+        "description": "Regenerate CARDNAME. Activate only if you control another colorless creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

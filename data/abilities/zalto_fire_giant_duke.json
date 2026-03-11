@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, venture into the dungeon. (Enter the first room or advance to the next room.)",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigVenture",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, venture into the dungeon. (Enter the first room or advance to the next room.)",
-        "ValidTarget": "Card.Self"
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

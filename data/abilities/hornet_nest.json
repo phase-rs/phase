@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, create that many 1/1 green Insect creature tokens with flying and deathtouch.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, create that many 1/1 green Insect creature tokens with flying and deathtouch."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

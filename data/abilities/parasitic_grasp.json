@@ -2,55 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to target [Human] creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.Human"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Human"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "TgtPrompt": "Select target Human creature",
-        "SpellDescription": "CARDNAME deals 3 damage to target [Human] creature."
-      }
+      "target_prompt": "Select target Human creature"
     },
     {
-      "kind": "Spell",
+      "cost": {
+        "cost": "1 B B",
+        "type": "Mana"
+      },
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{1}{B}{B}",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
-        "SubAbility": "DBGainLife",
-        "PrecostDesc": "Cleave",
-        "NonBasicSpell": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

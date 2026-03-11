@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Wall"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Tap target Wall.",
+      "effect": {
+        "target": {
+          "card_type": "Wall",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target Wall.",
-        "TgtPrompt": "Select target Wall"
-      }
+      "target_prompt": "Select target Wall"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

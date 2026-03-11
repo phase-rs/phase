@@ -2,35 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ProtectionAll",
-        "params": {
-          "TgtPrompt": "Select target permanent you control",
-          "Gains": "TargetedCardColor",
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "Creatures you control gain protection from the colors of target permanent you control until end of turn.",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Permanent.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Creatures you control gain protection from the colors of target permanent you control until end of turn.",
+      "effect": {
+        "description": "Creatures you control gain protection from the colors of target permanent you control until end of turn.",
+        "name": "ProtectionAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target permanent you control",
-        "Gains": "TargetedCardColor",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control gain protection from the colors of target permanent you control until end of turn.",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Permanent.YouCtrl"
-      }
+      "target_prompt": "Select target permanent you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

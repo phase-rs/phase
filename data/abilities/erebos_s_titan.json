@@ -1,31 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever a creature card leaves an opponent's graveyard, you may discard a card. If you do, return CARDNAME from your graveyard to your hand.",
-        "Destination": "Any",
-        "TriggerZones": "Graveyard",
-        "ValidCard": "Creature.OppOwn",
-        "Origin": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as your opponents control no creatures, CARDNAME has indestructible. (Damage and effects that say \"destroy\" don't destroy it.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as your opponents control no creatures, CARDNAME has indestructible. (Damage and effects that say \"destroy\" don't destroy it.)",
-        "AddKeyword": "Indestructible",
-        "IsPresent": "Creature.OppCtrl",
-        "Affected": "Card.Self",
-        "PresentCompare": "EQ0"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature card leaves an opponent's graveyard, you may discard a card. If you do, return CARDNAME from your graveyard to your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

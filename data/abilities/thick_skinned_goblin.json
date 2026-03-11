@@ -2,39 +2,89 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "red",
-          "Defined": "Self",
-          "SpellDescription": "CARDNAME gains protection from red until end of turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Gains": "red",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gains protection from red until end of turn."
-      }
+      "description": "CARDNAME gains protection from red until end of turn.",
+      "effect": {
+        "description": "CARDNAME gains protection from red until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may pay {0} rather than pay the echo cost for permanents you control.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "You may pay 0 rather than pay the echo cost for permanents you control.",
-        "Description": "You may pay {0} rather than pay the echo cost for permanents you control.",
-        "Affected": "You"
-      }
+      "modifications": [
+        {
+          "keyword": "You",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "may",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "pay",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "0",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "rather",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "than",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "pay",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "the",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "echo",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "cost",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "for",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "permanents",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "you",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "control.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

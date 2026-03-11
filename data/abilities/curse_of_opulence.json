@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted player is attacked, create a Gold token. Each opponent attacking that player does the same. (A Gold token is an artifact with \"Sacrifice this artifact: Add one mana of any color.\")",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackedTarget": "Player.EnchantedBy",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted player is attacked, create a Gold token. Each opponent attacking that player does the same. (A Gold token is an artifact with \"Sacrifice this artifact: Add one mana of any color.\")"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

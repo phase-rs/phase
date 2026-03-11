@@ -1,35 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "PhaseCount": "2",
-        "PresentDefined": "Self",
-        "Execute": "TrigChangeZone",
-        "IsPresent": "Card.tapped",
-        "TriggerZones": "Battlefield",
-        "Phase": "Main",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, exile up to one target card from a graveyard."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are three or more cards exiled with CARDNAME, it gets +3/+3 and has hexproof. (It can't be the target of spells or abilities your opponents control.)",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "AddToughness": "3",
-        "AddKeyword": "Hexproof",
-        "Affected": "Card.Self",
-        "SVarCompare": "GE3",
-        "Description": "As long as there are three or more cards exiled with CARDNAME, it gets +3/+3 and has hexproof. (It can't be the target of spells or abilities your opponents control.)",
-        "AddPower": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, exile up to one target card from a graveyard.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

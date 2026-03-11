@@ -1,19 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, artifacts you control are Foods in addition to their other types and have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.YouCtrl",
-        "AddAbility": "FoodSac",
-        "Description": "During your turn, artifacts you control are Foods in addition to their other types and have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
-        "Condition": "PlayerTurn",
-        "AddType": "Food"
-      }
+      "modifications": [
+        {
+          "ability": "FoodSac",
+          "type": "AddAbility"
+        },
+        {
+          "core_type": "Food",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

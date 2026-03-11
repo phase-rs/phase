@@ -1,39 +1,97 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "You may look at the top card of your library any time.",
-        "MayLookAt": "You",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Creature+nonLand+TopLibrary+YouCtrl",
-        "AffectedZone": "Library",
-        "MayPlay": "True",
-        "Description": "As long as this Equipment is attached to a creature, you may cast creature spells from the top of your library.",
-        "IsPresent": "Card.Self+AttachedTo Creature"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as this Equipment is attached to a creature, you may cast creature spells from the top of your library.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2 and has vigilance and \"{T}: Add {G}.\"",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "AddKeyword": "Vigilance",
-        "Description": "Equipped creature gets +2/+2 and has vigilance and \"{T}: Add {G}.\"",
-        "AddAbility": "ABMana",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "ABMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

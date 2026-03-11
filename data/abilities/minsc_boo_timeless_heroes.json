@@ -2,78 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 3,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withTrample,Creature.withHaste"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Put three +1/+1 counters on up to one target creature with trample or haste.",
+      "effect": {
+        "count": 3,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TgtPrompt": "Select target creature with trample or haste",
-        "SpellDescription": "Put three +1/+1 counters on up to one target creature with trample or haste."
-      }
+      "target_prompt": "Select target creature with trample or haste"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Sacrifice a creature.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "AILogic": "Lethal",
-        "SubAbility": "DBImmediateTrigger",
-        "SacValid": "Creature",
-        "SpellDescription": "Sacrifice a creature.",
-        "RememberSacrificed": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
-        "Phase": "Upkeep",
-        "Secondary": "True",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

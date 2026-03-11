@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land,Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Destroy target creature or land.",
+      "effect": {
+        "target": {
+          "card_type": "Land,Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or land",
-        "SpellDescription": "Destroy target creature or land."
-      }
+      "target_prompt": "Select target creature or land"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME deals 5 damage to you unless you sacrifice a creature other than CARDNAME. If CARDNAME deals damage to you this way, tap it.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDmg",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 5 damage to you unless you sacrifice a creature other than CARDNAME. If CARDNAME deals damage to you this way, tap it.",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

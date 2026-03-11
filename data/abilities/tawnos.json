@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "ValidCard": "Artifact,Creature,Enchantment",
-        "Description": "You may cast artifact, creature, and enchantment spells as though they had flash.",
-        "EffectZone": "Command",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast artifact, creature, and enchantment spells as though they had flash.",
+      "effect_zone": "Command",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

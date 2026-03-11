@@ -2,31 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Land"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "Defined": "Player",
-        "Reveal": "True",
-        "SubAbility": "DBDestroy",
-        "ControlledByPlayer": "Chooser",
-        "SpellDescription": "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
-        "EachBasicType": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

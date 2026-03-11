@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a spell or ability an opponent controls causes you to discard CARDNAME, return it to your hand.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard CARDNAME, return it to your hand.",
-        "ValidCause": "SpellAbility.OppCtrl"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

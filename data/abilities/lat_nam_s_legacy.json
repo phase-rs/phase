@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Shuffle a card from your hand into your library. If you do, draw two cards at the beginning of the next turn's upkeep.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Library",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Shuffle a card from your hand into your library. If you do, draw two cards at the beginning of the next turn's upkeep.",
-        "ChangeType": "Card",
-        "SubAbility": "DelTrigSlowtrip",
-        "RememberChanged": "True",
-        "Shuffle": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

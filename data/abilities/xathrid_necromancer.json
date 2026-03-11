@@ -1,20 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Human creature you control dies, create a tapped 2/2 black Zombie creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Human+YouCtrl+Other,Card.Self",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME or another Human creature you control dies, create a tapped 2/2 black Zombie creature token."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Human"
+          },
+          {
+            "type": "Other",
+            "value": "Other,Card.Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

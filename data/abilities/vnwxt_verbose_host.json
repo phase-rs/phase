@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetMaxHandSize": "Unlimited",
-        "Description": "You have no maximum hand size.",
-        "Affected": "You"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have no maximum hand size.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "MaxSpeed",
-        "Affected": "Card.Self",
-        "Description": "Max speed — If you would draw a card, draw two cards instead.",
-        "AddReplacementEffect": "RepDraw"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — If you would draw a card, draw two cards instead.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

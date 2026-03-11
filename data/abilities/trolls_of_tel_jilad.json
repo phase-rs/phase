@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "TgtPrompt": "Select target green creature.",
-          "SpellDescription": "Regenerate target green creature.",
-          "ValidTgts": "Creature.Green"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
+      "description": "Regenerate target green creature.",
+      "effect": {
+        "description": "Regenerate target green creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target green creature.",
-        "SpellDescription": "Regenerate target green creature.",
-        "ValidTgts": "Creature.Green"
-      }
+      "target_prompt": "Select target green creature."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

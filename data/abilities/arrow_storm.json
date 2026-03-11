@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to any target. Raid — If you attacked this turn, instead CARDNAME deals 5 damage to that permanent or player and the damage can't be prevented.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 4 damage to any target. Raid — If you attacked this turn, instead CARDNAME deals 5 damage to that permanent or player and the damage can't be prevented.",
-        "ConditionCheckSVar": "RaidTest",
-        "ConditionSVarCompare": "EQ0",
-        "SubAbility": "DBDmg"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

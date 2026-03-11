@@ -2,28 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonArtifact+YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Exile target nonartifact creature you control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target nonartifact creature you control",
-        "RememberTargets": "True",
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "Exile target nonartifact creature you control."
-      }
+      "target_prompt": "Select target nonartifact creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

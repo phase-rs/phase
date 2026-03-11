@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control with power 4 or greater can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Max": "1",
-        "Description": "Each creature you control with power 4 or greater can't be blocked by more than one creature.",
-        "ValidCard": "Creature.YouCtrl+powerGE4"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

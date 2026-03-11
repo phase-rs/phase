@@ -2,34 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddTurn",
-        "params": {
-          "SpellDescription": "Take an extra turn after this one.",
-          "NumTurns": "1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Take an extra turn after this one.",
-        "NumTurns": "1"
-      }
+      "description": "Take an extra turn after this one.",
+      "effect": {
+        "description": "Take an extra turn after this one.",
+        "name": "AddTurn",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, any player may pay half their life, rounded up. If a player does, counter CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, any player may pay half their life, rounded up. If a player does, counter CARDNAME.",
-        "Execute": "TrigCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

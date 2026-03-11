@@ -2,29 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "StoreSVar",
-        "params": {
-          "Expression": "1",
-          "SubAbility": "DBRepeat",
-          "Type": "Number",
-          "SVar": "Left"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Expression": "1",
-        "SubAbility": "DBRepeat",
-        "Type": "Number",
-        "SVar": "Left"
-      }
+      "effect": {
+        "name": "StoreSVar",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

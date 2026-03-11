@@ -2,30 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "NewController": "You",
-        "LoseControl": "EOT",
-        "AllValid": "Creature.TargetedPlayerCtrl",
-        "RememberControlled": "True",
-        "SpellDescription": "Gain control of all creatures target opponent controls until end of turn. Untap those creatures. They gain haste until end of turn. You can't attack that player this turn. You can't sacrifice those creatures this turn.",
-        "SubAbility": "DBEffect",
-        "AddKWs": "Haste",
-        "Untap": "True"
-      }
+      "description": "Gain control of all creatures target opponent controls until end of turn. Untap those creatures. They gain haste until end of turn. You can't attack that player this turn. You can't sacrifice those creatures this turn.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

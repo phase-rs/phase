@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block, or crew Vehicles.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantCrew"
-      },
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't attack or block, or crew Vehicles."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

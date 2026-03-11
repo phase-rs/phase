@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "NICKNAME deals 2 damage to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "NICKNAME deals 2 damage to target creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature an opponent controls is dealt damage, put a +1/+1 counter on CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Creature.OppCtrl",
-        "TriggerDescription": "Whenever a creature an opponent controls is dealt damage, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

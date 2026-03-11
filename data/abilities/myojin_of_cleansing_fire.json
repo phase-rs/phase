@@ -2,36 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/DIVINITY>"
+        "cost": "SubCounter<1/DIVINITY>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.StrictlyOther",
-        "SpellDescription": "Destroy all other creatures."
-      }
+      "description": "Destroy all other creatures.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has indestructible as long as it has a divinity counter on it.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE1_DIVINITY",
-        "AddKeyword": "Indestructible",
-        "Description": "CARDNAME has indestructible as long as it has a divinity counter on it."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

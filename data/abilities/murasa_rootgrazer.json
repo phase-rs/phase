@@ -2,50 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "You may put a basic land card from your hand onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Land.Basic",
-        "Optional": "You",
-        "AILogic": "AtOppEOT",
-        "ChangeTypeDesc": "basic land",
-        "SpellDescription": "You may put a basic land card from your hand onto the battlefield."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.Basic+YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Return target basic land you control to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Basic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target basic land you control to its owner's hand.",
-        "TgtPrompt": "Select target basic land you control"
-      }
+      "target_prompt": "Select target basic land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

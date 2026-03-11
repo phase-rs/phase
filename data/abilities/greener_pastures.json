@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, if that player controls more lands than each other player, the player creates a 1/1 green Saproling creature token.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's upkeep, if that player controls more lands than each other player, the player creates a 1/1 green Saproling creature token.",
-        "Phase": "Upkeep",
-        "CheckSVar": "ActiveLands",
-        "SVarCompare": "GTHighestOpp",
-        "Execute": "TrigToken"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

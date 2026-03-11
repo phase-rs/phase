@@ -1,92 +1,90 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Fight",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl+Other"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
+          "description": "CARDNAME fights another target creature you control.",
+          "effect": {
+            "target": {
+              "filters": [
+                {
+                  "card_type": "Creature",
+                  "controller": "You",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Fight"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME fights another target creature you control.",
-            "TgtPrompt": "Select another target creature you control",
-            "Defined": "Self",
-            "SubAbility": "DBDelayedTrigger",
-            "StackDescription": "CARDNAME fights {c:Targeted}."
-          }
+          "target_prompt": "Select another target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "Amount": "2",
-              "SpellDescription": "Add two mana of any one color."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "2",
-            "SpellDescription": "Add two mana of any one color."
-          }
+          "description": "Add two mana of any one color.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "c_4_4_a_golem",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4"
+                "cost": "4",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 4/4 colorless Golem artifact creature token."
-          }
+          "description": "Create a 4/4 colorless Golem artifact creature token.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "c_4_4_a_golem",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

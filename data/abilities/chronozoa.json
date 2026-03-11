@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, if it had no time counters on it, create two tokens that are copies of it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+counters_EQ0_TIME",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigCopyPermanent",
-        "TriggerDescription": "When CARDNAME dies, if it had no time counters on it, create two tokens that are copies of it."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

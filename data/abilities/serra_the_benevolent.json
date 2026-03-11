@@ -2,85 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures you control with flying get +1/+1 until end of turn.",
-        "Planeswalker": "True",
-        "ValidCards": "Creature.withFlying+YouCtrl"
-      }
+      "description": "Creatures you control with flying get +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Create a 4/4 white Angel creature token with flying and vigilance.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_4_4_angel_flying_vigilance",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 4/4 white Angel creature token with flying and vigilance."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "SpellDescription": "You get an emblem with \"If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.\"",
-          "Name": "Emblem — Serra the Benevolent",
-          "Image": "emblem_serra_the_benevolent",
-          "ReplacementEffects": "STWorship",
-          "Stackable": "False",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You get an emblem with \"If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.\"",
-        "Name": "Emblem — Serra the Benevolent",
-        "Image": "emblem_serra_the_benevolent",
-        "ReplacementEffects": "STWorship",
-        "Stackable": "False",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

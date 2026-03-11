@@ -2,59 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "SacNonland,Discard",
-          "FallbackAbility": "LoseLifeFallback",
-          "AILogic": "PayUnlessCost",
-          "Defined": "Opponent",
-          "SpellDescription": "Each opponent loses 3 life unless they discard a card or sacrifice a creature. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
-          "TempRemember": "Chooser"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "CollectEvidence<3>"
+            "cost": "CollectEvidence<3>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "SacNonland,Discard",
-        "FallbackAbility": "LoseLifeFallback",
-        "AILogic": "PayUnlessCost",
-        "Defined": "Opponent",
-        "SpellDescription": "Each opponent loses 3 life unless they discard a card or sacrifice a creature. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
-        "TempRemember": "Chooser"
-      }
+      "description": "Each opponent loses 3 life unless they discard a card or sacrifice a creature. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
+      "effect": {
+        "description": "Each opponent loses 3 life unless they discard a card or sacrifice a creature. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, look at the top four cards of your library. Put two of them into your hand and the rest into your graveyard. You lose 2 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDig",
-        "TriggerDescription": "When CARDNAME enters, look at the top four cards of your library. Put two of them into your hand and the rest into your graveyard. You lose 2 life."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

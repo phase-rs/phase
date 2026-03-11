@@ -1,23 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a card is put into an opponent's graveyard from anywhere, if CARDNAME is suspended, you may remove a time counter from CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a card is put into an opponent's graveyard from anywhere, if CARDNAME is suspended, you may remove a time counter from CARDNAME.",
-        "ValidCard": "Card.!token+OppOwn",
-        "TriggerZones": "Exile",
-        "IsPresent": "Card.Self+suspended",
-        "PresentZone": "Exile",
-        "Execute": "TrigRemoveCounter",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

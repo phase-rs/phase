@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, you gain 1 life for each colorless permanent you control.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, you gain 1 life for each colorless permanent you control."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

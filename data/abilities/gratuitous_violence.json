@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.YouCtrl+inZoneBattlefield",
-        "ReplaceWith": "DmgTwice",
-        "ValidTarget": "Permanent,Player",
-        "Description": "If a creature you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If a creature you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has first strike.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Affected": "Card.Self",
-        "AddKeyword": "First Strike",
-        "Description": "During your turn, CARDNAME has first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,64 +2,84 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
+      "description": "Target artifact creature becomes blue until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact creature",
-        "Colors": "Blue",
-        "OverwriteColors": "True",
-        "SpellDescription": "Target artifact creature becomes blue until end of turn."
-      }
+      "target_prompt": "Select target artifact creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
-          "Amount": "2",
-          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Creature.Blue>"
+        "cost": "tapXType<1/Creature.Blue>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
-        "Amount": "2",
-        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
-      }
+      "description": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Blue"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other blue creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Affected": "Creature.Blue+Other+YouCtrl",
-        "Description": "Other blue creatures you control get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

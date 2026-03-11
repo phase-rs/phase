@@ -1,33 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may look at the top card of your library. If it's a creature card, you may reveal it and put a quest counter on Quest for CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPeek",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may look at the top card of your library. If it's a creature card, you may reveal it and put a quest counter on Quest for CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of each end step, if there are three or more quest counters on CARDNAME, you may put a Kraken, Leviathan, Octopus, or Serpent creature card from your hand onto the battlefield.",
       "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of each end step, if there are three or more quest counters on CARDNAME, you may put a Kraken, Leviathan, Octopus, or Serpent creature card from your hand onto the battlefield.",
-        "Phase": "End of Turn",
-        "ValidPlayer": "Player",
-        "PresentCompare": "EQ1",
-        "IsPresent": "Card.Self+counters_GE3_QUEST",
-        "Execute": "TrigChangeZone",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

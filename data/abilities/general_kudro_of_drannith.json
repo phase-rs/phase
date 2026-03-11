@@ -2,59 +2,85 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerGE4"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Destroy target creature with power 4 or greater.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature with power 4 or greater.",
-        "TgtPrompt": "Select target creature with power 4 or greater"
-      }
+      "target_prompt": "Select target creature with power 4 or greater"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Human",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Humans you control get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Human you control enters, exile target card from an opponent's graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Human you control enters, exile target card from an opponent's graveyard.",
-        "ValidCard": "Card.Self,Human.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Human.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Affected": "Human.Other+YouCtrl",
-        "Description": "Other Humans you control get +1/+1.",
-        "AddPower": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

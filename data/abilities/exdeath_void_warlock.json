@@ -1,53 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When NICKNAME enters, you gain 3 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigGainLife",
-            "TriggerDescription": "When NICKNAME enters, you gain 3 life.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your end step, if there are six or more permanent cards in your graveyard, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "CheckSVar": "X",
-            "TriggerDescription": "At the beginning of your end step, if there are six or more permanent cards in your graveyard, transform NICKNAME.",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "Phase": "End of Turn",
-            "SVarCompare": "GE6"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "SetPower": "X",
-            "Description": "NICKNAME's power is equal to the number of permanent cards in your graveyard.",
-            "CharacteristicDefining": "True"
-          }
+          "characteristic_defining": true,
+          "description": "NICKNAME's power is equal to the number of permanent cards in your graveyard.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

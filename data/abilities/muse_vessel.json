@@ -2,67 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "Chooser": "Targeted",
-        "IsCurse": "True",
-        "Mandatory": "True",
-        "ChangeNum": "1",
-        "Hidden": "True",
-        "ChangeType": "Card",
-        "SpellDescription": "Target player exiles a card from their hand. Activate only as a sorcery."
-      }
+      "description": "Target player exiles a card from their hand. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "Choose a card exiled with CARDNAME. You may play that card this turn.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Card.ExiledWithSource"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "ChoiceZone": "Exile",
-        "Amount": "1",
-        "ChoiceTitle": "Choose a card exiled with Muse Vessel",
-        "AILogic": "Never",
-        "SpellDescription": "Choose a card exiled with CARDNAME. You may play that card this turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

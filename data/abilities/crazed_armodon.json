@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +3/+0 and gains trample until end of turn. Destroy CARDNAME at the beginning of the next end step. Activate only once each turn.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample",
-        "SpellDescription": "CARDNAME gets +3/+0 and gains trample until end of turn. Destroy CARDNAME at the beginning of the next end step. Activate only once each turn.",
-        "Defined": "Self",
-        "ActivationLimit": "1",
-        "AtEOT": "Destroy"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

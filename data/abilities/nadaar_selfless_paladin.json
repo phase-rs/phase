@@ -1,39 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Other creatures you control get +1/+1 as long as you've completed a dungeon.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, venture into the dungeon. (Enter the first room or advance to the next room.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBVenture",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, venture into the dungeon. (Enter the first room or advance to the next room.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, venture into the dungeon. (Enter the first room or advance to the next room.)",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "Execute": "DBVenture",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, venture into the dungeon. (Enter the first room or advance to the next room.)",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+Other",
-        "CheckSVar": "X",
-        "Description": "Other creatures you control get +1/+1 as long as you've completed a dungeon.",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Tapped creatures you control can block as though they were untapped.",
       "mode": {
         "Other": "BlockTapped"
-      },
-      "params": {
-        "ValidCard": "Creature.tapped+YouCtrl",
-        "Description": "Tapped creatures you control can block as though they were untapped."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

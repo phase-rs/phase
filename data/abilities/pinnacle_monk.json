@@ -1,61 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigChangeZone",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand.",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "R",
-            "params": {
-              "SpellDescription": "Add {R}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {R}."
+          "description": "Add {R}.",
+          "effect": {
+            "produced": [
+              "Red"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
-            "ValidCard": "Card.Self",
-            "ReplacementResult": "Updated",
-            "Destination": "Battlefield",
-            "ReplaceWith": "DBTap"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

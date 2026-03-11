@@ -1,52 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nontoken creature enters, its controller creates a token that's a copy of that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.!token",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a nontoken creature enters, its controller creates a token that's a copy of that creature.",
-        "Execute": "TrigDualCopy",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a nontoken creature leaves the battlefield, exile all tokens with the same name as that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "TriggerDescription": "Whenever a nontoken creature leaves the battlefield, exile all tokens with the same name as that creature.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.!token",
-        "Origin": "Battlefield",
-        "Execute": "TrigDualExile"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, exile all tokens created with CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, exile all tokens created with CARDNAME.",
-        "Destination": "Any",
-        "Execute": "TrigDualExileAll"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.IsRemembered",
-        "Destination": "Any",
-        "Execute": "TrigForget",
-        "Static": "True",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

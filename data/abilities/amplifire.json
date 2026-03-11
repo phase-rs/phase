@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature card. Until your next turn, CARDNAME's base power becomes twice that card's power and its toughness. Put the revealed cards on the bottom of your library in a random order.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "Execute": "TrigDig",
-        "TriggerDescription": "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature card. Until your next turn, CARDNAME's base power becomes twice that card's power and its toughness. Put the revealed cards on the bottom of your library in a random order.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

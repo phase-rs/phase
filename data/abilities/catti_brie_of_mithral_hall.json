@@ -2,49 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "cost": "SubCounter<All/P1P1/NICKNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "It deals X damage to target attacking or blocking creature an opponent controls, where X is the number of counters removed this way.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+OppCtrl,Creature.blocking+OppCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "properties": [
+            {
+              "type": "Attacking"
+            },
+            {
+              "type": "Other",
+              "value": "OppCtrl,Creature.blocking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Mana",
-            "cost": "SubCounter<All/P1P1/NICKNAME>"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking or blocking creature an opponent controls",
-        "SpellDescription": "It deals X damage to target attacking or blocking creature an opponent controls, where X is the number of counters removed this way."
-      }
+      "target_prompt": "Select target attacking or blocking creature an opponent controls"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, put a +1/+1 counter on it for each Equipment attached to it.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it for each Equipment attached to it.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.Self"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

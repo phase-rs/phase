@@ -1,59 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.attacking"
-            }
-          },
           "cost": null,
+          "description": "Exile target attacking creature.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Attacking"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target attacking creature",
-            "SpellDescription": "Exile target attacking creature."
-          }
+          "target_prompt": "Select target attacking creature"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "StaticAbilities": "KWPump",
-              "SpellDescription": "Creatures can't block this turn.",
-              "AILogic": "Evasion"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "StaticAbilities": "KWPump",
-            "SpellDescription": "Creatures can't block this turn.",
-            "AILogic": "Evasion"
-          }
+          "description": "Creatures can't block this turn.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

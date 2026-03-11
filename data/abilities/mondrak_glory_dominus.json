@@ -2,51 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "Indestructible",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 WP WP"
+            "cost": "1 WP WP",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Put an indestructible counter on CARDNAME. ({W/P} can be paid with either {W} or 2 life.)"
-      }
+      "description": "Put an indestructible counter on CARDNAME. ({W/P} can be paid with either {W} or 2 life.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "Indestructible",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "Description": "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
-        "ReplaceWith": "DoubleToken",
-        "ValidToken": "Card.YouCtrl",
-        "ActiveZones": "Battlefield"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

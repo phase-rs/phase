@@ -1,19 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Yanling"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control a Yanling planeswalker.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 as long as you control a Yanling planeswalker.",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "IsPresent": "Planeswalker.Yanling+YouCtrl",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

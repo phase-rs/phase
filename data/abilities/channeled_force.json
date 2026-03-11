@@ -2,35 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U R"
+            "cost": "2 U R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<X/Card/card>"
+            "cost": "Discard<X/Card/card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamage",
-        "SpellDescription": "Target player draws X cards. CARDNAME deals X damage to up to one target creature or planeswalker.",
-        "CostDesc": "As an additional cost to cast this spell, discard X cards.",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player draws X cards. CARDNAME deals X damage to up to one target creature or planeswalker.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

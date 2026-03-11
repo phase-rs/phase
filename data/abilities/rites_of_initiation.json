@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseNumber",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBDiscard",
-          "Max": "MaxChoice",
-          "ListTitle": "Discard how many cards?",
-          "Min": "0",
-          "SpellDescription": "Discard any number of cards at random. Creatures you control get +1/+0 until end of turn for each card discarded this way."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBDiscard",
-        "Max": "MaxChoice",
-        "ListTitle": "Discard how many cards?",
-        "Min": "0",
-        "SpellDescription": "Discard any number of cards at random. Creatures you control get +1/+0 until end of turn for each card discarded this way."
-      }
+      "description": "Discard any number of cards at random. Creatures you control get +1/+0 until end of turn for each card discarded this way.",
+      "effect": {
+        "description": "Discard any number of cards at random. Creatures you control get +1/+0 until end of turn for each card discarded this way.",
+        "name": "ChooseNumber",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

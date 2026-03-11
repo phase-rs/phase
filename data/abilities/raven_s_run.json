@@ -1,27 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, put a -1/-1 counter on target creature, two -1/-1 counters on another target creature, and three -1/-1 counters on a third target creature.",
-        "TriggerZones": "Command",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have wither (They deal damage to creatures in the form of -1/-1 counters.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature",
-        "EffectZone": "Command",
-        "AddKeyword": "Wither",
-        "Description": "All creatures have wither (They deal damage to creatures in the form of -1/-1 counters.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Wither",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, put a -1/-1 counter on target creature, two -1/-1 counters on another target creature, and three -1/-1 counters on a third target creature.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

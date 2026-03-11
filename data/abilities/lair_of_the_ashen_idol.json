@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice a creature. If you can't, planeswalk.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "SacToIdol",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice a creature. If you can't, planeswalk.",
-        "TriggerZones": "Command"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, any number of target players each create a 2/2 black Zombie creature token.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, any number of target players each create a 2/2 black Zombie creature token."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

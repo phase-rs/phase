@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "Except for creatures named Akron Legionnaire and artifact creatures, creatures you control can't attack.",
-        "ValidCard": "Creature.YouCtrl+nonArtifact+!namedAkron Legionnaire"
-      }
+      "description": "Except for creatures named Akron Legionnaire and artifact creatures, creatures you control can't attack.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

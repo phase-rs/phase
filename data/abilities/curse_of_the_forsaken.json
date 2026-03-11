@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature attacks enchanted player, its controller gains 1 life.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever a creature attacks enchanted player, its controller gains 1 life.",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Attacked": "Player.EnchantedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

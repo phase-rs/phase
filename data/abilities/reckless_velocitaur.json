@@ -1,32 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gets +2/+0 and gains trample until end of turn.",
       "mode": "Saddled",
-      "params": {
-        "ValidCrew": "Card.Self",
-        "Phase": "Main1,Main2",
-        "TriggerDescription": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gets +2/+0 and gains trample until end of turn.",
-        "PlayerTurn": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gets +2/+0 and gains trample until end of turn.",
       "mode": "Crewed",
-      "params": {
-        "Secondary": "True",
-        "PlayerTurn": "True",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gets +2/+0 and gains trample until end of turn.",
-        "Phase": "Main1,Main2",
-        "ValidCrew": "Card.Self"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

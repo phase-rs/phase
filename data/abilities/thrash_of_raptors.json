@@ -1,19 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Dinosaur",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control another Dinosaur, CARDNAME gets +2/+0 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Dinosaur.Other+YouCtrl",
-        "Description": "As long as you control another Dinosaur, CARDNAME gets +2/+0 and has trample.",
-        "Affected": "Card.Self",
-        "AddPower": "2",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

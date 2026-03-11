@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "At the beginning of each player's end step, CARDNAME deals X damage to that player, where X is the number of untapped lands they control.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AITap",
-        "Affected": "Land"
-      }
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's end step, CARDNAME deals X damage to that player, where X is the number of untapped lands they control.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

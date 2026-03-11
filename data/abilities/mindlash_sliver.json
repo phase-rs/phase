@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"{1}, Sacrifice this permanent: Each player discards a card.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "All Slivers have \"{1}, Sacrifice this permanent: Each player discards a card.\"",
-        "Affected": "Sliver",
-        "AddAbility": "Discard"
-      }
+      "modifications": [
+        {
+          "ability": "Discard",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,56 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Enchantment",
-          "Aura"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {R} to end this effect.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Enchantment",
+          "Aura"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RevertCost": "R",
-        "Duration": "Permanent",
-        "RemoveEnchantmentTypes": "True",
-        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {R} to end this effect.",
-        "SubAbility": "DBAttach",
-        "RemoveThisAbility": "True",
-        "RemoveCardTypes": "True",
-        "Defined": "Self",
-        "Keywords": "Enchant:Creature"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Description": "Enchanted creature has haste.",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Bird.YouOwn",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Bird is put into your graveyard from the battlefield, put a feather counter on CARDNAME.",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Bird",
-        "AddPower": "X",
-        "Description": "Bird creatures get +1/+1 for each feather counter on CARDNAME.",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Bird"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Bird creatures get +1/+1 for each feather counter on CARDNAME.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Bird is put into your graveyard from the battlefield, put a feather counter on CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Bird",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

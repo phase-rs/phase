@@ -1,19 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White"
+            },
+            {
+              "type": "Other",
+              "value": "YouCtrl,Permanent.Red"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a red or white permanent, CARDNAME gets +1/+0 and has first strike.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Permanent.White+YouCtrl,Permanent.Red+YouCtrl",
-        "Affected": "Card.Self",
-        "AddKeyword": "First Strike",
-        "Description": "As long as you control a red or white permanent, CARDNAME gets +1/+0 and has first strike.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

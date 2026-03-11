@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "SpellDescription": "CARDNAME phases out.",
-          "PrecostDesc": "Teleport —",
-          "Defined": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W"
+        "cost": "3 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME phases out.",
-        "PrecostDesc": "Teleport —",
-        "Defined": "Self"
-      }
+      "description": "CARDNAME phases out.",
+      "effect": {
+        "description": "CARDNAME phases out.",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

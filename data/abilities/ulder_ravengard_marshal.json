@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, another target nontoken creature you control gains double team until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpEOT",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, another target nontoken creature you control gains double team until end of turn.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME attacks, conjure a duplicate of another target nontoken attacking creature into your hand.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever NICKNAME attacks, conjure a duplicate of another target nontoken attacking creature into your hand.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigConjure"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

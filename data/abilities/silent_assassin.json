@@ -2,37 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target blocking creature",
-          "Triggers": "DelTrig",
-          "SpellDescription": "Destroy target blocking creature at end of combat.",
-          "ValidTgts": "Creature.blocking",
-          "IsCurse": "True",
-          "RememberObjects": "Targeted",
-          "Name": "Silent Assassin's Effect — Tracking..."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 B"
+        "cost": "3 B",
+        "type": "Mana"
       },
+      "description": "Destroy target blocking creature at end of combat.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target blocking creature",
-        "Triggers": "DelTrig",
-        "SpellDescription": "Destroy target blocking creature at end of combat.",
-        "ValidTgts": "Creature.blocking",
-        "IsCurse": "True",
-        "RememberObjects": "Targeted",
-        "Name": "Silent Assassin's Effect — Tracking..."
-      }
+      "target_prompt": "Select target blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, your opponents can't cast spells or activate abilities of artifacts, creatures, or enchantments.",
-        "ValidCard": "Card",
-        "Caster": "Opponent"
-      }
+      "description": "During your turn, your opponents can't cast spells or activate abilities of artifacts, creatures, or enchantments.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "Condition": "PlayerTurn",
-        "Activator": "Opponent",
-        "ValidCard": "Artifact,Creature,Enchantment"
-      }
+      "affected_zone": "Battlefield",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

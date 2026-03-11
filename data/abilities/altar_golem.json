@@ -2,47 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<5/Creature>",
+        "type": "Mana"
+      },
+      "description": "Untap this creature.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<5/Creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap this creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of creatures on the battlefield.",
-        "SetPower": "X"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This creature doesn't untap during your untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You",
-        "Description": "This creature doesn't untap during your untap step."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of creatures on the battlefield.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

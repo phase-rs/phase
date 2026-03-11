@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a kicked spell, you may have CARDNAME deal damage to any target equal to the number of times that spell was kicked.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Card.YouCtrl+kicked",
-        "Execute": "DamageSomeone",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a kicked spell, you may have CARDNAME deal damage to any target equal to the number of times that spell was kicked."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

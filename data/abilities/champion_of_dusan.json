@@ -2,41 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Renew —",
-        "CounterTypes": "P1P1,Trample",
-        "SorcerySpeed": "True",
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Put a +1/+1 counter and a trample counter on target creature. Activate only as a sorcery."
-      }
+      "description": "Put a +1/+1 counter and a trample counter on target creature. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

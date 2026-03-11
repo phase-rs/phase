@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DBReplace",
-        "ValidTarget": "You",
-        "PreventionEffect": "True",
-        "ValidSource": "Card.BlueSource",
-        "Description": "If a blue source would deal damage to you, prevent 2 of that damage.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If a blue source would deal damage to you, prevent 2 of that damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

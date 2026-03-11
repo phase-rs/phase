@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SubAbility": "DBPump",
-          "SpellDescription": "Add {B}. If this ability has been activated four or more times this turn, sacrifice CARDNAME at the beginning of the next end step."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "SpellDescription": "Add {B}. If this ability has been activated four or more times this turn, sacrifice CARDNAME at the beginning of the next end step."
-      }
+      "description": "Add {B}. If this ability has been activated four or more times this turn, sacrifice CARDNAME at the beginning of the next end step.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

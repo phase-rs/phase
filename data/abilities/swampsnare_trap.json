@@ -1,29 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidTarget": "Creature.withFlying",
-        "Type": "Spell",
-        "Amount": "1",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast if it targets a creature with flying."
-      }
+      "description": "This spell costs {1} less to cast if it targets a creature with flying.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets -5/-3.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets -5/-3.",
-        "AddToughness": "-3",
-        "AddPower": "-5"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -5
+        },
+        {
+          "type": "AddToughness",
+          "value": -3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

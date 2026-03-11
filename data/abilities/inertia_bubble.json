@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Enchanted artifact doesn't untap during its controller's untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted artifact doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.EnchantedBy",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

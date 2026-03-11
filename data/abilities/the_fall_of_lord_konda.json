@@ -1,32 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME dies, draw a card.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDraw",
-            "Origin": "Battlefield",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME dies, draw a card."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

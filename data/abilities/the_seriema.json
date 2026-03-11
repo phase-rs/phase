@@ -1,30 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, search your library for a legendary creature card, reveal it, put it into your hand, then shuffle.",
-        "Execute": "TrigSearch",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 7+ Flying Other tapped legendary creatures you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE7_CHARGE",
-        "AddType": "Creature",
-        "AddKeyword": "Flying",
-        "AddStaticAbility": "DBStatic",
-        "Description": "STATION 7+ Flying Other tapped legendary creatures you control have indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, search your library for a legendary creature card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,38 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "TgtPrompt": "Select target creature you control",
-          "ValidTgts": "Creature.YouCtrl",
-          "SpellDescription": "Target creature you control phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)",
+      "effect": {
+        "description": "Target creature you control phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "ValidTgts": "Creature.YouCtrl",
-        "SpellDescription": "Target creature you control phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

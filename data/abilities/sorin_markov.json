@@ -2,79 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 2 damage to any target and you gain 2 life.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "CARDNAME deals 2 damage to any target and you gain 2 life.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "LifeAmount": "10",
-          "SpellDescription": "Target opponent's life total becomes 10.",
-          "Planeswalker": "True",
-          "ValidTgts": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LifeAmount": "10",
-        "SpellDescription": "Target opponent's life total becomes 10.",
-        "Planeswalker": "True",
-        "ValidTgts": "Opponent"
-      }
+      "description": "Target opponent's life total becomes 10.",
+      "effect": {
+        "description": "Target opponent's life total becomes 10.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ControlPlayer",
-        "params": {
-          "Ultimate": "True",
-          "ValidTgts": "Player",
-          "SpellDescription": "You control target player during that player's next turn.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "ValidTgts": "Player",
-        "SpellDescription": "You control target player during that player's next turn.",
-        "Planeswalker": "True"
-      }
+      "description": "You control target player during that player's next turn.",
+      "effect": {
+        "description": "You control target player during that player's next turn.",
+        "name": "ControlPlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

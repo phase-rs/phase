@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile another target permanent. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, exile another target permanent. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

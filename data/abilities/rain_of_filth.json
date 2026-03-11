@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
-          "Abilities": "ABMana",
-          "ValidCards": "Land.YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
-        "Abilities": "ABMana",
-        "ValidCards": "Land.YouCtrl"
-      }
+      "description": "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
+      "effect": {
+        "description": "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

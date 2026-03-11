@@ -1,46 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell with mana value 5 or greater, tap target creature an opponent controls and put a stun counter on it.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.cmcGE5",
-            "ValidActivatingPlayer": "You",
-            "Execute": "TrigTap",
-            "TriggerDescription": "Whenever you cast a spell with mana value 5 or greater, tap target creature an opponent controls and put a stun counter on it."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 4
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDiscard",
-            "SpellDescription": "Draw four cards, then discard two cards. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "description": "Draw four cards, then discard two cards. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "count": 4,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Vehicle",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a Vehicle, it's a creature in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as enchanted permanent is a Vehicle, it's a creature in addition to its other types.",
-        "Affected": "Vehicle.AttachedBy",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +2/+2 and has flying.",
-        "AddPower": "2",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

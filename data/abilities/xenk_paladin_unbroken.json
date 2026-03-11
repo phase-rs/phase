@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Aura",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Auras you control have exalted. (Whenever a creature you control attacks alone, it gets +1/+1 until end of turn for each instance of exalted among permanents you control.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Auras you control have exalted. (Whenever a creature you control attacks alone, it gets +1/+1 until end of turn for each instance of exalted among permanents you control.)",
-        "AddKeyword": "Exalted",
-        "Affected": "Aura.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Exalted",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

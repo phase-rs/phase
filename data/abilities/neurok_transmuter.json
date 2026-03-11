@@ -2,56 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "Target creature becomes an artifact in addition to its other types until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature becomes an artifact in addition to its other types until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
+      "description": "Until end of turn, target artifact creature becomes blue and isn't an artifact.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Blue",
-        "OverwriteColors": "True",
-        "RemoveTypes": "Artifact",
-        "SpellDescription": "Until end of turn, target artifact creature becomes blue and isn't an artifact.",
-        "TgtPrompt": "Select target artifact creature"
-      }
+      "target_prompt": "Select target artifact creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

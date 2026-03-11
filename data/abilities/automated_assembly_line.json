@@ -2,41 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayEnergy<3>",
+        "type": "Mana"
+      },
+      "description": "Create a tapped 3/3 colorless Robot artifact creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_3_3_a_robot",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<3>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a tapped 3/3 colorless Robot artifact creature token.",
-        "TokenTapped": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidSource": "Creature.Artifact+YouCtrl",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigEnergy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

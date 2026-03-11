@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if a creature died this turn, put a +1/+1 counter on CARDNAME and untap it.",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "Morbid",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your end step, if a creature died this turn, put a +1/+1 counter on CARDNAME and untap it.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

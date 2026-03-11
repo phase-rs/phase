@@ -1,22 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature loses all abilities and is a Bird creature with base power and toughness 1/1.",
       "mode": "Continuous",
-      "params": {
-        "RemoveAllAbilities": "True",
-        "Affected": "Creature.EnchantedBy",
-        "SetToughness": "1",
-        "RemoveCreatureTypes": "True",
-        "AddType": "Creature & Bird",
-        "SetPower": "1",
-        "RemoveCardTypes": "True",
-        "Description": "Enchanted creature loses all abilities and is a Bird creature with base power and toughness 1/1."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Creature & Bird",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, put a +1/+1 counter on NICKNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, put a +1/+1 counter on NICKNAME.",
-        "Execute": "TrigPutCounter",
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Chaos — Whenever NICKNAME deals combat damage to an opponent, it deals that much damage to each other opponent if NICKNAME's power is 7 or greater.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "Execute": "TrigDmg",
-        "ValidTarget": "Opponent",
-        "TriggerDescription": "Chaos — Whenever NICKNAME deals combat damage to an opponent, it deals that much damage to each other opponent if NICKNAME's power is 7 or greater."
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

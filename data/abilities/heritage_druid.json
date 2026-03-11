@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "3",
-          "SpellDescription": "Add {G}{G}{G}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<3/Elf>"
+        "cost": "tapXType<3/Elf>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "3",
-        "SpellDescription": "Add {G}{G}{G}."
-      }
+      "description": "Add {G}{G}{G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

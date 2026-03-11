@@ -2,38 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Return<1/Land>",
+        "type": "Mana"
+      },
+      "description": "Untap CARDNAME. It gains hexproof until end of turn.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Return<1/Land>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap CARDNAME. It gains hexproof until end of turn.",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, target creature an opponent controls attacks during its controller's next combat phase if able.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigEffect",
-        "Origin": "Any",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, target creature an opponent controls attacks during its controller's next combat phase if able.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

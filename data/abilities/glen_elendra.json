@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At end of combat, you may exchange control of target creature you control that dealt combat damage to a player this combat and target creature that player controls.",
       "mode": "Phase",
-      "params": {
-        "Phase": "EndCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "OptionalDecider": "You",
-        "Execute": "TrigExchange",
-        "TriggerDescription": "At end of combat, you may exchange control of target creature you control that dealt combat damage to a player this combat and target creature that player controls."
-      }
+      "optional": true,
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, gain control of target creature you own.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, gain control of target creature you own."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

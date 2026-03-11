@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Chroma — CARDNAME's power and toughness are each equal to the number of green mana symbols in the mana costs of permanents you control.",
-        "CharacteristicDefining": "True",
-        "SetToughness": "X",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "Chroma — CARDNAME's power and toughness are each equal to the number of green mana symbols in the mana costs of permanents you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

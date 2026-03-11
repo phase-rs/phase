@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBEndCombatPhase",
-          "SpellDescription": "Cast CARDNAME only during combat. Your opponents can't cast spells this turn.",
-          "ActivationPhases": "BeginCombat->EndCombat",
-          "StaticAbilities": "STCantBeCast"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEndCombatPhase",
-        "SpellDescription": "Cast CARDNAME only during combat. Your opponents can't cast spells this turn.",
-        "ActivationPhases": "BeginCombat->EndCombat",
-        "StaticAbilities": "STCantBeCast"
-      }
+      "description": "Cast CARDNAME only during combat. Your opponents can't cast spells this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

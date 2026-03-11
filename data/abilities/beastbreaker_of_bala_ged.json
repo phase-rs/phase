@@ -1,32 +1,73 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-3 4/4",
       "mode": "Continuous",
-      "params": {
-        "PresentCompare": "EQ1",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE3_LEVEL",
-        "Affected": "Card.Self",
-        "SetToughness": "4",
-        "Description": "LEVEL 1-3 4/4",
-        "SetPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 4+ 6/6 Trample",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "6",
-        "IsPresent": "Card.Self+counters_GE4_LEVEL",
-        "SetToughness": "6",
-        "Affected": "Card.Self",
-        "AddKeyword": "Trample",
-        "Description": "LEVEL 4+ 6/6 Trample",
-        "PresentCompare": "EQ1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 6
+        },
+        {
+          "type": "SetToughness",
+          "value": 6
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

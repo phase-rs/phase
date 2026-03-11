@@ -2,31 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBDealDamage",
-          "RepeatPlayers": "Player",
-          "DamageMap": "True",
-          "SpellDescription": "CARDNAME deals damage to each player equal to half that player's life total, rounded down."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBDealDamage",
-        "RepeatPlayers": "Player",
-        "DamageMap": "True",
-        "SpellDescription": "CARDNAME deals damage to each player equal to half that player's life total, rounded down."
-      }
+      "description": "CARDNAME deals damage to each player equal to half that player's life total, rounded down.",
+      "effect": {
+        "description": "CARDNAME deals damage to each player equal to half that player's life total, rounded down.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,53 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "ValidTgts": "Creature.blockingEquipped",
-          "WinSubAbility": "ExileIt",
-          "LoseSubAbility": "DamageIt",
-          "SpellDescription": "Choose target creature that's blocking equipped creature. Flip a coin. If you win the flip, exile the chosen creature. Otherwise, CARDNAME deals 1 damage to it.",
-          "TgtPrompt": "Select target creature blocking equipped creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<2>"
+        "cost": "PayEnergy<2>",
+        "type": "Mana"
       },
+      "description": "Choose target creature that's blocking equipped creature. Flip a coin. If you win the flip, exile the chosen creature. Otherwise, CARDNAME deals 1 damage to it.",
+      "effect": {
+        "description": "Choose target creature that's blocking equipped creature. Flip a coin. If you win the flip, exile the chosen creature. Otherwise, CARDNAME deals 1 damage to it.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.blockingEquipped",
-        "WinSubAbility": "ExileIt",
-        "LoseSubAbility": "DamageIt",
-        "SpellDescription": "Choose target creature that's blocking equipped creature. Flip a coin. If you win the flip, exile the chosen creature. Otherwise, CARDNAME deals 1 damage to it.",
-        "TgtPrompt": "Select target creature blocking equipped creature"
-      }
+      "target_prompt": "Select target creature blocking equipped creature"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever equipped creature attacks, you get {E}{E} (two energy counters).",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigEnergy",
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature attacks, you get {E}{E} (two energy counters)."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+1.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

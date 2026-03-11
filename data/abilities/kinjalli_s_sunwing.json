@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Creatures your opponents control enter tapped.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Creature.OppCtrl",
-        "Description": "Creatures your opponents control enter tapped.",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

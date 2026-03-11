@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it deals 1 damage to target creature an opponent controls. If that creature is a Zombie, CARDNAME deals 2 damage to that creature instead.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, it deals 1 damage to target creature an opponent controls. If that creature is a Zombie, CARDNAME deals 2 damage to that creature instead.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDealDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

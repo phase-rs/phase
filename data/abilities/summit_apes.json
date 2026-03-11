@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Mountain",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Mountain, CARDNAME has menace.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as you control a Mountain, CARDNAME has menace.",
-        "AddKeyword": "Menace",
-        "IsPresent": "Mountain.YouCtrl",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

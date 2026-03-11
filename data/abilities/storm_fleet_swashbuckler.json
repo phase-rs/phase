@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has double strike as long as you have the city's blessing.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has double strike as long as you have the city's blessing.",
-        "Condition": "Blessing"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

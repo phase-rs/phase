@@ -2,111 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDraw",
-          "TargetMin": "0",
-          "Planeswalker": "True",
-          "StaticAbilities": "Unblockable",
-          "TgtPrompt": "Select target creature you control",
-          "ExileOnMoved": "Battlefield",
-          "TargetMax": "1",
-          "ValidTgts": "Creature.YouCtrl",
-          "RememberObjects": "Targeted",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Up to one target creature you control can't be blocked this turn. Draw a card, then discard a card."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Up to one target creature you control can't be blocked this turn. Draw a card, then discard a card.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "StaticAbilities": "Unblockable",
-        "TgtPrompt": "Select target creature you control",
-        "ExileOnMoved": "Battlefield",
-        "TargetMax": "1",
-        "ValidTgts": "Creature.YouCtrl",
-        "RememberObjects": "Targeted",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Up to one target creature you control can't be blocked this turn. Draw a card, then discard a card."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/1 blue Ninja creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_2_1_ninja",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 2/1 blue Ninja creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Always",
-          "Planeswalker": "True",
-          "Image": "emblem_kaito_cunning_infiltrator",
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "Name": "Emblem — Kaito, Cunning Infiltrator",
-          "SpellDescription": "You get an emblem with \"Whenever a player casts a spell, you create a 2/1 blue Ninja creature token.\"",
-          "Stackable": "False",
-          "Triggers": "CastTrig"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -9
+        "amount": -9,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Always",
-        "Planeswalker": "True",
-        "Image": "emblem_kaito_cunning_infiltrator",
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "Name": "Emblem — Kaito, Cunning Infiltrator",
-        "SpellDescription": "You get an emblem with \"Whenever a player casts a spell, you create a 2/1 blue Ninja creature token.\"",
-        "Stackable": "False",
-        "Triggers": "CastTrig"
-      }
+      "description": "You get an emblem with \"Whenever a player casts a spell, you create a 2/1 blue Ninja creature token.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to a player, put a loyalty counter on NICKNAME.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, put a loyalty counter on NICKNAME.",
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Player",
-        "Execute": "TrigLoyalty",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

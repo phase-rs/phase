@@ -1,29 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.!token+Other+YouCtrl",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever another nontoken creature you control dies, put a +1/+1 counter on CARDNAME. If that creature was a Cleric, you may draw a card. If you do, you lose 1 life.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has lifelink as long as it has five or more +1/+1 counters on it.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has lifelink as long as it has five or more +1/+1 counters on it.",
-        "Affected": "Card.Self+counters_GE5_P1P1",
-        "AddKeyword": "Lifelink"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another nontoken creature you control dies, put a +1/+1 counter on CARDNAME. If that creature was a Cleric, you may draw a card. If you do, you lose 1 life.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

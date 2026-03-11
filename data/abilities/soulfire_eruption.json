@@ -2,39 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "ValidTgts": "Any",
-          "TgtPrompt": "Choose any number of target creatures, planeswalkers, and/or players",
-          "RepeatSubAbility": "DBDig",
-          "TargetMin": "0",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Choose any number of target creatures, planeswalkers, and/or players. For each of them, exile the top card of your library, then CARDNAME deals damage equal to that card's mana value to that permanent or player. You may play the exiled cards until the end of your next turn.",
-          "RepeatTargeted": "True",
-          "TargetMax": "MaxTgt",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": null,
+      "description": "Choose any number of target creatures, planeswalkers, and/or players. For each of them, exile the top card of your library, then CARDNAME deals damage equal to that card's mana value to that permanent or player. You may play the exiled cards until the end of your next turn.",
+      "effect": {
+        "description": "Choose any number of target creatures, planeswalkers, and/or players. For each of them, exile the top card of your library, then CARDNAME deals damage equal to that card's mana value to that permanent or player. You may play the exiled cards until the end of your next turn.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Any",
-        "TgtPrompt": "Choose any number of target creatures, planeswalkers, and/or players",
-        "RepeatSubAbility": "DBDig",
-        "TargetMin": "0",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Choose any number of target creatures, planeswalkers, and/or players. For each of them, exile the top card of your library, then CARDNAME deals damage equal to that card's mana value to that permanent or player. You may play the exiled cards until the end of your next turn.",
-        "RepeatTargeted": "True",
-        "TargetMax": "MaxTgt",
-        "SubAbility": "DBEffect"
-      }
+      "target_prompt": "Choose any number of target creatures, planeswalkers, and/or players"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

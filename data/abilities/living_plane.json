@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "All lands are 1/1 creatures that are still lands.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land",
-        "Description": "All lands are 1/1 creatures that are still lands.",
-        "SetToughness": "1",
-        "AddType": "Creature",
-        "SetPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

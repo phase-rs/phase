@@ -1,17 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has shadow. Prevent all damage that would be dealt by enchanted creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Shadow & Prevent all damage that would be dealt by CARDNAME.",
-        "Description": "Enchanted creature has shadow. Prevent all damage that would be dealt by enchanted creature."
-      }
+      "modifications": [
+        {
+          "keyword": "Shadow",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Prevent",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "all",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "damage",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "that",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "would",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "be",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "dealt",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "by",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "CARDNAME.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

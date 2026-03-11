@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Hellbent — As long as you have no cards in hand, CARDNAME gets +1/+0 and has \"{B}: Regenerate CARDNAME.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "Hellbent — As long as you have no cards in hand, CARDNAME gets +1/+0 and has \"{B}: Regenerate CARDNAME.\"",
-        "AddAbility": "Pump",
-        "AddPower": "1",
-        "Condition": "Hellbent"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "ability": "Pump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

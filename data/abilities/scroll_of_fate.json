@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Manifest",
-        "params": {
-          "Choices": "Card.YouCtrl",
-          "ChoiceZone": "Hand",
-          "SpellDescription": "Manifest a card from your hand. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up at any time for its mana cost if it's a creature card.)"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card.YouCtrl",
-        "ChoiceZone": "Hand",
-        "SpellDescription": "Manifest a card from your hand. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up at any time for its mana cost if it's a creature card.)"
-      }
+      "description": "Manifest a card from your hand. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up at any time for its mana cost if it's a creature card.)",
+      "effect": {
+        "description": "Manifest a card from your hand. (Put that card onto the battlefield face down as a 2/2 creature. Turn it face up at any time for its mana cost if it's a creature card.)",
+        "name": "Manifest",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

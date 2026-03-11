@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "Modifier": "Y",
-          "SpellDescription": "Roll a d20 and add the number of cards in your hand.",
-          "ResultSubAbilities": "1-14:DBDraw,Else:DBScry",
-          "Sides": "20"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Modifier": "Y",
-        "SpellDescription": "Roll a d20 and add the number of cards in your hand.",
-        "ResultSubAbilities": "1-14:DBDraw,Else:DBScry",
-        "Sides": "20"
-      }
+      "description": "Roll a d20 and add the number of cards in your hand.",
+      "effect": {
+        "description": "Roll a d20 and add the number of cards in your hand.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

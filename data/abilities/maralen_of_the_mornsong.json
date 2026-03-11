@@ -1,27 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
-        "ValidPlayer": "Player",
-        "Phase": "Draw",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDrain"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantDraw",
-      "params": {
-        "ValidPlayer": "Player",
-        "Description": "Players can't draw cards."
-      }
+      "description": "Players can't draw cards.",
+      "mode": "CantDraw"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+      "mode": "Phase",
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

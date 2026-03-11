@@ -2,28 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target land becomes a 3/3 creature that's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, target land becomes a 3/3 creature that's still a land."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

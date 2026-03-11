@@ -2,53 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "MayChooseTarget": "True",
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
-          "TargetType": "Spell"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "7"
+            "cost": "7",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MayChooseTarget": "True",
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
-        "TargetType": "Spell"
-      }
+      "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would copy a spell one or more times, instead copy it that many times plus an additional time. You may choose new targets for the additional copy.",
       "event": {
         "Other": "CopySpell"
-      },
-      "params": {
-        "ReplaceWith": "AddOneMore",
-        "ActiveZones": "Battlefield",
-        "Description": "If you would copy a spell one or more times, instead copy it that many times plus an additional time. You may choose new targets for the additional copy.",
-        "ValidPlayer": "You",
-        "ValidSpell": "Spell"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

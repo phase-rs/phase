@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Alliance — Whenever one or more other creatures you control enter, seek a land card, then put it onto the battlefield tapped. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Alliance — Whenever one or more other creatures you control enter, seek a land card, then put it onto the battlefield tapped. This ability triggers only once each turn.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ActivationLimit": "1",
-        "Execute": "TrigSeek",
-        "ValidCards": "Creature.Other+YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

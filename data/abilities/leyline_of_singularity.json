@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All nonland permanents are legendary.",
       "mode": "Continuous",
-      "params": {
-        "Description": "All nonland permanents are legendary.",
-        "Affected": "Permanent.nonLand",
-        "AddType": "Legendary"
-      }
+      "modifications": [
+        {
+          "core_type": "Legendary",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

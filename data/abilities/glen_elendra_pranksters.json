@@ -1,21 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell during an opponent's turn, you may return target creature you control to its owner's hand.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell during an opponent's turn, you may return target creature you control to its owner's hand.",
-        "OpponentTurn": "True",
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You",
-        "Execute": "TrigChangeZone"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

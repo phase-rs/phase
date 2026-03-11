@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Branch",
-        "params": {
-          "FalseSubAbility": "DBSuspect",
-          "SpellDescription": "If CARDNAME is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
-          "StackDescription": "SpellDescription",
-          "BranchConditionSVar": "Count$Valid Card.Self+IsSuspected",
-          "TrueSubAbility": "DBPutCounter"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 B"
+        "cost": "2 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "FalseSubAbility": "DBSuspect",
-        "SpellDescription": "If CARDNAME is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
-        "StackDescription": "SpellDescription",
-        "BranchConditionSVar": "Count$Valid Card.Self+IsSuspected",
-        "TrueSubAbility": "DBPutCounter"
-      }
+      "description": "If CARDNAME is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
+      "effect": {
+        "description": "If CARDNAME is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
+        "name": "Branch",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, you lose 1 life if you don't control a Demon.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you lose 1 life if you don't control a Demon.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, you lose 1 life if you don't control a Demon.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you lose 1 life if you don't control a Demon.",
-        "Secondary": "True",
-        "Execute": "TrigLoseLife"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,42 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Surveil 1. (To surveil 1, look at the top card of your library. You may put that card into your graveyard.)"
-      }
+      "description": "Surveil 1. (To surveil 1, look at the top card of your library. You may put that card into your graveyard.)",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +2/+0 as long as you control an Island.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "2",
-        "IsPresent": "Island.YouCtrl",
-        "Description": "CARDNAME gets +2/+0 as long as you control an Island."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

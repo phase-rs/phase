@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "For each opponent, you create a token that's a copy of up to one target creature that player controls.",
-          "ValidTgts": "Creature.OppCtrl",
-          "TgtPrompt": "For each opponent, select up to one target creature that they control",
-          "TargetMin": "0",
-          "TargetMax": "OneEach",
-          "TargetsForEachPlayer": "True"
-        }
-      },
       "cost": null,
+      "description": "For each opponent, you create a token that's a copy of up to one target creature that player controls.",
+      "effect": {
+        "description": "For each opponent, you create a token that's a copy of up to one target creature that player controls.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each opponent, you create a token that's a copy of up to one target creature that player controls.",
-        "ValidTgts": "Creature.OppCtrl",
-        "TgtPrompt": "For each opponent, select up to one target creature that they control",
-        "TargetMin": "0",
-        "TargetMax": "OneEach",
-        "TargetsForEachPlayer": "True"
-      }
+      "target_prompt": "For each opponent, select up to one target creature that they control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

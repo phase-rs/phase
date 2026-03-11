@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, destroy up to three target nonland permanents.",
       "mode": "SetInMotion",
-      "params": {
-        "Execute": "DarkEffect",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, destroy up to three target nonland permanents."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

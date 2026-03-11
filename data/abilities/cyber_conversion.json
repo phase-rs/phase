@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "FaceDownToughness": "2",
-          "SpellDescription": "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
-          "Mode": "TurnFaceDown",
-          "FaceDownPower": "2",
-          "FaceDownSetType": "Artifact & Creature & Cyberman",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "FaceDownToughness": "2",
-        "SpellDescription": "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
-        "Mode": "TurnFaceDown",
-        "FaceDownPower": "2",
-        "FaceDownSetType": "Artifact & Creature & Cyberman",
-        "ValidTgts": "Creature"
-      }
+      "description": "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
+      "effect": {
+        "description": "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

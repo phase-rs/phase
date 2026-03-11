@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Exile",
-        "destination": "Graveyard",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.faceUp"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "SpellDescription": "Put target face-up exiled card into its owner's graveyard."
-      }
+      "description": "Put target face-up exiled card into its owner's graveyard.",
+      "effect": {
+        "destination": "Graveyard",
+        "origin": "Exile",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

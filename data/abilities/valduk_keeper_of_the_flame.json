@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, for each Aura and Equipment attached to CARDNAME, create a 3/1 red Elemental creature token with trample and haste. Exile those tokens at the beginning of the next end step.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, for each Aura and Equipment attached to CARDNAME, create a 3/1 red Elemental creature token with trample and haste. Exile those tokens at the beginning of the next end step.",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

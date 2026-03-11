@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Waterbend<3>",
+        "type": "Mana"
+      },
+      "description": "This creature has base power and toughness 5/2 until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 5,
-        "toughness": 2,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Waterbend<3>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This creature has base power and toughness 5/2 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

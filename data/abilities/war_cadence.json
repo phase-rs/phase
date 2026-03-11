@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "This turn, creatures can't block unless their controller pays {X} for each blocking creature they control.",
-          "StaticAbilities": "CadenceStaticAb",
-          "SetChosenNumber": "X",
-          "Stackable": "False",
-          "AILogic": "RestrictBlocking"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X R"
+        "cost": "X R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This turn, creatures can't block unless their controller pays {X} for each blocking creature they control.",
-        "StaticAbilities": "CadenceStaticAb",
-        "SetChosenNumber": "X",
-        "Stackable": "False",
-        "AILogic": "RestrictBlocking"
-      }
+      "description": "This turn, creatures can't block unless their controller pays {X} for each blocking creature they control.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

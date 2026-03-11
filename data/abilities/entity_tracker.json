@@ -1,31 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidCard": "Enchantment.YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card.",
       "mode": "FullyUnlock",
-      "params": {
-        "ValidPlayer": "You",
-        "ValidCard": "Card.Room",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Room"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

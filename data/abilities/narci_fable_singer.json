@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice an enchantment, draw a card.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerDescription": "Whenever you sacrifice an enchantment, draw a card.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever the final chapter ability of a Saga you control resolves, each opponent loses X life and you gain X life, where X is that Saga's mana value.",
       "mode": "AbilityResolves",
-      "params": {
-        "ValidSource": "Saga.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "ValidSpellAbility": "Triggered.LastChapter",
-        "Execute": "TrigDrain",
-        "TriggerDescription": "Whenever the final chapter ability of a Saga you control resolves, each opponent loses X life and you gain X life, where X is that Saga's mana value."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

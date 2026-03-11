@@ -2,32 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": null,
+      "description": "Exile up to one target artifact, up to one target creature, up to one target enchantment, up to one target planeswalker, and/or up to one target land.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "Creature",
-        "IsCurse": "True",
-        "TargetMin": "0",
-        "Imprint": "True",
-        "StackDescription": "None",
-        "SpellDescription": "Exile up to one target artifact, up to one target creature, up to one target enchantment, up to one target planeswalker, and/or up to one target land.",
-        "TgtPrompt": "Select up to one target artifact",
-        "TargetMax": "1"
-      }
+      "target_prompt": "Select up to one target artifact"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

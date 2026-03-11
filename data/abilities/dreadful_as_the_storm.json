@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Animate",
-        "power": 5,
-        "toughness": 5,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "TrigTempt",
-        "SpellDescription": "Target creature has base power and toughness 5/5 until end of turn. The Ring tempts you."
-      }
+      "description": "Target creature has base power and toughness 5/5 until end of turn. The Ring tempts you.",
+      "effect": {
+        "power": 5,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 5,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

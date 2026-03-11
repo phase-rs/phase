@@ -1,33 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As long as CARDNAME is tapped, other permanents enter tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Permanent",
-        "ActiveZones": "Battlefield",
-        "IsPresent": "Card.Self+tapped",
-        "ReplaceWith": "ETBTapped",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "As long as CARDNAME is tapped, other permanents enter tapped."
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     },
     {
+      "description": "As long as NICKNAME is untapped, other permanents enter untapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "As long as NICKNAME is untapped, other permanents enter untapped.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Permanent",
-        "Destination": "Battlefield",
-        "IsPresent": "Card.Self+untapped",
-        "ReplaceWith": "ETBUntapped"
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

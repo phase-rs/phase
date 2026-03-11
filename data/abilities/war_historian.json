@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has indestructible as long as it attacked a battle this turn.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "Description": "CARDNAME has indestructible as long as it attacked a battle this turn.",
-        "Affected": "Card.Self+attackedBattleThisTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

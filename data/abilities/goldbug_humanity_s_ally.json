@@ -1,65 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "SpellCast",
-          "params": {
-            "ValidCard": "Card.YouCtrl",
-            "ValidActivatingPlayer": "You",
-            "Execute": "TrigConvert",
-            "TriggerZones": "Battlefield",
-            "ActivatorThisTurnCast": "EQ2",
-            "TriggerDescription": "Whenever you cast your second spell each turn, convert NICKNAME."
-          }
+          "description": "Prevent all combat damage that would be dealt to attacking Humans you control.",
+          "event": "DamageDone"
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "DamageDone",
-          "params": {
-            "ActiveZones": "Battlefield",
-            "IsCombat": "True",
-            "Prevent": "True",
-            "ValidTarget": "Human.attacking+YouCtrl",
-            "Description": "Prevent all combat damage that would be dealt to attacking Humans you control."
+          "description": "Whenever you cast your second spell each turn, convert NICKNAME.",
+          "mode": "SpellCast",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "type": "Typed"
           }
         }
       ]
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "Attacks",
-          "params": {
-            "Execute": "TrigDraw",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME and at least one Human attack, draw a card and convert NICKNAME.",
-            "IsPresent": "Human.attacking+Other"
-          }
+          "description": "Human spells you control can't be countered.",
+          "event": "Counter"
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Counter",
-          "params": {
-            "ValidSA": "Spell.Human+YouCtrl",
-            "ActiveZones": "Battlefield",
-            "Description": "Human spells you control can't be countered.",
-            "Layer": "CantHappen"
+          "description": "Whenever NICKNAME and at least one Human attack, draw a card and convert NICKNAME.",
+          "mode": "Attacks",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

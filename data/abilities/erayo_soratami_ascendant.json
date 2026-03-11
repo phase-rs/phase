@@ -1,44 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever the fourth spell of a turn is cast, flip CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigFlip",
-            "TriggerDescription": "Whenever the fourth spell of a turn is cast, flip CARDNAME.",
-            "NoResolvingCheck": "True",
-            "CheckSVar": "NumCast",
-            "SVarCompare": "EQ4"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever an opponent casts their first spell each turn, counter that spell.",
           "mode": "SpellCast",
-          "params": {
-            "ActivatorThisTurnCast": "EQ1",
-            "ValidActivatingPlayer": "Player.Opponent",
-            "Execute": "TrigCounter",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever an opponent casts their first spell each turn, counter that spell."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

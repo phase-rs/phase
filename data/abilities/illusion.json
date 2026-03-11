@@ -1,57 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "ChooseColor",
-            "params": {
-              "SubAbility": "Animate",
-              "Defined": "You",
-              "SpellDescription": "Target spell or permanent becomes the color of your choice until end of turn."
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "Animate",
-            "Defined": "You",
-            "SpellDescription": "Target spell or permanent becomes the color of your choice until end of turn."
-          }
+          "description": "Target spell or permanent becomes the color of your choice until end of turn.",
+          "effect": {
+            "description": "Target spell or permanent becomes the color of your choice until end of turn.",
+            "name": "ChooseColor",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy target artifact."
-          }
+          "description": "Destroy target artifact.",
+          "effect": {
+            "target": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

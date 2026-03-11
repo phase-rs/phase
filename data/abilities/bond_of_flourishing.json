@@ -2,28 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Hand"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top three cards of your library. You may reveal a permanent card from among them and put it into your hand. Put the rest on the bottom of your library in any order. You gain 3 life.",
-        "DestinationZone2": "Library",
-        "Optional": "True",
-        "ChangeValid": "Permanent",
-        "ChangeNum": "1",
-        "LibraryPosition": "-1",
-        "RestRandomOrder": "True",
-        "SubAbility": "GainLife"
-      }
+      "description": "Look at the top three cards of your library. You may reveal a permanent card from among them and put it into your hand. Put the rest on the bottom of your library in any order. You gain 3 life.",
+      "effect": {
+        "count": 3,
+        "destination": "Hand",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

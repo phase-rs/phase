@@ -1,17 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "The \"legend rule\" doesn't apply.",
       "mode": {
         "Other": "IgnoreLegendRule"
-      },
-      "params": {
-        "Description": "The \"legend rule\" doesn't apply."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

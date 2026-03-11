@@ -1,68 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Library",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact,Enchantment"
-            }
-          },
           "cost": null,
+          "description": "Put target artifact or enchantment on the bottom of its owner's library.",
+          "effect": {
+            "destination": "Library",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Artifact,Enchantment",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target artifact or enchantment",
-            "LibraryPosition": "-1",
-            "SpellDescription": "Put target artifact or enchantment on the bottom of its owner's library."
-          }
+          "target_prompt": "Select target artifact or enchantment"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Opponent"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberChanged": "True",
-            "IsCurse": "True",
-            "StackDescription": "SpellDescription",
-            "Chooser": "You",
-            "AILogic": "BestCard",
-            "ChangeType": "Card",
-            "ChangeNum": "1",
-            "SubAbility": "DBGainLife",
-            "SpellDescription": "Search target opponent's library for a card and exile it. You gain life equal to its mana value. Then that player shuffles.",
-            "DefinedPlayer": "Targeted"
-          }
+          "description": "Search target opponent's library for a card and exile it. You gain life equal to its mana value. Then that player shuffles.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Library",
+            "target": {
+              "type": "Player"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

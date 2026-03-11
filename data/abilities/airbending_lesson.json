@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Airbend",
-        "params": {
-          "ValidTgts": "Permanent.nonLand",
-          "SubAbility": "DBDraw",
-          "TgtPrompt": "Select target nonland permanent",
-          "SpellDescription": "Airbend target nonland permanent. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)"
-        }
-      },
       "cost": null,
+      "description": "Airbend target nonland permanent. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+      "effect": {
+        "description": "Airbend target nonland permanent. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+        "name": "Airbend",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent.nonLand",
-        "SubAbility": "DBDraw",
-        "TgtPrompt": "Select target nonland permanent",
-        "SpellDescription": "Airbend target nonland permanent. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)"
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

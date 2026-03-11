@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You have no maximum hand size.",
-        "EffectZone": "Battlefield",
-        "SetMaxHandSize": "Unlimited"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
       "event": "Moved",
-      "params": {
-        "Discard": "True",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DiscardToLibrary",
-        "ValidCard": "Card.YouCtrl",
-        "EffectOnly": "True",
-        "Description": "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
-        "Optional": "True"
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have no maximum hand size.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

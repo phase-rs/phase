@@ -1,83 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, look at the top four cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Execute": "TrigDig",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, look at the top four cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your end step, if you control four or more creatures, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "TriggerDescription": "At the beginning of your end step, if you control four or more creatures, transform CARDNAME.",
-            "Execute": "DBTransform",
-            "IsPresent": "Creature.YouCtrl",
-            "Phase": "End of Turn",
-            "PresentCompare": "GE4",
-            "TriggerZones": "Battlefield"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "Amount": "1",
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "SpellDescription": "Add {G}."
-          }
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "Amount": "X",
-              "SpellDescription": "Add {G} for each creature you control."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "X",
-            "SpellDescription": "Add {G} for each creature you control."
-          }
+          "description": "Add {G} for each creature you control.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

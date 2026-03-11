@@ -1,52 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, this Room deals damage equal to the number of cards in your hand to target creature an opponent controls.",
           "mode": "UnlockDoor",
-          "params": {
-            "ValidCard": "Card.Self",
-            "ThisDoor": "True",
-            "TriggerDescription": "When you unlock this door, this Room deals damage equal to the number of cards in your hand to target creature an opponent controls.",
-            "ValidPlayer": "You",
-            "Execute": "TrigDamage"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, draw a card.",
-            "Execute": "TrigDraw"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "You have no maximum hand size.",
-            "SetMaxHandSize": "Unlimited",
-            "Affected": "You"
-          }
+          "affected": {
+            "card_type": "You",
+            "type": "Typed"
+          },
+          "description": "You have no maximum hand size.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, draw a card.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

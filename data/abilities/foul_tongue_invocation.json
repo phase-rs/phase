@@ -2,38 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player sacrifices a creature. If you revealed a Dragon card or controlled a Dragon as you cast this spell, you gain 4 life.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Creature",
-        "SubAbility": "DBGainLife",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Target player sacrifices a creature. If you revealed a Dragon card or controlled a Dragon as you cast this spell, you gain 4 life."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Cost": "Reveal<1/Dragon>",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "ValidSA": "Spell",
-        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

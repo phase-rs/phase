@@ -2,46 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S",
+        "type": "Mana"
+      },
+      "description": "Enchanted creature gains defender until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SpellDescription": "Enchanted creature gains defender until end of turn.",
-        "KW": "Defender",
-        "Defined": "Enchanted"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't block, and its activated abilities can't be activated."
-      }
+      "description": "Enchanted creature can't block, and its activated abilities can't be activated.",
+      "mode": "CantBlock"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Secondary": "True",
-        "Description": "Enchanted creature can't block, and its activated abilities can't be activated."
-      }
+      "description": "Enchanted creature can't block, and its activated abilities can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, destroy it at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DelTrig",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, destroy it at end of combat.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, destroy it at end of combat.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, destroy it at end of combat.",
-        "Execute": "DelTrig"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

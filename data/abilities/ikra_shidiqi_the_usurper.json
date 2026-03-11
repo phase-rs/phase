@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to a player, you gain life equal to that creature's toughness.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, you gain life equal to that creature's toughness.",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigGainLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,38 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was cast, target opponent creates a token that's a copy of it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+wasCast",
-        "TriggerDescription": "When CARDNAME enters, if it was cast, target opponent creates a token that's a copy of it.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigCopy"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent who controls an artifact named Wedding Ring draws a card during their turn, you draw a card.",
       "mode": "Drawn",
-      "params": {
-        "ValidCard": "Card.OppOwn",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever an opponent who controls an artifact named Wedding Ring draws a card during their turn, you draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.Opponent+Active+controlsArtifact.namedWedding Ring"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent who controls an artifact named Wedding Ring gains life during their turn, you gain that much life.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.Opponent+Active+controlsArtifact.namedWedding Ring",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever an opponent who controls an artifact named Wedding Ring gains life during their turn, you gain that much life."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

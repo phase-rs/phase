@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "CloneTarget": "Valid Creature.NotDefinedTargeted",
-          "ValidTgts": "Creature.nonLegendary",
-          "StackDescription": "REP target nonlegendary creature_{c:Targeted}",
-          "TgtPrompt": "Select target nonlegendary creature",
-          "Duration": "UntilEndOfTurn",
-          "Defined": "Targeted",
-          "SpellDescription": "Each other creature becomes a copy of target nonlegendary creature until end of turn."
-        }
-      },
       "cost": null,
+      "description": "Each other creature becomes a copy of target nonlegendary creature until end of turn.",
+      "duration": "UntilEndOfTurn",
+      "effect": {
+        "description": "Each other creature becomes a copy of target nonlegendary creature until end of turn.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "CloneTarget": "Valid Creature.NotDefinedTargeted",
-        "ValidTgts": "Creature.nonLegendary",
-        "StackDescription": "REP target nonlegendary creature_{c:Targeted}",
-        "TgtPrompt": "Select target nonlegendary creature",
-        "Duration": "UntilEndOfTurn",
-        "Defined": "Targeted",
-        "SpellDescription": "Each other creature becomes a copy of target nonlegendary creature until end of turn."
-      }
+      "target_prompt": "Select target nonlegendary creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

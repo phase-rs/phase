@@ -1,24 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "The first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of enchanted permanent.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "Layer": "Copy",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Optional": "True",
-        "ReplaceWith": "DBCopy",
-        "SVarCompare": "EQ0",
-        "Description": "The first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of enchanted permanent."
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "TrigExile"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

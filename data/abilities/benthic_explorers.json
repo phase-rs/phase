@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "ReflectProperty": "Produce",
-          "SpellDescription": "Add one mana of any type that land could produce.",
-          "Valid": "Defined.Untapped",
-          "ColorOrType": "Type"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "untapYType<1/Land.OppCtrl/land>"
+            "cost": "untapYType<1/Land.OppCtrl/land>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReflectProperty": "Produce",
-        "SpellDescription": "Add one mana of any type that land could produce.",
-        "Valid": "Defined.Untapped",
-        "ColorOrType": "Type"
-      }
+      "description": "Add one mana of any type that land could produce.",
+      "effect": {
+        "description": "Add one mana of any type that land could produce.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

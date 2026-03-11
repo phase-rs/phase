@@ -1,38 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Suspended Animation — Whenever a creature dies, exile it. Its controller scries 1.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Suspended Animation — Whenever a creature dies, exile it. Its controller scries 1.",
-        "Execute": "TrigChange",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature",
-        "TriggerZones": "Command",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, create X 3/3 black Dalek artifact creature tokens with menace, where X is one plus the number of cards exiled with CARDNAME.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, create X 3/3 black Dalek artifact creature tokens with menace, where X is one plus the number of cards exiled with CARDNAME.",
-        "Execute": "TrigToken"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Origin": "Command",
-        "ValidCard": "Card.Self",
-        "Static": "True"
+      "origin": "Command",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,62 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "WerewolfTransformCondition": "True",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME."
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "Regenerate",
-            "params": {
-              "SpellDescription": "Regenerate CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Regenerate CARDNAME."
-          }
+          "description": "Regenerate CARDNAME.",
+          "effect": {
+            "description": "Regenerate CARDNAME.",
+            "name": "Regenerate",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Execute": "TrigTransform",
-            "Phase": "Upkeep",
-            "WerewolfUntransformCondition": "True",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

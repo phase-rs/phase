@@ -2,24 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 4
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<2/Card.nonLand+WithSameName/nonland cards with the same name>"
+        "cost": "Discard<2/Card.nonLand+WithSameName/nonland cards with the same name>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "Discard two nonland cards with the same name",
-        "SpellDescription": "Draw four cards."
-      }
+      "description": "Draw four cards.",
+      "effect": {
+        "count": 4,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

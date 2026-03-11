@@ -2,63 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "Valid": "Defined.Imprinted",
-          "ReflectProperty": "Is",
-          "ColorOrType": "Color",
-          "SpellDescription": "Add one mana of any of the exiled card's colors."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Defined.Imprinted",
-        "ReflectProperty": "Is",
-        "ColorOrType": "Color",
-        "SpellDescription": "Add one mana of any of the exiled card's colors."
-      }
+      "description": "Add one mana of any of the exiled card's colors.",
+      "effect": {
+        "description": "Add one mana of any of the exiled card's colors.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile a nonartifact, nonland card from your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile a nonartifact, nonland card from your hand."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
-        "Static": "True",
-        "Execute": "DBForget",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSourceLKI"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Zombie"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B"
+            "cost": "2 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target Zombie creature gets +2/+2 and has fear for as long as CARDNAME remains tapped. (It can't be blocked except by artifact creatures and/or black creatures.)",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Zombie"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 2,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilUntaps",
-        "AILogic": "ContinuousBonus",
-        "SpellDescription": "Target Zombie creature gets +2/+2 and has fear for as long as CARDNAME remains tapped. (It can't be blocked except by artifact creatures and/or black creatures.)",
-        "TgtPrompt": "Select target Zombie creature",
-        "KW": "Fear"
-      }
+      "target_prompt": "Select target Zombie creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

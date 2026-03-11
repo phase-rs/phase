@@ -1,29 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked by green creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EnchantedBy",
-        "ValidBlocker": "Creature.Green",
-        "Description": "Enchanted creature can't be blocked by green creatures."
       }
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Enchanted creature gets +2/+2 as long as an opponent controls a green permanent.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Permanent.Green+OppCtrl",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Enchanted creature gets +2/+2 as long as an opponent controls a green permanent."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

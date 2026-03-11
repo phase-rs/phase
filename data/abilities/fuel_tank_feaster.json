@@ -2,38 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color.",
-          "Amount": "1"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color.",
-        "Amount": "1"
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first main phase, a random creature card with the greatest mana value among creature cards in your hand perpetually gains \"This spell costs {1} less to cast.\"",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main1",
-        "ValidPlayer": "You",
-        "Execute": "TrigRandom",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your first main phase, a random creature card with the greatest mana value among creature cards in your hand perpetually gains \"This spell costs {1} less to cast.\""
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

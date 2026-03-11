@@ -1,31 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-3 2/6 Vigilance",
       "mode": "Continuous",
-      "params": {
-        "Description": "LEVEL 1-3 2/6 Vigilance",
-        "Affected": "Card.Self",
-        "SetPower": "2",
-        "AddKeyword": "Vigilance",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE3_LEVEL",
-        "SetToughness": "6"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 6
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 4+ 3/10 Vigilance",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE4_LEVEL",
-        "Description": "LEVEL 4+ 3/10 Vigilance",
-        "Affected": "Card.Self",
-        "SetPower": "3",
-        "SetToughness": "10",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 10
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

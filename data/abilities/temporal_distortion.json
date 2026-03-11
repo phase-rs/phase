@@ -1,41 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Taps",
-      "params": {
-        "ValidCard": "Creature,Land",
-        "TriggerDescription": "Whenever a creature or land becomes tapped, put an hourglass counter on it.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.",
-        "Execute": "TrigRemoveCounter",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player"
+      "description": "Each permanent with an hourglass counter on it doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "Description": "Each permanent with an hourglass counter on it doesn't untap during its controller's untap step.",
-        "ValidCard": "Permanent.counters_GE1_HOURGLASS"
+      "description": "Whenever a creature or land becomes tapped, put an hourglass counter on it.",
+      "mode": "Taps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature,Land",
+        "type": "Typed"
       }
+    },
+    {
+      "description": "At the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

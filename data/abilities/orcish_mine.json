@@ -1,38 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME.",
       "mode": "Taps",
-      "params": {
-        "Execute": "TrigRemoveCounter",
-        "ValidCard": "Card.AttachedBy",
-        "Secondary": "True",
-        "TriggerDescription": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME."
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When the last ore counter is removed from CARDNAME, destroy enchanted land and CARDNAME deals 2 damage to that land's controller.",
       "mode": "CounterRemoved",
-      "params": {
-        "Execute": "DBDamage",
-        "CounterType": "ORE",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When the last ore counter is removed from CARDNAME, destroy enchanted land and CARDNAME deals 2 damage to that land's controller.",
-        "NewCounterAmount": "0"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

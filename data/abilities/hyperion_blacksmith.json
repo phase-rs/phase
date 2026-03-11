@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "SpellDescription": "You may tap or untap target artifact an opponent controls.",
-          "TgtPrompt": "Select target artifact an opponent controls",
-          "ValidTgts": "Artifact.OppCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "You may tap or untap target artifact an opponent controls.",
+      "effect": {
+        "description": "You may tap or untap target artifact an opponent controls.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may tap or untap target artifact an opponent controls.",
-        "TgtPrompt": "Select target artifact an opponent controls",
-        "ValidTgts": "Artifact.OppCtrl"
-      }
+      "target_prompt": "Select target artifact an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

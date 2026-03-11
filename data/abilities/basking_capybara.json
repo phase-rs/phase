@@ -1,20 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Descend 4 — CARDNAME gets +3/+0 as long as there are four or more permanent cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Descend 4 — CARDNAME gets +3/+0 as long as there are four or more permanent cards in your graveyard.",
-        "PresentCompare": "GE4",
-        "AddPower": "3",
-        "PresentZone": "Graveyard",
-        "IsPresent": "Permanent.YouOwn",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

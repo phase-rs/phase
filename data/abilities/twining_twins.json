@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.!token"
-            }
-          },
           "cost": null,
+          "description": "Exile target nontoken creature. Return it to the battlefield under its owner's control at the beginning of the next end step.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DelTrig",
-            "SpellDescription": "Exile target nontoken creature. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-            "TgtPrompt": "Select target nontoken creature",
-            "RememberChanged": "True",
-            "StackDescription": "REP target nontoken creature_{c:Targeted}"
-          }
+          "target_prompt": "Select target nontoken creature"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

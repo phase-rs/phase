@@ -1,33 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When a creature dealt damage by CARDNAME this turn dies, flip CARDNAME.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigFlip",
-            "TriggerDescription": "When a creature dealt damage by CARDNAME this turn dies, flip CARDNAME.",
-            "Origin": "Battlefield",
-            "ValidCard": "Creature.DamagedBy",
-            "Destination": "Graveyard"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "DamagedBy"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

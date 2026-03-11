@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a permanent is returned to your hand, you may pay {1}. If you do, draw a card.",
+      "destination": "Hand",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a permanent is returned to your hand, you may pay {1}. If you do, draw a card.",
-        "ValidCard": "Card.YouOwn",
-        "Execute": "TrigDraw",
-        "Destination": "Hand"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

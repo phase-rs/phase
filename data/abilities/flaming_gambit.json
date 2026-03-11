@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "CARDNAME deals X damage to target player or planeswalker. That player may choose a creature they control and have CARDNAME deal that damage to it instead.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "CARDNAME deals X damage to target player or planeswalker. That player may choose a creature they control and have CARDNAME deal that damage to it instead.",
-        "TgtPrompt": "Select a player or planeswalker",
-        "SubAbility": "DBChooseCard"
-      }
+      "target_prompt": "Select a player or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

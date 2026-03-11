@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B",
+        "type": "Mana"
+      },
+      "description": "Put a -1/-1 counter on enchanted creature.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "M1M1",
         "count": 1,
+        "counter_type": "M1M1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "Defined": "Enchanted",
-        "SpellDescription": "Put a -1/-1 counter on enchanted creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

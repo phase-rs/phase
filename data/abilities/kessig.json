@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, each creature you control gets +2/+2, gains trample, and becomes a Werewolf in addition to its other types until end of turn."
-      }
+      "description": "Prevent all combat damage that would be dealt by non-Werewolf creatures.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "IsCombat": "True",
-        "ActiveZones": "Command",
-        "ValidSource": "Creature.nonWerewolf",
-        "Description": "Prevent all combat damage that would be dealt by non-Werewolf creatures."
-      }
+      "description": "Whenever chaos ensues, each creature you control gets +2/+2, gains trample, and becomes a Werewolf in addition to its other types until end of turn.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

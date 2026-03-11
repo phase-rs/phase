@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may discard a creature card. When you do, destroy target creature or planeswalker that player controls.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "Execute": "TrigImmediateTrig",
-        "OptionalDecider": "You",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may discard a creature card. When you do, destroy target creature or planeswalker that player controls."
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

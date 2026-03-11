@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Sacrifice a creature. CARDNAME deals damage equal to that creature's power to each creature without flying and each player.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice a creature. CARDNAME deals damage equal to that creature's power to each creature without flying and each player.",
-        "Amount": "1",
-        "RememberSacrificed": "True",
-        "SubAbility": "RuptureDmg",
-        "SacValid": "Creature"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

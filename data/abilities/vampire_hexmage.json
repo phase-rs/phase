@@ -2,30 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "All",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Remove all counters from target permanent."
-      }
+      "description": "Remove all counters from target permanent.",
+      "effect": {
+        "count": 1,
+        "counter_type": "All",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "RemoveCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,24 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls a Plains and you control a Mountain, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidPlayer": "You",
-        "ValidSA": "Spell",
-        "Cost": "0",
-        "Description": "If an opponent controls a Plains and you control a Mountain, you may cast this spell without paying its mana cost.",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "CheckSecondSVar": "Y"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

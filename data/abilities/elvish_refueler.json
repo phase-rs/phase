@@ -2,41 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 G",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter on this creature.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on this creature.",
-        "Exhaust": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "LT1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "During your turn, as long as you haven't activated an exhaust ability this turn, you may activate exhaust abilities as though they haven't been activated.",
       "mode": {
         "Other": "CanExhaust"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "SVarCompare": "LT1",
-        "Description": "During your turn, as long as you haven't activated an exhaust ability this turn, you may activate exhaust abilities as though they haven't been activated.",
-        "PlayerTurn": "You",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

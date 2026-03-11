@@ -1,45 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control are Plains.",
       "mode": "Continuous",
-      "params": {
-        "RemoveLandTypes": "True",
-        "AddType": "Plains",
-        "Description": "Lands you control are Plains.",
-        "Affected": "Land.YouCtrl"
-      }
+      "modifications": [
+        {
+          "core_type": "Plains",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Library,Graveyard,Exile,Command",
+      "description": "Nonland permanents you control are white. The same is true for spells you control and nonland cards you own that aren't on the battlefield.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.YouOwn+nonLand",
-        "SetColor": "White",
-        "AffectedZone": "Hand,Library,Graveyard,Exile,Command",
-        "Description": "Nonland permanents you control are white. The same is true for spells you control and nonland cards you own that aren't on the battlefield."
-      }
+      "modifications": [
+        {
+          "colors": [
+            "White"
+          ],
+          "type": "SetColor"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield,Stack",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.YouCtrl+nonLand",
-        "SetColor": "White",
-        "AffectedZone": "Battlefield,Stack"
-      }
+      "modifications": [
+        {
+          "colors": [
+            "White"
+          ],
+          "type": "SetColor"
+        }
+      ]
     },
     {
+      "description": "You may spend white mana as though it were mana of any color. You may spend other mana only as though it were colorless mana.",
       "mode": {
         "Other": "ManaConvert"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "Description": "You may spend white mana as though it were mana of any color. You may spend other mana only as though it were colorless mana.",
-        "ManaConversion": "White->AnyColor nonWhite<-C"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

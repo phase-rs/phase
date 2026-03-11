@@ -1,57 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "DestroyAll",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Destroy all creatures with power 3 or greater.",
-            "ValidCards": "Creature.powerGE3"
-          }
+          "description": "Destroy all creatures with power 3 or greater.",
+          "effect": {
+            "target": {
+              "type": "Any"
+            },
+            "type": "DestroyAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Return all creature cards with power 2 or less from your graveyard to your hand.",
-            "ChangeType": "Creature.powerLE2+YouCtrl"
-          }
+          "description": "Return all creature cards with power 2 or less from your graveyard to your hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZoneAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

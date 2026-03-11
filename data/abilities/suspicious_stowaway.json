@@ -1,65 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Card.Self",
-            "CombatDamage": "True",
-            "Execute": "TrigDraw",
-            "TriggerZones": "Battlefield",
-            "ValidTarget": "Player",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card, then discard a card."
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "description": "CARDNAME can't be blocked.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "Description": "CARDNAME can't be blocked.",
-            "ValidAttacker": "Creature.Self"
           }
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, draw a card, then discard a card.",
+          "mode": "DamageDone",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
+          }
+        }
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "DamageDone",
-          "params": {
-            "CombatDamage": "True",
-            "Execute": "TrigDrawN",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
-            "ValidSource": "Card.Self",
-            "ValidTarget": "Player"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "description": "CARDNAME can't be blocked.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "ValidAttacker": "Creature.Self",
-            "Description": "CARDNAME can't be blocked."
           }
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, draw a card.",
+          "mode": "DamageDone",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

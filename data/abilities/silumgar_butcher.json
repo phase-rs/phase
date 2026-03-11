@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, target creature gets -3/-3 until end of turn.",
       "mode": "Exploited",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "TriggerDescription": "When CARDNAME exploits a creature, target creature gets -3/-3 until end of turn.",
-        "Execute": "TrigPump",
-        "ValidSource": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

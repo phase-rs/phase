@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to each creature and each player this turn.",
-          "Amount": "1",
-          "Defined": "Valid Creature & Player"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to each creature and each player this turn.",
-        "Amount": "1",
-        "Defined": "Valid Creature & Player"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to each creature and each player this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to each creature and each player this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

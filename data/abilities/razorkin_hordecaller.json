@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, create a 1/1 red Gremlin creature token.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever you attack, create a 1/1 red Gremlin creature token.",
-        "Execute": "TrigToken",
-        "AttackingPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

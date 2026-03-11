@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.wasCastFromGraveyard"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell cast from a graveyard. Draw a card.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Counter target spell cast from a graveyard. Draw a card.",
-        "TgtPrompt": "Select target spell cast from a graveyard"
-      }
+      "target_prompt": "Select target spell cast from a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,32 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "When your commander deals combat damage to a player, if there is no monarch, you become the monarch.",
       "mode": "DamageDone",
-      "params": {
-        "CheckSVar": "Monarch",
-        "CombatDamage": "True",
-        "SVarCompare": "EQ0",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When your commander deals combat damage to a player, if there is no monarch, you become the monarch.",
-        "Execute": "TrigMonarch",
-        "ValidSource": "Card.IsCommander+YouOwn",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "At the beginning of the monarch's end step, that player draws a card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of the monarch's end step, that player draws a card.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "Player.isMonarch"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

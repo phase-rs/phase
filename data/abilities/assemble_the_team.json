@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search the top third of your library, rounded up, for a card. Put that card into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChooseFromDefined": "TopThirdOfLibrary",
-        "ChangeType": "Card",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "1",
-        "Mandatory": "True",
-        "SpellDescription": "Search the top third of your library, rounded up, for a card. Put that card into your hand, then shuffle."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

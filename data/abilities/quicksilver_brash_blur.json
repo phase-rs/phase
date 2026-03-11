@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 R",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter and a double strike counter on NICKNAME. (Activate each power-up ability only once. Reduce the cost by his mana cost if he entered this turn.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1,Double Strike",
         "count": 1,
+        "counter_type": "P1P1,Double Strike",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "PowerUp": "True",
-        "SpellDescription": "Put a +1/+1 counter and a double strike counter on NICKNAME. (Activate each power-up ability only once. Reduce the cost by his mana cost if he entered this turn.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

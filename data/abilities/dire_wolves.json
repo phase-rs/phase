@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has banding as long as you control a Plains.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Plains.YouCtrl",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has banding as long as you control a Plains.",
-        "AddKeyword": "Banding"
-      }
+      "modifications": [
+        {
+          "keyword": "Banding",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

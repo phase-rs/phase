@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, each opponent discards a card.",
       "mode": "Mutates",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDiscard",
-        "TriggerDescription": "Whenever this creature mutates, each opponent discards a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

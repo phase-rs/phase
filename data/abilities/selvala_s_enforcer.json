@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Parley — When CARDNAME enters, each player reveals the top card of their library. For each nonland card revealed this way, put a +1/+1 counter on CARDNAME. Then each player draws a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReveal",
-        "TriggerDescription": "Parley — When CARDNAME enters, each player reveals the top card of their library. For each nonland card revealed this way, put a +1/+1 counter on CARDNAME. Then each player draws a card.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

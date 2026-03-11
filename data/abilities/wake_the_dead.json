@@ -2,33 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Return X target creature cards from your graveyard to the battlefield. Sacrifice those creatures at the beginning of the next end step.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "BeginCombat->EndCombat",
-        "TgtPrompt": "Select X target creatures in your graveyard",
-        "GainControl": "True",
-        "AtEOT": "Sacrifice",
-        "TargetMin": "X",
-        "StackDescription": "Return X target creature cards [{c:Targeted}] from your graveyard to the battlefield. Sacrifice those creatures at the beginning of the next end step.",
-        "SpellDescription": "Return X target creature cards from your graveyard to the battlefield. Sacrifice those creatures at the beginning of the next end step.",
-        "TargetMax": "X",
-        "OpponentTurn": "True"
-      }
+      "target_prompt": "Select X target creatures in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

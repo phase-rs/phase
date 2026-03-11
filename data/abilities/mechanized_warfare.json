@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If a red or artifact source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 1 instead.",
-        "ValidTarget": "Player.Opponent,Permanent.OppCtrl",
-        "ReplaceWith": "DmgPlus2",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Card.RedSource+YouCtrl,Artifact.YouCtrl"
-      }
+      "description": "If a red or artifact source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 1 instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

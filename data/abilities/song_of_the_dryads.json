@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is a colorless Forest land.",
       "mode": "Continuous",
-      "params": {
-        "RemoveLandTypes": "True",
-        "SetColor": "Colorless",
-        "Affected": "Card.EnchantedBy",
-        "RemoveCardTypes": "True",
-        "AddType": "Land & Forest",
-        "Description": "Enchanted permanent is a colorless Forest land."
-      }
+      "modifications": [
+        {
+          "core_type": "Land & Forest",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

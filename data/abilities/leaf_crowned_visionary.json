@@ -1,31 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast an Elf spell, you may pay {G}. If you do, draw a card.",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Elf",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Elf",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Other Elves you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "Description": "Other Elves you control get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Elf.Other+YouCtrl",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast an Elf spell, you may pay {G}. If you do, draw a card.",
+      "mode": "SpellCast",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Elf",
+        "type": "Typed"
+      }
+    }
+  ]
 }

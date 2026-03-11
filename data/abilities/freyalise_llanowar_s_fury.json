@@ -2,68 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 green Elf Druid creature token with \"{T}: Add {G}.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_elf_druid_g",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 green Elf Druid creature token with \"{T}: Add {G}.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Destroy target artifact or enchantment.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target artifact or enchantment",
-        "SpellDescription": "Destroy target artifact or enchantment."
-      }
+      "target_prompt": "Select target artifact or enchantment"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card for each green creature you control.",
-        "Ultimate": "True",
-        "Defined": "You",
-        "Planeswalker": "True"
-      }
+      "description": "Draw a card for each green creature you control.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

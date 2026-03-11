@@ -1,33 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature card is put into an opponent's graveyard from their library, exile that card and create a 2/2 black Zombie creature token.",
-        "ValidCard": "Creature.!token+OppOwn",
-        "Origin": "Library",
-        "Destination": "Graveyard",
-        "Execute": "ExileAndToken",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "If a Zombie you control would deal combat damage to a player, instead that player mills that many cards.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If a Zombie you control would deal combat damage to a player, instead that player mills that many cards.",
-        "ExecuteMode": "PerTarget",
-        "ValidTarget": "Player",
-        "ActiveZones": "Battlefield",
-        "IsCombat": "True",
-        "ValidSource": "Creature.Zombie+YouCtrl",
-        "ReplaceWith": "Mill"
+      "description": "Whenever a creature card is put into an opponent's graveyard from their library, exile that card and create a 2/2 black Zombie creature token.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Library",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

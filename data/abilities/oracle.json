@@ -2,29 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+youCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
+      "description": "Untap target attacking creature you control and remove it from combat.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "Reconsider",
-        "ActivationZone": "Command",
-        "SpellDescription": "Untap target attacking creature you control and remove it from combat.",
-        "TgtPrompt": "Select target attacking creature you control"
-      }
+      "target_prompt": "Select target attacking creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

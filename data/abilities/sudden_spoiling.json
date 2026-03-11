@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "RemoveAllAbilities": "True",
-          "Toughness": "2",
-          "ValidCards": "Creature",
-          "ValidTgts": "Player",
-          "SpellDescription": "Until end of turn, creatures target player controls lose all abilities and have base power and toughness 0/2.",
-          "Power": "0"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveAllAbilities": "True",
-        "Toughness": "2",
-        "ValidCards": "Creature",
-        "ValidTgts": "Player",
-        "SpellDescription": "Until end of turn, creatures target player controls lose all abilities and have base power and toughness 0/2.",
-        "Power": "0"
-      }
+      "description": "Until end of turn, creatures target player controls lose all abilities and have base power and toughness 0/2.",
+      "effect": {
+        "description": "Until end of turn, creatures target player controls lose all abilities and have base power and toughness 0/2.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

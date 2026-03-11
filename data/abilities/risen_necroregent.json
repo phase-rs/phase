@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddTrigger": "PhaseTrig",
-        "Description": "Max speed — At the beginning of your end step, create a 2/2 black Zombie creature token."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — At the beginning of your end step, create a 2/2 black Zombie creature token.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

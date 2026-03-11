@@ -1,40 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [
+    {
+      "description": "Prevent all damage that would be dealt to enchanted creature by artifact sources.",
+      "event": "DamageDone"
+    }
+  ],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked by artifact creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "Enchanted creature can't be blocked by artifact creatures.",
-        "ValidBlocker": "Creature.Artifact",
-        "ValidAttacker": "Creature.EnchantedBy"
       }
     },
     {
+      "description": "Enchanted creature can't be the target of abilities from artifact sources.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Card.EnchantedBy",
-        "ValidSource": "Artifact",
-        "Description": "Enchanted creature can't be the target of abilities from artifact sources."
       }
     }
   ],
-  "replacements": [
-    {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Artifact",
-        "ValidTarget": "Creature.EnchantedBy",
-        "Description": "Prevent all damage that would be dealt to enchanted creature by artifact sources.",
-        "Prevent": "True",
-        "ActiveZones": "Battlefield"
-      }
-    }
-  ],
-  "faces": []
+  "triggers": []
 }

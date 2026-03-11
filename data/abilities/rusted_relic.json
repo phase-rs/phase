@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — CARDNAME is a 5/5 Golem artifact creature as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "5",
-        "Affected": "Card.Self",
-        "Description": "Metalcraft — CARDNAME is a 5/5 Golem artifact creature as long as you control three or more artifacts.",
-        "AddType": "Artifact & Creature & Golem",
-        "SetPower": "5",
-        "Condition": "Metalcraft"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "core_type": "Artifact & Creature & Golem",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

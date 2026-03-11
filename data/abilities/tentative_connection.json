@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Untap": "True",
-        "AddKWs": "Haste",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
-        "LoseControl": "EOT"
-      }
+      "description": "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "IsPresent": "Creature.YouCtrl+withMenace",
-        "Description": "This spell costs {3} less to cast if you control a creature with menace.",
-        "ValidCard": "Card.Self",
-        "Amount": "3",
-        "EffectZone": "All"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {3} less to cast if you control a creature with menace.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

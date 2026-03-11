@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, target creature defending player controls loses all abilities and has base power and toughness 0/1 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigAnimate",
-        "ValidCard": "Creature.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, target creature defending player controls loses all abilities and has base power and toughness 0/1 until end of turn."
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

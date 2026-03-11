@@ -2,37 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "RPrevent",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted",
-          "ForgetOnMoved": "Battlefield",
-          "SpellDescription": "Prevent all damage that would be dealt to CARDNAME by target creature this turn.",
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "ImprintCards": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 W"
+        "cost": "4 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "RPrevent",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted",
-        "ForgetOnMoved": "Battlefield",
-        "SpellDescription": "Prevent all damage that would be dealt to CARDNAME by target creature this turn.",
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "ImprintCards": "Self"
-      }
+      "description": "Prevent all damage that would be dealt to CARDNAME by target creature this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

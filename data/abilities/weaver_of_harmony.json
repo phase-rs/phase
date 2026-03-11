@@ -2,54 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-          "ValidTgts": "Enchantment",
-          "SpellDescription": "Copy target activated or triggered ability you control from an enchantment source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
-          "TgtPrompt": "Select target activated or triggered ability you control from an enchantment source",
-          "AILogic": "AlwaysCopyActivatedAbilities",
-          "MayChooseTarget": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target activated or triggered ability you control from an enchantment source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
+      "effect": {
+        "description": "Copy target activated or triggered ability you control from an enchantment source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-        "ValidTgts": "Enchantment",
-        "SpellDescription": "Copy target activated or triggered ability you control from an enchantment source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
-        "TgtPrompt": "Select target activated or triggered ability you control from an enchantment source",
-        "AILogic": "AlwaysCopyActivatedAbilities",
-        "MayChooseTarget": "True"
-      }
+      "target_prompt": "Select target activated or triggered ability you control from an enchantment source"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Enchantment"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other enchantment creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other enchantment creatures you control get +1/+1.",
-        "AddPower": "1",
-        "Affected": "Creature.Other+Enchantment+YouCtrl",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

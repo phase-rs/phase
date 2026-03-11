@@ -2,49 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 3,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "PrecostDesc": "Translocation Protocols —",
-        "SpellDescription": "Mill three cards."
-      }
+      "description": "Mill three cards.",
+      "effect": {
+        "count": 3,
+        "target": {
+          "type": "Any"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Dynastic Command Node — As long as you control your commander, activated abilities of cards in your graveyard cost {2} less to activate. This effect can't reduce the mana in that ability's activation cost to less than one mana.",
-        "Type": "Ability",
-        "AffectedZone": "Graveyard",
-        "ValidCard": "Card.YouOwn",
-        "Amount": "2",
-        "MinMana": "1",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl"
-      }
+      "affected_zone": "Graveyard",
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Dynastic Command Node — As long as you control your commander, activated abilities of cards in your graveyard cost {2} less to activate. This effect can't reduce the mana in that ability's activation cost to less than one mana.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

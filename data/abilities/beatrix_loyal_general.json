@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, you may attach any number of Equipment you control to target creature you control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigAttach",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, you may attach any number of Equipment you control to target creature you control.",
-        "Phase": "BeginCombat",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

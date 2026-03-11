@@ -1,36 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discard a creature card, put a +1/+1 counter on CARDNAME.",
       "mode": "Discarded",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you discard a creature card, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you discard a land card, create a treasure token.",
       "mode": "Discarded",
-      "params": {
-        "TriggerDescription": "Whenever you discard a land card, create a treasure token.",
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you discard a noncreature, nonland card, CARDNAME fights up to one target creature you don't control.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card.nonLand+nonCreature+YouCtrl",
-        "Execute": "TrigFight",
-        "TriggerDescription": "Whenever you discard a noncreature, nonland card, CARDNAME fights up to one target creature you don't control.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

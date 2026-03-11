@@ -2,52 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
-          "RemoveKeywords": "Hexproof & Indestructible & Protection & Shroud & Ward",
-          "ValidCards": "Permanent.OppCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
-        "RemoveKeywords": "Hexproof & Indestructible & Protection & Shroud & Ward",
-        "ValidCards": "Permanent.OppCtrl"
-      }
+      "description": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
+      "effect": {
+        "description": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature an opponent controls becomes the target of a spell or ability you control, put a bounty counter on that creature.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidSource": "SpellAbility.YouCtrl",
-        "ValidTarget": "Creature.OppCtrl+inZoneBattlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature an opponent controls becomes the target of a spell or ability you control, put a bounty counter on that creature.",
-        "Execute": "TrigPutCounterTriggered"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a creature with a bounty counter on it dies, put two +1/+1 counters on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.OppCtrl+counters_GE1_BOUNTY",
-        "TriggerDescription": "Whenever a creature with a bounty counter on it dies, put two +1/+1 counters on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

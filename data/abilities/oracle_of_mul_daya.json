@@ -1,35 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "Description": "You may play an additional land on each of your turns.",
-        "AdjustLandPlays": "1"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "Player",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "Play with the top card of your library revealed.",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Description": "You may play lands from the top of your library.",
-        "Affected": "Land.TopLibrary+YouCtrl",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may play lands from the top of your library.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

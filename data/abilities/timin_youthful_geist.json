@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, tap up to one target creature.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigTap",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each combat, tap up to one target creature.",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

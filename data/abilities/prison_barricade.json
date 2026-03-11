@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "If CARDNAME was kicked, it enters with a +1/+1 counter on it and with \"CARDNAME can attack as though it didn't have defender.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "BarricadePumped",
-        "Origin": "Any",
-        "Static": "True",
-        "Destination": "Battlefield",
-        "TriggerDescription": "If CARDNAME was kicked, it enters with a +1/+1 counter on it and with \"CARDNAME can attack as though it didn't have defender.\"",
-        "ValidCard": "Card.Self+kicked"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

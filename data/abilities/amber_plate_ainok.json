@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your second main phase, if this creature is tapped, it endures 1.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigEndure",
-        "PresentDefined": "Self",
-        "TriggerZones": "Battlefield",
-        "Phase": "Main",
-        "TriggerDescription": "At the beginning of your second main phase, if this creature is tapped, it endures 1.",
-        "IsPresent": "Card.tapped",
-        "PhaseCount": "2"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

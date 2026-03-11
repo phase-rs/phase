@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discard one or more cards, put that many +1/+1 counters on this creature.",
       "mode": "DiscardedAll",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you discard one or more cards, put that many +1/+1 counters on this creature.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

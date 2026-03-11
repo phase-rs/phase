@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "Player",
-        "AffectedZone": "Hand",
-        "Description": "Players play with their hands revealed."
-      }
+      "affected_zone": "Hand",
+      "description": "Players play with their hands revealed.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,46 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}."
-      }
+      "description": "Add {R}.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "AllSuffixKeywords": "walk",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Target creature loses all landwalk abilities until end of turn."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AllSuffixKeywords": "walk",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Target creature loses all landwalk abilities until end of turn."
-      }
+      "description": "Target creature loses all landwalk abilities until end of turn.",
+      "effect": {
+        "description": "Target creature loses all landwalk abilities until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

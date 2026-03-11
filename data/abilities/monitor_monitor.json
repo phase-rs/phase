@@ -1,26 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters the battlefield, open an Attraction.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigOpenAttraction",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters the battlefield, open an Attraction.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Execute": "ResetTurnCount",
-        "Static": "True"
-      }
+      "mode": "TurnBegin"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

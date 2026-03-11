@@ -1,50 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile an instant card from your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile an instant card from your hand.",
-        "OptionalDecider": "You",
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, you may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSpell",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
-        "ValidSource": "Creature.EquippedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBForget",
-        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
-        "Origin": "Exile",
-        "Static": "True"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSourceLKI"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

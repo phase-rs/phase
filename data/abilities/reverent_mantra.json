@@ -2,43 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SpellDescription": "Choose a color. All creatures gain protection from the chosen color until end of turn.",
-          "Defined": "You",
-          "SubAbility": "DBProtection",
-          "AILogic": "MostProminentHumanControls",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a color. All creatures gain protection from the chosen color until end of turn.",
-        "Defined": "You",
-        "SubAbility": "DBProtection",
-        "AILogic": "MostProminentHumanControls",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Choose a color. All creatures gain protection from the chosen color until end of turn.",
+      "effect": {
+        "description": "Choose a color. All creatures gain protection from the chosen color until end of turn.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile a white card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "ExileFromHand<1/Card.White+Other>",
-        "ValidSA": "Spell.Self",
-        "Description": "You may exile a white card from your hand rather than pay this spell's mana cost.",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

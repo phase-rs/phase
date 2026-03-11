@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, the Ring tempts you.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, the Ring tempts you.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigTempt",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you choose a creature as your Ring-bearer, you may pay 2 life. If you do, draw a card.",
       "mode": "RingTemptsYou",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you choose a creature as your Ring-bearer, you may pay 2 life. If you do, draw a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

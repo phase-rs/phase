@@ -1,53 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigTransform",
-            "WerewolfTransformCondition": "True",
-            "Phase": "Upkeep",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever an opponent casts a spell, CARDNAME deals 2 damage to that player.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever an opponent casts a spell, CARDNAME deals 2 damage to that player.",
-            "ValidCard": "Card",
-            "ValidActivatingPlayer": "Opponent",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDealDamage"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         },
         {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Execute": "TrigTransform",
-            "WerewolfUntransformCondition": "True",
-            "Phase": "Upkeep",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

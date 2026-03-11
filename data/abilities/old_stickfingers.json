@@ -1,27 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDigUntil",
-        "TriggerDescription": "When you cast CARDNAME, reveal cards from the top of your library until you reveal X creature cards. Put all the creature cards revealed this way into your graveyard and the rest on the bottom of your library in a random order.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "Y",
-        "SetPower": "Y",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of creature cards in your graveyard."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of creature cards in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you cast CARDNAME, reveal cards from the top of your library until you reveal X creature cards. Put all the creature cards revealed this way into your graveyard and the rest on the bottom of your library in a random order.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

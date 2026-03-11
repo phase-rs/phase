@@ -1,46 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Imprint — When CARDNAME enters, exile target nonland permanent.",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Origin": "Battlefield",
-        "Static": "True",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Execute": "DBForget",
-        "Origin": "Exile",
-        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Players can't cast spells with the same name as the exiled card.",
-        "ValidCard": "Card.sharesNameWith Imprinted"
-      }
+      "description": "Players can't cast spells with the same name as the exiled card.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Imprint — When CARDNAME enters, exile target nonland permanent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSourceLKI"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Delirium — CARDNAME has flying as long as there are four or more card types among cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Delirium — CARDNAME has flying as long as there are four or more card types among cards in your graveyard.",
-        "Affected": "Card.Self",
-        "Condition": "Delirium",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

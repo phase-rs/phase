@@ -2,42 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "StaticAbilities": "Unblockable",
-          "RememberObjects": "Self",
-          "SpellDescription": "This creature can't be blocked this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 U U"
+        "cost": "5 U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "StaticAbilities": "Unblockable",
-        "RememberObjects": "Self",
-        "SpellDescription": "This creature can't be blocked this turn."
-      }
+      "description": "This creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, this creature has base power and toughness 5/2.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "2",
-        "Affected": "Card.Self",
-        "Description": "During your turn, this creature has base power and toughness 5/2.",
-        "SetPower": "5",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

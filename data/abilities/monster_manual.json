@@ -1,69 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 G"
+                "cost": "1 G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeNum": "1",
-            "ChangeType": "Creature",
-            "SpellDescription": "You may put a creature card from your hand onto the battlefield."
-          }
+          "description": "You may put a creature card from your hand onto the battlefield.",
+          "effect": {
+            "destination": "Battlefield",
+            "origin": "Hand",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Mill five cards, then return a creature card milled this way to your hand.",
           "effect": {
-            "type": "Mill",
             "count": 5,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBChangeZone",
-            "RememberMilled": "True",
-            "SpellDescription": "Mill five cards, then return a creature card milled this way to your hand."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if this creature didn't attack this turn, put a +1/+1 counter on it.",
       "mode": "Phase",
-      "params": {
-        "IsPresent": "Card.Self+!attackedThisTurn",
-        "TriggerDescription": "At the beginning of your end step, if this creature didn't attack this turn, put a +1/+1 counter on it.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

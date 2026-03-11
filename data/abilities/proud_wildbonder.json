@@ -1,17 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+withTrample",
-        "AddStaticAbility": "Static",
-        "Description": "Creatures you control with trample have \"You may have this creature assign its combat damage as though it weren't blocked.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with trample have \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

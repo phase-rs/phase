@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Exile three random cards from your library face down and look at them. For as long as they remain exiled, you may play one of those cards.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Exile",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "NoShuffle": "True",
-        "NoLooking": "True",
-        "ChangeType": "Card",
-        "Hidden": "True",
-        "AtRandom": "True",
-        "Mandatory": "True",
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Exile three random cards from your library face down and look at them. For as long as they remain exiled, you may play one of those cards.",
-        "ChangeNum": "3",
-        "FaceDown": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

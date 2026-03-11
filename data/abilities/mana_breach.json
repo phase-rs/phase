@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell, that player returns a land they control to its owner's hand.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts a spell, that player returns a land they control to its owner's hand.",
-        "ValidCard": "Card",
-        "Execute": "TrigBounce",
-        "ValidActivatingPlayer": "Player",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

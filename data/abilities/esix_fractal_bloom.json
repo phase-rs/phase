@@ -1,25 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "The first time you would create one or more tokens during each of your turns, you may instead choose a creature other than CARDNAME and create that many tokens that are copies of that creature.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "Description": "The first time you would create one or more tokens during each of your turns, you may instead choose a creature other than CARDNAME and create that many tokens that are copies of that creature.",
-        "Optional": "True",
-        "PlayerTurn": "True",
-        "SVarCompare": "EQ0",
-        "ValidPlayer": "You",
-        "CheckSVar": "X",
-        "Layer": "Copy",
-        "ReplaceWith": "DBCopy",
-        "ActiveZones": "Battlefield"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

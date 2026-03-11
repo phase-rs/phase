@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Attacking creatures you control have double strike.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Affected": "Creature.attacking+YouCtrl",
-        "Description": "Attacking creatures you control have double strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

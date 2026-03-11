@@ -1,38 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigNote",
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Player",
-        "Static": "True"
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
       "mode": "Phase",
-      "params": {
-        "Phase": "Cleanup",
-        "Execute": "TrigReset",
-        "Static": "True"
-      }
+      "phase": "Cleanup"
     },
     {
+      "description": "At end of combat, for each creature you controlled at the time it dealt combat damage to a player this turn, copy a random card with the same mana cost as that creature. You may pay {3}. If you do, choose one of those copies. If a copy of a permanent card is chosen, you may create a token that's a copy of that card. If a copy of an instant or sorcery card is chosen, you may cast the copy without paying its mana cost.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At end of combat, for each creature you controlled at the time it dealt combat damage to a player this turn, copy a random card with the same mana cost as that creature. You may pay {3}. If you do, choose one of those copies. If a copy of a permanent card is chosen, you may create a token that's a copy of that card. If a copy of an instant or sorcery card is chosen, you may cast the copy without paying its mana cost.",
-        "Phase": "EndCombat",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Command",
-        "Execute": "TrigRepeatEach",
-        "CheckSVar": "Hits"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

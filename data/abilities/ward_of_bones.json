@@ -1,40 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Creature",
-        "Description": "Each opponent who controls more creatures than you can't cast creature spells. The same is true for artifacts and enchantments.",
-        "Caster": "Opponent.withMoreCreaturesThanYou"
-      }
+      "description": "Each opponent who controls more creatures than you can't cast creature spells. The same is true for artifacts and enchantments.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Opponent.withMoreArtifactsThanYou",
-        "ValidCard": "Artifact"
-      }
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Opponent.withMoreEnchantmentsThanYou",
-        "ValidCard": "Enchantment"
-      }
+      "mode": "CantBeCast"
     },
     {
+      "description": "Each opponent who controls more lands than you can't play lands.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "Description": "Each opponent who controls more lands than you can't play lands.",
-        "Player": "Opponent.withMoreLandsThanYou"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

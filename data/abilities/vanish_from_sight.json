@@ -2,31 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": null,
+      "description": "Target nonland permanent's owner puts it on the top or bottom of their library. Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "LibraryPositionAlternative": "-1",
-        "TgtPrompt": "Select target nonland permanent",
-        "DestinationAlternative": "Library",
-        "AlternativeDecider": "TargetedOwner",
-        "SubAbility": "DBSurveil",
-        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
-        "SpellDescription": "Target nonland permanent's owner puts it on the top or bottom of their library. Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)"
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

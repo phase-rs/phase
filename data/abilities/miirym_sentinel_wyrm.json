@@ -1,20 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another nontoken Dragon you control enters, create a token that's a copy of it, except the token isn't legendary if that Dragon is legendary.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigCopy",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "ValidCard": "Dragon.YouCtrl+!token+Other",
-        "TriggerDescription": "Whenever another nontoken Dragon you control enters, create a token that's a copy of it, except the token isn't legendary if that Dragon is legendary."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Dragon",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

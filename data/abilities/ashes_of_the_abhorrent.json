@@ -1,37 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a creature dies, you gain 1 life.",
-        "Origin": "Battlefield",
-        "Execute": "TrigGain",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Origin": "Graveyard",
-        "ValidCard": "Card",
-        "Description": "Players can't cast spells from graveyards."
-      }
+      "description": "Players can't cast spells from graveyards.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Card",
-        "Description": "Players can't activate abilities of cards in graveyards.",
-        "AffectedZone": "Graveyard"
-      }
+      "affected_zone": "Graveyard",
+      "description": "Players can't activate abilities of cards in graveyards.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature dies, you gain 1 life.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

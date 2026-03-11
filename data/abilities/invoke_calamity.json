@@ -2,43 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Amount": "2",
-          "ValidZone": "Graveyard,Hand",
-          "Optional": "True",
-          "ReplaceGraveyard": "Exile",
-          "SpellDescription": "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead.",
-          "WithTotalCMC": "6",
-          "WithoutManaCost": "True",
-          "Valid": "Card.YouOwn",
-          "StackDescription": "SpellDescription",
-          "ValidSA": "Instant,Sorcery",
-          "SubAbility": "DBExile"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "ValidZone": "Graveyard,Hand",
-        "Optional": "True",
-        "ReplaceGraveyard": "Exile",
-        "SpellDescription": "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead.",
-        "WithTotalCMC": "6",
-        "WithoutManaCost": "True",
-        "Valid": "Card.YouOwn",
-        "StackDescription": "SpellDescription",
-        "ValidSA": "Instant,Sorcery",
-        "SubAbility": "DBExile"
-      }
+      "description": "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead.",
+      "effect": {
+        "description": "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

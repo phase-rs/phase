@@ -1,29 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked except by creatures with flying or reach.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EnchantedBy",
-        "ValidBlocker": "Creature.withoutFlying+withoutReach",
-        "Description": "Enchanted creature can't be blocked except by creatures with flying or reach."
       }
     },
     {
+      "description": "Enchanted creature can't be the target of spells or abilities your opponents control.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Card.EnchantedBy",
-        "Activator": "Opponent",
-        "Description": "Enchanted creature can't be the target of spells or abilities your opponents control."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

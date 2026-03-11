@@ -2,54 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 W U B R G"
+        "cost": "3 W U B R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Other creatures you control get +X/+X until end of turn, where X is the number of Towns you control.",
-        "ValidCards": "Creature.YouCtrl+StrictlyOther"
-      }
+      "description": "Other creatures you control get +X/+X until end of turn, where X is the number of Towns you control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "IsPresent": "Town.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "GE5",
-        "Execute": "TrigToken",
-        "TriggerDescription": "The Minstrel's Ballad — At the beginning of combat on your turn, if you control five or more Towns, create a 2/2 Elemental creature token that's all colors."
+      "description": "Lands you control enter untapped.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "Lands you control enter untapped.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ETBUntapped",
-        "Destination": "Battlefield",
-        "ValidCard": "Land.YouCtrl"
-      }
+      "description": "The Minstrel's Ballad — At the beginning of combat on your turn, if you control five or more Towns, create a 2/2 Elemental creature token that's all colors.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

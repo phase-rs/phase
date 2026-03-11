@@ -2,26 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Blue"
-        }
-      },
       "cost": null,
+      "description": "Counter target blue spell. If it was a Jace planeswalker spell, scry 2.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target blue spell. If it was a Jace planeswalker spell, scry 2.",
-        "TgtPrompt": "Select target blue spell",
-        "TargetType": "Spell",
-        "SubAbility": "DBScry"
-      }
+      "target_prompt": "Select target blue spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

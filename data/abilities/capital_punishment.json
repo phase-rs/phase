@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Vote",
-        "params": {
-          "Defined": "Player",
-          "StoreVoteNum": "True",
-          "StackDescription": "SpellDescription",
-          "Choices": "DBVoteDeath,DBVoteTaxes",
-          "AILogic": "DeathOrTaxes",
-          "SpellDescription": "Council's dilemma — Starting with you, each player votes for death or taxes. Each opponent sacrifices a creature for each death vote and discards a card for each taxes vote."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "StoreVoteNum": "True",
-        "StackDescription": "SpellDescription",
-        "Choices": "DBVoteDeath,DBVoteTaxes",
-        "AILogic": "DeathOrTaxes",
-        "SpellDescription": "Council's dilemma — Starting with you, each player votes for death or taxes. Each opponent sacrifices a creature for each death vote and discards a card for each taxes vote."
-      }
+      "description": "Council's dilemma — Starting with you, each player votes for death or taxes. Each opponent sacrifices a creature for each death vote and discards a card for each taxes vote.",
+      "effect": {
+        "description": "Council's dilemma — Starting with you, each player votes for death or taxes. Each opponent sacrifices a creature for each death vote and discards a card for each taxes vote.",
+        "name": "Vote",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

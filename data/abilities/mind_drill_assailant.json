@@ -2,34 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 UB"
+        "cost": "2 UB",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)"
-      }
+      "description": "Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "Condition": "Threshold",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

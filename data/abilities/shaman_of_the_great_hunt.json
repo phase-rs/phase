@@ -2,36 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 GU GU"
+        "cost": "2 GU GU",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Ferocious —",
-        "SpellDescription": "Draw a card for each creature with power 4 or greater you control."
-      }
+      "description": "Draw a card for each creature with power 4 or greater you control.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to a player, put a +1/+1 counter on it.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, put a +1/+1 counter on it.",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "ValidSource": "Creature.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

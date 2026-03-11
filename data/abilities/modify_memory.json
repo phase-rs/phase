@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ExchangeControl",
-        "params": {
-          "TargetMin": "2",
-          "SpellDescription": "Exchange control of two target creatures controlled by different players.",
-          "SubAbility": "DBDraw",
-          "RememberExchanged": "True",
-          "TargetMax": "2",
-          "ValidTgts": "Creature",
-          "TargetsWithDifferentControllers": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "SpellDescription": "Exchange control of two target creatures controlled by different players.",
-        "SubAbility": "DBDraw",
-        "RememberExchanged": "True",
-        "TargetMax": "2",
-        "ValidTgts": "Creature",
-        "TargetsWithDifferentControllers": "True"
-      }
+      "description": "Exchange control of two target creatures controlled by different players.",
+      "effect": {
+        "description": "Exchange control of two target creatures controlled by different players.",
+        "name": "ExchangeControl",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

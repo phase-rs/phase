@@ -2,33 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 8,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/Indestructible>"
+        "cost": "SubCounter<1/Indestructible>",
+        "type": "Mana"
       },
+      "description": "Distribute eight +1/+1 counters among any number of target creatures you control.",
+      "effect": {
+        "count": 8,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Distribute eight +1/+1 counters among any number of target creatures you control.",
-        "TargetMax": "8",
-        "TgtPrompt": "Select any number of target creatures you control",
-        "DividedAsYouChoose": "8"
-      }
+      "target_prompt": "Select any number of target creatures you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Activator": "You",
-        "Amount": "1",
-        "ValidCard": "Card.Artifact",
-        "OnlyFirstSpell": "True",
-        "Type": "Spell",
-        "Description": "The first artifact spell you cast each turn costs {1} less to cast."
-      }
+      "description": "The first artifact spell you cast each turn costs {1} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

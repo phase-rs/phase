@@ -1,21 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on a creature you control, return CARDNAME from your graveyard to your hand at the beginning of the next end step.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "CounterType": "P1P1",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigDelayedTrigger",
-        "ValidCard": "Creature.YouCtrl",
-        "IsPresent": "Card.StrictlySelf",
-        "PresentZone": "Graveyard",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on a creature you control, return CARDNAME from your graveyard to your hand at the beginning of the next end step."
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When enchanted creature dies, return that card to the battlefield under your control.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigReturn",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has toxic 2. (Players dealt combat damage by it also get two poison counters.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Toxic:2",
-        "Description": "Enchanted creature has toxic 2. (Players dealt combat damage by it also get two poison counters.)",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Toxic:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature dies, return that card to the battlefield under your control.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBAnimate",
-          "Type": "Basic Land",
-          "SpellDescription": "Target land becomes the basic land type of your choice until end of turn. Draw a card at the beginning of the next turn's upkeep."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBAnimate",
-        "Type": "Basic Land",
-        "SpellDescription": "Target land becomes the basic land type of your choice until end of turn. Draw a card at the beginning of the next turn's upkeep."
-      }
+      "description": "Target land becomes the basic land type of your choice until end of turn. Draw a card at the beginning of the next turn's upkeep.",
+      "effect": {
+        "description": "Target land becomes the basic land type of your choice until end of turn. Draw a card at the beginning of the next turn's upkeep.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

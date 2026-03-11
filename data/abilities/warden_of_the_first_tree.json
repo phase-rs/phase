@@ -2,82 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 WB",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a Human Warrior with base power and toughness 3/3.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Human",
           "Warrior"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 WB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "CARDNAME becomes a Human Warrior with base power and toughness 3/3.",
-        "RemoveCreatureTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 WB WB",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Warrior, it becomes a Human Spirit Warrior with trample and lifelink.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Human",
           "Warrior",
           "Spirit"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 WB WB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Card.Self+Warrior",
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "If CARDNAME is a Warrior, it becomes a Human Spirit Warrior with trample and lifelink.",
-        "Defined": "Self",
-        "Duration": "Permanent",
-        "Keywords": "Trample & Lifelink"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 WB WB WB",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Spirit, put five +1/+1 counters on it.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 5,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 WB WB WB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If CARDNAME is a Spirit, put five +1/+1 counters on it.",
-        "ConditionPresent": "Card.Self+Spirit"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

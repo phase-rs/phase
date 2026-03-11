@@ -2,50 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "6",
+            "type": "Mana"
+          },
+          {
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Create a 5/5 blue Dragon Spirit creature token with flying. Return NICKNAME to the battlefield under its owner's control when that token dies.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_5_5_dragon_spirit_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "6"
-          },
-          {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "RememberTokens": "True",
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Create a 5/5 blue Dragon Spirit creature token with flying. Return NICKNAME to the battlefield under its owner's control when that token dies."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +5/+5.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +5/+5.",
-        "AddToughness": "5",
-        "AddPower": "5",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 5
+        },
+        {
+          "type": "AddToughness",
+          "value": 5
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,31 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with two or more legendary creatures, put a +1/+1 counter on each of up to two target attacking creatures.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever you attack with two or more legendary creatures, put a +1/+1 counter on each of up to two target attacking creatures.",
-        "ValidAttackers": "Creature.Legendary",
-        "TriggerZones": "Battlefield",
-        "ValidAttackersAmount": "GE2",
-        "AttackingPlayer": "You",
-        "Execute": "TrigPutCounter"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your end step, if you control a creature with power 4 or greater, draw a card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "IsPresent": "Creature.YouCtrl+powerGE4",
-        "TriggerDescription": "At the beginning of your end step, if you control a creature with power 4 or greater, draw a card.",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

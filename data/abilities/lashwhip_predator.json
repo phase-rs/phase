@@ -1,21 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "IsPresent": "Creature.OppCtrl",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Amount": "2",
-        "Description": "This spell costs {2} less to cast if your opponents control three or more creatures.",
-        "Type": "Spell",
-        "PresentCompare": "GE3"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {2} less to cast if your opponents control three or more creatures.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,32 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, you may create a 3/3 green Beast creature token.",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "Execute": "TrigToken",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {W}{U}{B}{R}{G} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Cost": "W U B R G",
-        "EffectZone": "All",
-        "Description": "You may pay {W}{U}{B}{R}{G} rather than pay this spell's mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, you may create a 3/3 green Beast creature token.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

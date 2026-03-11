@@ -1,30 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever you cast a noncreature spell, NICKNAME deals 2 damage to each opponent.",
-        "ValidCard": "Card.nonCreature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Type": "Spell",
-        "ValidCard": "Card.nonCreature",
-        "Amount": "1",
-        "Description": "Noncreature spells you cast cost {1} less to cast."
-      }
+      "description": "Noncreature spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a noncreature spell, NICKNAME deals 2 damage to each opponent.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

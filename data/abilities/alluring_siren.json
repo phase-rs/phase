@@ -2,38 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "TgtPrompt": "Select target creature an opponent controls",
-          "StackDescription": "{c:Targeted} attacks you this turn if able.",
-          "StaticAbilities": "MustAttack",
-          "ValidTgts": "Creature.OppCtrl",
-          "RememberObjects": "Targeted",
-          "IsCurse": "True",
-          "SpellDescription": "Target creature an opponent controls attacks you this turn if able."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature an opponent controls attacks you this turn if able.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "TgtPrompt": "Select target creature an opponent controls",
-        "StackDescription": "{c:Targeted} attacks you this turn if able.",
-        "StaticAbilities": "MustAttack",
-        "ValidTgts": "Creature.OppCtrl",
-        "RememberObjects": "Targeted",
-        "IsCurse": "True",
-        "SpellDescription": "Target creature an opponent controls attacks you this turn if able."
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

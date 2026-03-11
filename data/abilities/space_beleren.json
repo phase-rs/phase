@@ -2,79 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "SectorBlock",
-          "SpellDescription": "Creatures in each sector can be blocked this turn only by creatures in the same sector.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "SectorBlock",
-        "SpellDescription": "Creatures in each sector can be blocked this turn only by creatures in the same sector.",
-        "Planeswalker": "True"
-      }
+      "description": "Creatures in each sector can be blocked this turn only by creatures in the same sector.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSector",
-        "params": {
-          "AILogic": "Pump",
-          "SubAbility": "DBPutCounterAll",
-          "SpellDescription": "Put a +1/+1 counter on each creature in the sector of your choice.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Pump",
-        "SubAbility": "DBPutCounterAll",
-        "SpellDescription": "Put a +1/+1 counter on each creature in the sector of your choice.",
-        "Planeswalker": "True"
-      }
+      "description": "Put a +1/+1 counter on each creature in the sector of your choice.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature in the sector of your choice.",
+        "name": "ChooseSector",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSector",
-        "params": {
-          "Planeswalker": "True",
-          "AILogic": "Destroy",
-          "SubAbility": "DBDestroyAll",
-          "SpellDescription": "Destroy all creatures in the sector of your choice.",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "AILogic": "Destroy",
-        "SubAbility": "DBDestroyAll",
-        "SpellDescription": "Destroy all creatures in the sector of your choice.",
-        "Ultimate": "True"
-      }
+      "description": "Destroy all creatures in the sector of your choice.",
+      "effect": {
+        "description": "Destroy all creatures in the sector of your choice.",
+        "name": "ChooseSector",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

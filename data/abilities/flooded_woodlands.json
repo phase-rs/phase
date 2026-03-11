@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Green creatures can't attack unless their controller sacrifices a land for each green creature they control that's attacking. (This cost is paid as attackers are declared.)",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "Cost": "Sac<1/Land>",
-        "ValidCard": "Creature.Green",
-        "Description": "Green creatures can't attack unless their controller sacrifices a land for each green creature they control that's attacking. (This cost is paid as attackers are declared.)"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

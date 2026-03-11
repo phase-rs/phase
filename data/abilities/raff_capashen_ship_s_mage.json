@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Description": "You may cast historic spells as though they had flash. (Artifacts, legendaries, and Sagas are historic.)",
-        "ValidCard": "Card.Historic",
-        "Caster": "You",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast historic spells as though they had flash. (Artifacts, legendaries, and Sagas are historic.)",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

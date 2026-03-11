@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl,Creature.YouCtrl,Land.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Exile two target artifacts, creatures and/or lands you control, then return those cards to the battlefield under your control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Creature.YouCtrl,Land.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SubAbility": "DBReturn",
-        "TargetMax": "2",
-        "SpellDescription": "Exile two target artifacts, creatures and/or lands you control, then return those cards to the battlefield under your control.",
-        "TgtPrompt": "Select 2 target artifacts, creatures, or lands that you control",
-        "TargetMin": "2"
-      }
+      "target_prompt": "Select 2 target artifacts, creatures, or lands that you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

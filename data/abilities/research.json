@@ -1,65 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Shuffle up to four cards you own from outside the game into your library.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Sideboard",
             "destination": "Library",
+            "origin": "Sideboard",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeType": "Card.YouOwn",
-            "Hidden": "True",
-            "SpellDescription": "Shuffle up to four cards you own from outside the game into your library.",
-            "StackDescription": "{p:You} shuffles up to four cards they own from outside the game into their library.",
-            "Shuffle": "True",
-            "ChangeNum": "4"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Repeat",
-            "params": {
-              "SpellDescription": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
-              "StackDescription": "SpellDescription",
-              "MaxRepeat": "3",
-              "RepeatSubAbility": "DBToken"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
-            "StackDescription": "SpellDescription",
-            "MaxRepeat": "3",
-            "RepeatSubAbility": "DBToken"
-          }
+          "description": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
+          "effect": {
+            "description": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
+            "name": "Repeat",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,34 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on CARDNAME. (Damage causes loss of life.)",
       "mode": "Phase",
-      "params": {
-        "SVarCompare": "GE2",
-        "Execute": "TrigPut",
-        "OptionalDecider": "You",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on CARDNAME. (Damage causes loss of life.)",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a card is put into an opponent's graveyard from anywhere, if CARDNAME has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE3_QUEST",
-        "TriggerDescription": "Whenever a card is put into an opponent's graveyard from anywhere, if CARDNAME has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.!token+OppOwn",
-        "Destination": "Graveyard",
-        "Execute": "TrigLoseLife"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

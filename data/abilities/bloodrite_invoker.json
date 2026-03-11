@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 3
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "8"
+        "cost": "8",
+        "type": "Mana"
       },
+      "description": "Target player loses 3 life and you gain 3 life.",
+      "effect": {
+        "amount": 3,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Target player loses 3 life and you gain 3 life.",
-        "ValidTgts": "Player",
-        "TgtPrompt": "Select a player"
-      }
+      "target_prompt": "Select a player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

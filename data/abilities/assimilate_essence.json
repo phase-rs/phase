@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Battle"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell unless its controller pays {4}.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Battle",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "UnlessResolveSubs": "WhenPaid",
-        "SpellDescription": "Counter target spell unless its controller pays {4}.",
-        "TgtPrompt": "Select target creature or battle spell",
-        "UnlessCost": "4",
-        "SubAbility": "DBIncubate"
-      }
+      "target_prompt": "Select target creature or battle spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

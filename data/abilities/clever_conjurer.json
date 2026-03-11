@@ -2,28 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other+!namedClever Conjurer"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap target permanent not named Clever Conjurer. Activate only as a sorcery.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Mage Hand —",
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Select another target permanent not named Clever Conjurer",
-        "SpellDescription": "Untap target permanent not named Clever Conjurer. Activate only as a sorcery."
-      }
+      "target_prompt": "Select another target permanent not named Clever Conjurer"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

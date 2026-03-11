@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Basic"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Strategic Coordinator — Basic lands you control have \"{T}: Add {C}{C}. Spend this mana only on costs that contain {X}.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.Basic+YouCtrl",
-        "AddAbility": "Mana",
-        "Description": "Strategic Coordinator — Basic lands you control have \"{T}: Add {C}{C}. Spend this mana only on costs that contain {X}.\""
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

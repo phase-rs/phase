@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a player casts a spell or a creature attacks, exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When a player casts a spell or a creature attacks, exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-        "ValidCard": "Card"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "When a player casts a spell or a creature attacks, exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When a player casts a spell or a creature attacks, exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-        "Secondary": "True",
-        "Execute": "TrigExile",
-        "ValidCard": "Creature"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

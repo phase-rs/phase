@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, mill a card and choose an opponent at random. CARDNAME attacks that player this combat if able. Until end of turn, CARDNAME gains indestructible and gets +1/+1 for each card type among cards in your graveyard.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMill",
-        "TriggerDescription": "At the beginning of combat on your turn, mill a card and choose an opponent at random. CARDNAME attacks that player this combat if able. Until end of turn, CARDNAME gains indestructible and gets +1/+1 for each card type among cards in your graveyard.",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

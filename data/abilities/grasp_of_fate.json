@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, for each opponent, exile up to one target nonland permanent that player controls until CARDNAME leaves the battlefield. (Those permanents return under their owners' control.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, for each opponent, exile up to one target nonland permanent that player controls until CARDNAME leaves the battlefield. (Those permanents return under their owners' control.)",
-        "Origin": "Any",
-        "Execute": "TrigExile"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

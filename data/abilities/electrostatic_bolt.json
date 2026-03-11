@@ -2,31 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage to target creature. If it's an artifact creature, CARDNAME deals 4 damage to it instead.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ConditionSVarCompare": "EQ0",
-        "TgtPrompt": "Select target creature to deal damage to",
-        "ConditionCheckSVar": "ElectrostaticCheck",
-        "SpellDescription": "CARDNAME deals 2 damage to target creature. If it's an artifact creature, CARDNAME deals 4 damage to it instead.",
-        "SubAbility": "DBDamage"
-      }
+      "target_prompt": "Select target creature to deal damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

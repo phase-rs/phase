@@ -2,48 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target creature you control",
-          "ForgetOnMoved": "Battlefield",
-          "SpellDescription": "Until end of turn, target creature you control assigns combat damage equal to its toughness rather than its power.",
-          "StaticAbilities": "CombatDamageToughness",
-          "ValidTgts": "Creature.YouCtrl",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Until end of turn, target creature you control assigns combat damage equal to its toughness rather than its power.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "ForgetOnMoved": "Battlefield",
-        "SpellDescription": "Until end of turn, target creature you control assigns combat damage equal to its toughness rather than its power.",
-        "StaticAbilities": "CombatDamageToughness",
-        "ValidTgts": "Creature.YouCtrl",
-        "RememberObjects": "Targeted"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create two Food tokens. (They're artifacts with \"{2}, Sacrifice this artifact: You gain 3 life.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, create two Food tokens. (They're artifacts with \"{2}, Sacrifice this artifact: You gain 3 life.\")",
-        "Destination": "Battlefield",
-        "Execute": "TrigFood",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

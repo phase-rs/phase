@@ -1,37 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, counter it unless you sacrifice a land.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, counter it unless you sacrifice a land.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each player's upkeep, that player sacrifices a land.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a land.",
-        "Execute": "TrigSac"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When there are no lands on the battlefield, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "PresentCompare": "EQ0",
-        "IsPresent": "Land",
-        "Execute": "TrigSacSelf",
-        "TriggerDescription": "When there are no lands on the battlefield, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

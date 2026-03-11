@@ -2,67 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Scry 1."
-      }
+      "description": "Scry 1.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "Planeswalker": "True",
-          "ThisTurn": "True",
-          "Mode": "SpellCast",
-          "ValidCard": "Instant,Sorcery",
-          "AILogic": "SpellCopy",
-          "ValidActivatingPlayer": "You",
-          "Execute": "EffTrigCopy",
-          "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ThisTurn": "True",
-        "Mode": "SpellCast",
-        "ValidCard": "Instant,Sorcery",
-        "AILogic": "SpellCopy",
-        "ValidActivatingPlayer": "You",
-        "Execute": "EffTrigCopy",
-        "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
-      }
+      "description": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+      "effect": {
+        "description": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast or copy an instant or sorcery spell, CARDNAME deals 1 damage to target opponent or planeswalker.",
       "mode": "SpellCastOrCopy",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast or copy an instant or sorcery spell, CARDNAME deals 1 damage to target opponent or planeswalker.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

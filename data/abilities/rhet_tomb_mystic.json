@@ -1,19 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Each creature card in your hand has cycling {1}{U}. ({1}{U}, Discard that card: Draw a card.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Cycling:1 U",
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Hand",
-        "Description": "Each creature card in your hand has cycling {1}{U}. ({1}{U}, Discard that card: Draw a card.)",
-        "Affected": "Creature.YouOwn"
-      }
+      "modifications": [
+        {
+          "keyword": "Cycling:1",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "U",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,51 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast an instant or sorcery spell, CARDNAME gets +1/+1 until end of turn.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME gets +1/+1 until end of turn.",
-            "ValidCard": "Instant,Sorcery",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPump"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 1 damage to any target. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 1
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 1 damage to any target. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

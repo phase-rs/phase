@@ -1,37 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "characteristic_defining": true,
+      "description": "NICKNAME's power is equal to the greatest mana value among artifacts you control.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever NICKNAME enters or attacks, choose target artifact card in your graveyard. You may sacrifice an artifact. If you do, return the chosen card to the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, choose target artifact card in your graveyard. You may sacrifice an artifact. If you do, return the chosen card to the battlefield.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, choose target artifact card in your graveyard. You may sacrifice an artifact. If you do, return the chosen card to the battlefield.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, choose target artifact card in your graveyard. You may sacrifice an artifact. If you do, return the chosen card to the battlefield."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "Description": "NICKNAME's power is equal to the greatest mana value among artifacts you control."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

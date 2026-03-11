@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has reach as long as it has a +1/+1 counter on it.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has reach as long as it has a +1/+1 counter on it.",
-        "AddKeyword": "Reach",
-        "Affected": "Card.Self+counters_GE1_P1P1"
-      }
+      "modifications": [
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

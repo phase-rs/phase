@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a creature, it gets -3/-0 and loses flying.",
       "mode": "Continuous",
-      "params": {
-        "RemoveKeyword": "Flying",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "As long as enchanted permanent is a creature, it gets -3/-0 and loses flying.",
-        "AddPower": "-3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -3
+        },
+        {
+          "keyword": "Flying",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,56 +1,103 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, put a tide counter on CARDNAME.",
-        "Execute": "DBPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
-    },
-    {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+counters_GE4_TIDE",
-        "Execute": "TrigRemove",
-        "TriggerDescription": "Whenever there are four or more tide counters on CARDNAME, remove all tide counters from it."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Permanent.namedTidal Influence",
-        "Description": "Cast this spell only if no permanents named Tidal Influence are on the battlefield."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Cast this spell only if no permanents named Tidal Influence are on the battlefield.",
+      "effect_zone": "Battlefield",
+      "mode": "CantBeCast"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there is exactly one tide counter on CARDNAME, all blue creatures get -2/-0.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_EQ1_TIDE",
-        "Description": "As long as there is exactly one tide counter on CARDNAME, all blue creatures get -2/-0.",
-        "Affected": "Creature.Blue",
-        "AddPower": "-2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there are exactly three tide counters on CARDNAME, all blue creatures get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "+2",
-        "IsPresent": "Card.Self+counters_EQ3_TIDE",
-        "Description": "As long as there are exactly three tide counters on CARDNAME, all blue creatures get +2/+0.",
-        "Affected": "Creature.Blue"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, put a tide counter on CARDNAME.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever there are four or more tide counters on CARDNAME, remove all tide counters from it.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

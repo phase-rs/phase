@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Choices": "AnyColor",
-          "SpellDescription": "Target creature gains protection from the color of its controller's choice until end of turn. Any player may activate this ability.",
-          "Activator": "Player",
-          "ValidTgts": "Creature",
-          "Choser": "Controller",
-          "Gains": "Choice"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "AnyColor",
-        "SpellDescription": "Target creature gains protection from the color of its controller's choice until end of turn. Any player may activate this ability.",
-        "Activator": "Player",
-        "ValidTgts": "Creature",
-        "Choser": "Controller",
-        "Gains": "Choice"
-      }
+      "description": "Target creature gains protection from the color of its controller's choice until end of turn. Any player may activate this ability.",
+      "effect": {
+        "description": "Target creature gains protection from the color of its controller's choice until end of turn. Any player may activate this ability.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

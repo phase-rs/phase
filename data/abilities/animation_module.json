@@ -2,49 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "ExistingCounter",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent,Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Choose a counter on target permanent or player. Give that permanent or player another counter of that kind.",
+      "effect": {
+        "count": 1,
+        "counter_type": "ExistingCounter",
+        "target": {
+          "card_type": "Permanent,Player",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a counter on target permanent or player. Give that permanent or player another counter of that kind.",
-        "AILogic": "AtOppEOT",
-        "TgtPrompt": "Select target player or permanent"
-      }
+      "target_prompt": "Select target player or permanent"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on a permanent you control, you may pay {1}. If you do, create a 1/1 colorless Servo artifact creature token.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on a permanent you control, you may pay {1}. If you do, create a 1/1 colorless Servo artifact creature token.",
-        "CounterType": "P1P1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

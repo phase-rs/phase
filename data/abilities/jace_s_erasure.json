@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a card, you may have target player mill a card.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "OptionalDecider": "You",
-        "Execute": "TrigMill",
-        "TriggerDescription": "Whenever you draw a card, you may have target player mill a card."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

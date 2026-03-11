@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, target creature you control gets +2/+0 and gains vigilance until end of turn.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "At the beginning of combat on your turn, target creature you control gets +2/+0 and gains vigilance until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

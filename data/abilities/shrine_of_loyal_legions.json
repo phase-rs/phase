@@ -2,66 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "c_1_1_a_phyrexian_myr",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "X",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 colorless Phyrexian Myr artifact creature token for each charge counter on CARDNAME."
-      }
+      "description": "Create a 1/1 colorless Phyrexian Myr artifact creature token for each charge counter on CARDNAME.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "c_1_1_a_phyrexian_myr",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep or whenever you cast a white spell, put a charge counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.White",
-        "Execute": "TrigAddCounter",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep or whenever you cast a white spell, put a charge counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your upkeep or whenever you cast a white spell, put a charge counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAddCounter",
-        "ValidPlayer": "You",
-        "Secondary": "True",
-        "TriggerDescription": "At the beginning of your upkeep or whenever you cast a white spell, put a charge counter on CARDNAME.",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

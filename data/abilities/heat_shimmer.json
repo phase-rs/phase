@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "Create a token that's a copy of target creature, except it has haste and \"At the beginning of the end step, exile this permanent.\"",
-          "AddKeywords": "Haste",
-          "ValidTgts": "Creature",
-          "AtEOTTrig": "Exile"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a token that's a copy of target creature, except it has haste and \"At the beginning of the end step, exile this permanent.\"",
-        "AddKeywords": "Haste",
-        "ValidTgts": "Creature",
-        "AtEOTTrig": "Exile"
-      }
+      "description": "Create a token that's a copy of target creature, except it has haste and \"At the beginning of the end step, exile this permanent.\"",
+      "effect": {
+        "description": "Create a token that's a copy of target creature, except it has haste and \"At the beginning of the end step, exile this permanent.\"",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

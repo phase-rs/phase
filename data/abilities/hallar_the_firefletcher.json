@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell, if that spell was kicked, put a +1/+1 counter on CARDNAME, then CARDNAME deals damage equal to the number of +1/+1 counters on it to each opponent.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.kicked",
-        "Execute": "DBPutCounter",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell, if that spell was kicked, put a +1/+1 counter on CARDNAME, then CARDNAME deals damage equal to the number of +1/+1 counters on it to each opponent."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

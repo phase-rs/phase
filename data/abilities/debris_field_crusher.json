@@ -1,30 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "Origin": "Any",
-        "TriggerDescription": "When this Spacecraft enters, it deals 3 damage to any target.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 8+ Flying,,,{1}{R}: This Spacecraft gets +2/+0 until end of turn.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature",
-        "Affected": "Card.Self+counters_GE8_CHARGE",
-        "AddAbility": "CrusherPump",
-        "Description": "STATION 8+ Flying,,,{1}{R}: This Spacecraft gets +2/+0 until end of turn.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "CrusherPump",
+          "type": "AddAbility"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Spacecraft enters, it deals 3 damage to any target.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

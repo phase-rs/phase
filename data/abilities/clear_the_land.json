@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 5,
-        "destination": "Battlefield"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Tapped": "True",
-        "DestinationZone2": "Exile",
-        "ChangeNum": "All",
-        "SpellDescription": "Each player reveals the top five cards of their library, puts all land cards revealed this way onto the battlefield tapped, and exiles the rest.",
-        "Reveal": "True",
-        "ChangeValid": "Land",
-        "Defined": "Player"
-      }
+      "description": "Each player reveals the top five cards of their library, puts all land cards revealed this way onto the battlefield tapped, and exiles the rest.",
+      "effect": {
+        "count": 5,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

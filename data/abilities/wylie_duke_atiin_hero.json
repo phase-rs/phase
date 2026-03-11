@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes tapped, you gain 1 life and draw a card.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever CARDNAME becomes tapped, you gain 1 life and draw a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

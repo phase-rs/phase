@@ -1,30 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature an opponent controls dies, exile it with a hit counter on it.",
-        "Execute": "TrigChange",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.OppCtrl",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Assassin",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Mercenary.YouCtrl,Rogue.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Assassins, Mercenaries, and Rogues you control have deathtouch and \"Whenever this creature deals combat damage to a player, you may remove a hit counter from a card that player owns in exile. If you do, draw a card and create two Treasure tokens.\"",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "Description": "Assassins, Mercenaries, and Rogues you control have deathtouch and \"Whenever this creature deals combat damage to a player, you may remove a hit counter from a card that player owns in exile. If you do, draw a card and create two Treasure tokens.\"",
-        "Affected": "Assassin.YouCtrl,Mercenary.YouCtrl,Rogue.YouCtrl",
-        "AddTrigger": "TrigCombatDamagePlayer"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature an opponent controls dies, exile it with a hit counter on it.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      }
+    }
+  ]
 }

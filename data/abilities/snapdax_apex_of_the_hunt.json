@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, it deals 4 damage to target creature or planeswalker an opponent controls and you gain 4 life.",
       "mode": "Mutates",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever this creature mutates, it deals 4 damage to target creature or planeswalker an opponent controls and you gain 4 life."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,48 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "IsPresent": "Creature.YouCtrl+powerGE4",
-          "PrecostDesc": "Ferocious —",
-          "Amount": "2",
-          "SpellDescription": "Add {G}{G}. Activate only if you control a creature with power 4 or greater."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Creature.YouCtrl+powerGE4",
-        "PrecostDesc": "Ferocious —",
-        "Amount": "2",
-        "SpellDescription": "Add {G}{G}. Activate only if you control a creature with power 4 or greater."
-      }
+      "description": "Add {G}{G}. Activate only if you control a creature with power 4 or greater.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

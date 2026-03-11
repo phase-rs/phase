@@ -1,19 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures have base power and toughness 2/2 and are Bears in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Bear",
-        "SetPower": "2",
-        "Description": "Other creatures have base power and toughness 2/2 and are Bears in addition to their other types.",
-        "SetToughness": "2",
-        "Affected": "Creature.Other"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        },
+        {
+          "core_type": "Bear",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,135 +1,134 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
+              }
+            ],
+            "type": "Composite"
+          },
+          "description": "Create a 1/1 black and green Pest creature token with \"When this creature dies, you gain 1 life.\"",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "bg_1_1_pest_lifegain",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Tap"
-              },
-              {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Create a 1/1 black and green Pest creature token with \"When this creature dies, you gain 1 life.\""
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "costs": [
+              {
+                "cost": "1",
+                "type": "Mana"
+              },
+              {
+                "type": "Tap"
+              }
+            ],
+            "type": "Composite"
+          },
+          "description": "Each opponent mills cards equal to the amount of life you gained this turn.",
           "effect": {
-            "type": "Mill",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": "1"
-              },
-              {
-                "type": "Tap"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Opponent",
-            "SpellDescription": "Each opponent mills cards equal to the amount of life you gained this turn."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4"
+                "cost": "4",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Exile four target cards from a single graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Exile four target cards from a single graveyard.",
-            "TargetsWithSameController": "True",
-            "TargetMin": "4",
-            "TargetMax": "4",
-            "StackDescription": "Exile four target cards from a single graveyard. ({c:Targeted})",
-            "TgtPrompt": "Choose four target cards from a single graveyard",
-            "SubAbility": "DBDraw"
-          }
+          "target_prompt": "Choose four target cards from a single graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card.Creature+YouOwn,Card.Land+YouOwn,Card.Planeswalker+YouOwn"
-            }
-          },
           "cost": null,
+          "description": "Return up to two target creature, land, and/or planeswalker cards from your graveyard to your hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Creature"
+                },
+                {
+                  "type": "Other",
+                  "value": "YouOwn,Card.Land"
+                },
+                {
+                  "type": "Other",
+                  "value": "YouOwn,Card.Planeswalker"
+                },
+                {
+                  "type": "Other",
+                  "value": "YouOwn"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMax": "2",
-            "SubAbility": "DBGainLife",
-            "SpellDescription": "Return up to two target creature, land, and/or planeswalker cards from your graveyard to your hand.",
-            "TgtPrompt": "Choose up to two target creature, land, and/or planeswalker cards from your graveyard",
-            "StackDescription": "{p:You} returns up to two target creature, land, and/or planeswalker cards from their graveyard to their hand. ({c:Targeted})",
-            "TargetMin": "0"
-          }
+          "target_prompt": "Choose up to two target creature, land, and/or planeswalker cards from your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

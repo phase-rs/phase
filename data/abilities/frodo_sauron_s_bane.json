@@ -2,62 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "WB WB",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Citizen, it becomes a Halfling Scout with base power and toughness 2/3 and lifelink.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Halfling",
           "Scout"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "WB WB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Card.Self+Citizen",
-        "Duration": "Permanent",
-        "SpellDescription": "If CARDNAME is a Citizen, it becomes a Halfling Scout with base power and toughness 2/3 and lifelink.",
-        "RemoveCreatureTypes": "True",
-        "Keywords": "Lifelink"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B B B",
+        "type": "Mana"
+      },
+      "description": "If NICKNAME is a Scout, it becomes a Halfling Rogue with \"Whenever this creature deals combat damage to a player, that player loses the game if the Ring has tempted you four or more times this game. Otherwise, the Ring tempts you.\"",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Halfling",
           "Rogue"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If NICKNAME is a Scout, it becomes a Halfling Rogue with \"Whenever this creature deals combat damage to a player, that player loses the game if the Ring has tempted you four or more times this game. Otherwise, the Ring tempts you.\"",
-        "RemoveCreatureTypes": "True",
-        "Triggers": "TrigDamageDone",
-        "Duration": "Permanent",
-        "ConditionPresent": "Card.Self+Scout"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Consume Anomaly — Whenever CARDNAME deals combat damage to a player, put target face-up card they own in exile on the bottom of their library. If you do, you gain 3 life.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "Consume Anomaly — Whenever CARDNAME deals combat damage to a player, put target face-up card they own in exile on the bottom of their library. If you do, you gain 3 life.",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

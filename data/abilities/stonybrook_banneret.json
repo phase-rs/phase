@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Merfolk spells and Wizard spells you cast cost {1} less to cast.",
-        "ValidCard": "Merfolk,Wizard",
-        "Type": "Spell"
-      }
+      "description": "Merfolk spells and Wizard spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

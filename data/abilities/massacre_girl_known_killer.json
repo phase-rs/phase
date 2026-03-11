@@ -1,28 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "Origin": "Battlefield",
-        "ValidCard": "Creature.OppCtrl+toughnessLT1",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a creature an opponent controls dies, if its toughness was less than 1, draw a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have wither.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Wither",
-        "Description": "Creatures you control have wither."
-      }
+      "modifications": [
+        {
+          "keyword": "Wither",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature an opponent controls dies, if its toughness was less than 1, draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      }
+    }
+  ]
 }

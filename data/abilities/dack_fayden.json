@@ -2,76 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDiscard",
-        "Planeswalker": "True",
-        "ValidTgts": "Player",
-        "SpellDescription": "Target player draws two cards, then discards two cards."
-      }
+      "description": "Target player draws two cards, then discards two cards.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Gain control of target artifact.",
       "effect": {
-        "type": "GainControl",
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target artifact.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Stackable": "False",
-          "Triggers": "TrigSpellCast",
-          "Duration": "Permanent",
-          "Name": "Emblem — Dack Fayden",
-          "AILogic": "Always",
-          "Planeswalker": "True",
-          "SpellDescription": "You get an emblem with \"Whenever you cast a spell that targets one or more permanents, gain control of those permanents.\"",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Stackable": "False",
-        "Triggers": "TrigSpellCast",
-        "Duration": "Permanent",
-        "Name": "Emblem — Dack Fayden",
-        "AILogic": "Always",
-        "Planeswalker": "True",
-        "SpellDescription": "You get an emblem with \"Whenever you cast a spell that targets one or more permanents, gain control of those permanents.\"",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"Whenever you cast a spell that targets one or more permanents, gain control of those permanents.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

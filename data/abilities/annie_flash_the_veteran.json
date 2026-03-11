@@ -1,27 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, return target permanent card with mana value 3 or less from your graveyard to the battlefield tapped.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, return target permanent card with mana value 3 or less from your graveyard to the battlefield tapped.",
-        "ValidCard": "Card.Self+wasCastByYou"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever NICKNAME becomes tapped, exile the top two cards of your library. You may play those cards this turn.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME becomes tapped, exile the top two cards of your library. You may play those cards this turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "ExileTwo"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

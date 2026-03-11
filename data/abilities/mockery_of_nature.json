@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, you may destroy target artifact or enchantment.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When you cast this spell, you may destroy target artifact or enchantment."
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

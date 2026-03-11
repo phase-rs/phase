@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks, you may create a token that's a copy of that creature. Exile that token at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigCopy",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted creature attacks, you may create a token that's a copy of that creature. Exile that token at end of combat.",
-        "ValidCard": "Card.AttachedBy"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver",
-        "Description": "All Slivers have \"Whenever this permanent becomes the target of a spell an opponent controls, you may draw a card.\"",
-        "AddTrigger": "OpalineTgtTrig"
-      }
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"Whenever this permanent becomes the target of a spell an opponent controls, you may draw a card.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)",
-        "Affected": "Instant.YouCtrl+wasCast,Sorcery.YouCtrl+wasCast",
-        "AddKeyword": "Replicate:CardManaCost",
-        "AffectedZone": "Stack",
-        "EffectZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "keyword": "Replicate:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

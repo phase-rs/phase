@@ -2,62 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Destroy target artifact you control.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact you control.",
-        "TgtPrompt": "Choose target artifact you control"
-      }
+      "target_prompt": "Choose target artifact you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains flying until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "KW": "Flying",
-        "SpellDescription": "CARDNAME gains flying until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a modular triggered ability would put one or more +1/+1 counters on a creature you control, that many plus one +1/+1 counters are put on it instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ValidCounterType": "P1P1",
-        "Description": "If a modular triggered ability would put one or more +1/+1 counters on a creature you control, that many plus one +1/+1 counters are put on it instead.",
-        "ReplaceWith": "AddOneMoreCounter",
-        "ActiveZones": "Battlefield",
-        "ValidCause": "Triggered.Modular",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield"
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

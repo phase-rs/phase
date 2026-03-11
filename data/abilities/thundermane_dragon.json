@@ -1,42 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "Static": "True",
-        "TriggerDescription": "If you cast a creature spell this way, it gains haste until end of turn.",
-        "ValidSA": "Spell.MayPlaySource",
-        "Execute": "TrigAnimate",
-        "ValidActivatingPlayer": "You",
-        "Secondary": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Library",
-        "Description": "You may look at the top card of your library any time.",
-        "Affected": "Card.TopLibrary+YouOwn",
-        "MayLookAt": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may cast creature spells with power 4 or greater from the top of your library. If you cast a creature spell this way, it gains haste until end of turn.",
-        "Affected": "Card.TopLibrary+YouOwn+nonLand",
-        "AffectedZone": "Library",
-        "MayPlay": "True",
-        "ValidAfterStack": "Spell.Creature+powerGE4"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may cast creature spells with power 4 or greater from the top of your library. If you cast a creature spell this way, it gains haste until end of turn.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "If you cast a creature spell this way, it gains haste until end of turn.",
+      "mode": "SpellCast",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

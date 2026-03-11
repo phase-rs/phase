@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if you created a token this turn, draw a card.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each end step, if you created a token this turn, draw a card.",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "TrigDraw"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

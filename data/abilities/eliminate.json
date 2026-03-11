@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLE3,Planeswalker.cmcLE3"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or planeswalker with mana value 3 or less.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker with mana value 3 or less",
-        "SpellDescription": "Destroy target creature or planeswalker with mana value 3 or less."
-      }
+      "target_prompt": "Select target creature or planeswalker with mana value 3 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

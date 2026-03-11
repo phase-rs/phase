@@ -1,64 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
-              "SorcerySpeed": "True",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "5 WP"
+            "cost": "5 WP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
-            "SorcerySpeed": "True",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, each player mills three cards.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill",
-            "Destination": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters, each player mills three cards.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature transforms into CARDNAME, put target permanent card with mana value 2 or less from a graveyard onto the battlefield under your control.",
           "mode": "Transformed",
-          "params": {
-            "TriggerDescription": "When this creature transforms into CARDNAME, put target permanent card with mana value 2 or less from a graveyard onto the battlefield under your control.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigPut"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

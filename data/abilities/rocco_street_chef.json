@@ -1,40 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, each player exiles the top card of their library. Until your next end step, each player may play the card they exiled this way.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, each player exiles the top card of their library. Until your next end step, each player may play the card they exiled this way.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigExile",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player plays a land from exile or casts a spell from exile, you put a +1/+1 counter on target creature and create a Food token.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.wasCastFromExile",
-        "Execute": "TrigCounter",
-        "ValidActivatingPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player plays a land from exile or casts a spell from exile, you put a +1/+1 counter on target creature and create a Food token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a player plays a land from exile or casts a spell from exile, you put a +1/+1 counter on target creature and create a Food token.",
       "mode": "LandPlayed",
-      "params": {
-        "Execute": "TrigCounter",
-        "Secondary": "True",
-        "Origin": "Exile",
-        "TriggerDescription": "Whenever a player plays a land from exile or casts a spell from exile, you put a +1/+1 counter on target creature and create a Food token.",
-        "ValidCard": "Land",
-        "TriggerZones": "Battlefield"
+      "origin": "Exile",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

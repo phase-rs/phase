@@ -1,30 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more other creatures you control with power 2 or less enter, draw a card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Creature.powerLE2+YouCtrl+Other",
-        "TriggerDescription": "Whenever one or more other creatures you control with power 2 or less enter, draw a card. This ability triggers only once each turn.",
-        "Execute": "TrigDraw",
-        "ActivationLimit": "1",
-        "Destination": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+Creature",
-        "TriggerDescription": "When CARDNAME dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "DBReturn"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

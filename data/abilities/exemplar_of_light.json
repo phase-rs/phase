@@ -1,30 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, put a +1/+1 counter on this creature.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on this creature.",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you put one or more +1/+1 counters on this creature, draw a card. This ability triggers only once each turn.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ActivationLimit": "1",
-        "ValidCard": "Card.Self",
-        "ValidSource": "You",
-        "CounterType": "P1P1",
-        "TriggerDescription": "Whenever you put one or more +1/+1 counters on this creature, draw a card. This ability triggers only once each turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

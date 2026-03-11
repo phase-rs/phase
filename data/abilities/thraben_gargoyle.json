@@ -1,44 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME.",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "6"
+            "cost": "6",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME.",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

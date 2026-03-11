@@ -1,37 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "TrigDestroyBlocked",
-        "ValidCard": "Creature.Vampire",
-        "ValidBlocker": "Card.AttachedBy",
-        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated."
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Vampire"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "TrigDestroyBlocker",
-        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated.",
-        "ValidBlocker": "Creature.Vampire",
-        "Secondary": "True",
-        "ValidCard": "Card.AttachedBy"
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +1/+0.",
-        "AddPower": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"{T}: Create a token that's a copy of this creature, except it has haste. Exile it at the beginning of the next end step.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has \"{T}: Create a token that's a copy of this creature, except it has haste. Exile it at the beginning of the next end step.\"",
-        "AddAbility": "ABCopy",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "ability": "ABCopy",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

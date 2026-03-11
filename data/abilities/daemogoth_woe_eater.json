@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice a creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSacrifice",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice a creature."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When you sacrifice CARDNAME, each opponent discards a card, you draw a card, and you gain 2 life.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When you sacrifice CARDNAME, each opponent discards a card, you draw a card, and you gain 2 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

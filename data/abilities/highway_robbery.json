@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "SpellDescription": "You may discard a card or sacrifice a land. If you do, draw two cards.",
-          "Choices": "DBDiscardToDraw,DBSacToDraw"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may discard a card or sacrifice a land. If you do, draw two cards.",
-        "Choices": "DBDiscardToDraw,DBSacToDraw"
-      }
+      "description": "You may discard a card or sacrifice a land. If you do, draw two cards.",
+      "effect": {
+        "description": "You may discard a card or sacrifice a land. If you do, draw two cards.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player loses 2 life at the beginning of their next draw step unless they pay {2} before that step.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player loses 2 life at the beginning of their next draw step unless they pay {2} before that step.",
-        "Execute": "NafsEffect"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

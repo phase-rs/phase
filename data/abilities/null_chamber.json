@@ -1,24 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.NamedCard",
-        "Description": "Spells with the chosen names can't be cast and lands with the chosen names can't be played."
-      }
+      "description": "Spells with the chosen names can't be cast and lands with the chosen names can't be played.",
+      "mode": "CantBeCast"
     },
     {
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "ValidCard": "Land.NamedCard"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, scry 2.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigScry",
-        "TriggerDescription": "When CARDNAME enters, scry 2."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME crews a Vehicle, that Vehicle gets +1/+1 until end of turn.",
       "mode": "Crewed",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "ValidCrew": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME crews a Vehicle, that Vehicle gets +1/+1 until end of turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

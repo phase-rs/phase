@@ -1,25 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/-1 and attacks each combat if able.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "-1",
-        "Description": "Enchanted creature gets +1/-1 and attacks each combat if able.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     },
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Creature.EnchantedBy",
-        "Secondary": "True"
-      }
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

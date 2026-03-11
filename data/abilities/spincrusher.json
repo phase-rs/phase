@@ -2,40 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "CARDNAME can't be blocked this turn.",
-          "StaticAbilities": "Unblockable",
-          "RememberObjects": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/P1P1>"
+        "cost": "SubCounter<1/P1P1>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "CARDNAME can't be blocked this turn.",
-        "StaticAbilities": "Unblockable",
-        "RememberObjects": "Self"
-      }
+      "description": "CARDNAME can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks, put a +1/+1 counter on it.",
       "mode": "Blocks",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME blocks, put a +1/+1 counter on it.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

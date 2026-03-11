@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, gain control of another target creature until end of turn. Untap that creature. It gains haste until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, gain control of another target creature until end of turn. Untap that creature. It gains haste until end of turn.",
-        "TargetsValid": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

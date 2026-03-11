@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if you gained life this turn, create a 1/1 black Bat creature token with flying.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "TrigToken",
-        "CheckSVar": "YouLifeGained",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each end step, if you gained life this turn, create a 1/1 black Bat creature token with flying."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you're dealt damage, you may create that many 1/1 white Soldier creature tokens.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "You",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you're dealt damage, you may create that many 1/1 white Soldier creature tokens.",
-        "Execute": "TrigToken"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,56 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": ""
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top X cards of your library, where X is the number of charge counters on CARDNAME. Put one of those cards into your hand and the rest on the bottom of your library in any order."
-      }
+      "description": "Look at the top X cards of your library, where X is the number of charge counters on CARDNAME. Put one of those cards into your hand and the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 1,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep or whenever you cast a blue spell, put a charge counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Blue",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAddCounter",
-        "TriggerDescription": "At the beginning of your upkeep or whenever you cast a blue spell, put a charge counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your upkeep or whenever you cast a blue spell, put a charge counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "At the beginning of your upkeep or whenever you cast a blue spell, put a charge counter on CARDNAME.",
-        "Execute": "TrigAddCounter",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

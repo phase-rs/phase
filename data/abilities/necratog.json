@@ -2,28 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "ExileFromGrave<1/Card.TopGraveyardCreature>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+2 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "ExileFromGrave<1/Card.TopGraveyardCreature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+2 until end of turn.",
-        "CostDesc": "Exile the top creature card of your graveyard:"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,48 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "Defined": "You",
-          "AILogic": "MostProminentInHumanDeck",
-          "SubAbility": "DBPump",
-          "SpellDescription": "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "WP"
+            "cost": "WP",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "AILogic": "MostProminentInHumanDeck",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn."
-      }
+      "description": "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn.",
+      "effect": {
+        "description": "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Creature.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

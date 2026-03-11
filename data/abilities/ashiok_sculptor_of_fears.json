@@ -2,71 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBMill",
-        "SpellDescription": "Draw a card. Each player mills two cards."
-      }
+      "description": "Draw a card. Each player mills two cards.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -5,
+        "type": "Loyalty"
+      },
+      "description": "Put target creature card from a graveyard onto the battlefield under your control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -5
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature card in a graveyard",
-        "Planeswalker": "True",
-        "GainControl": "True",
-        "SpellDescription": "Put target creature card from a graveyard onto the battlefield under your control."
-      }
+      "target_prompt": "Select target creature card in a graveyard"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -11
+        "amount": -11,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "AllValid": "Creature.TargetedPlayerCtrl",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Gain control of all creatures target opponent controls.",
-        "NewController": "You"
-      }
+      "description": "Gain control of all creatures target opponent controls.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

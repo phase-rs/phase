@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddStaticAbility": "NoSacEOT",
-        "Description": "During your end step, Warrior tokens you control have \"This token can't be sacrificed.\"",
-        "Condition": "PlayerTurn",
-        "Phases": "End of Turn",
-        "Affected": "Warrior.YouCtrl+token"
-      }
+      "affected": {
+        "card_type": "Warrior",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your end step, Warrior tokens you control have \"This token can't be sacrificed.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

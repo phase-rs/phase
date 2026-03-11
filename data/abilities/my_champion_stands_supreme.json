@@ -1,39 +1,79 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Your commander has ward {2}.",
+      "effect_zone": "Command",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Ward:2",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever your commander attacks, put two +1/+1 counters on it.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever your commander attacks, put two +1/+1 counters on it.",
-        "ValidCard": "Card.IsCommander+YouOwn",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When your commander leaves the battlefield, abandon this scheme.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When your commander leaves the battlefield, abandon this scheme.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.IsCommander+YouOwn",
-        "Origin": "Battlefield",
-        "Execute": "TrigAbandon"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.IsCommander+YouOwn",
-        "EffectZone": "Command",
-        "AddKeyword": "Ward:2",
-        "Description": "Your commander has ward {2}."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a creature enters, sacrifice CARDNAME and create X 2/2 green Monkey creature tokens, where X is that creature's mana value.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When a creature enters, sacrifice CARDNAME and create X 2/2 green Monkey creature tokens, where X is that creature's mana value.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigSac",
-        "ValidCard": "Creature"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

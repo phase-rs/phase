@@ -1,28 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouOwn",
-        "AffectedZone": "Library",
-        "Description": "You may look at the top card of your library any time.",
-        "MayLookAt": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may cast spells from the top of your library by removing a counter from a creature you control in addition to paying their other costs.",
-        "RaiseCost": "RemoveAnyCounter<1/Any/Creature>",
-        "Affected": "Card.TopLibrary+YouOwn+nonLand",
-        "AffectedZone": "Library",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may cast spells from the top of your library by removing a counter from a creature you control in addition to paying their other costs.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

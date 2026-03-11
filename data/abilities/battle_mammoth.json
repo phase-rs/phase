@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a permanent you control becomes the target of a spell or ability an opponent controls, you may draw a card.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Permanent.YouCtrl+inZoneBattlefield",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a permanent you control becomes the target of a spell or ability an opponent controls, you may draw a card."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

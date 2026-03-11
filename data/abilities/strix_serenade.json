@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "Counter target artifact, creature, or planeswalker spell.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "SpellDescription": "Counter target artifact, creature, or planeswalker spell.",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target artifact, creature, or planeswalker spell"
-      }
+      "target_prompt": "Select target artifact, creature, or planeswalker spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent,Player",
-        "ReplaceWith": "DmgPlus1",
-        "ValidSource": "Spell.Red",
-        "Description": "If a red spell would deal damage to a permanent or player, it deals that much damage plus 1 to that permanent or player instead.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If a red spell would deal damage to a permanent or player, it deals that much damage plus 1 to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature enters from your graveyard, that creature deals damage equal to its power to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "ReanimateDmg",
-        "TriggerDescription": "Whenever CARDNAME or another creature enters from your graveyard, that creature deals damage equal to its power to any target.",
-        "Origin": "Graveyard",
-        "ValidCard": "Card.Self+YouOwn,Creature.YouOwn+Other",
-        "Destination": "Battlefield"
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self"
+              },
+              {
+                "type": "Other",
+                "value": "YouOwn,Creature.YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

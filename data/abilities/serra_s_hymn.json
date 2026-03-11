@@ -2,52 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Amount": "X",
-          "ValidTgts": "Any",
-          "TgtPrompt": "Select any target to prevent damage to",
-          "DividedAsYouChoose": "X",
-          "TargetMin": "0",
-          "SpellDescription": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
-          "TargetMax": "MaxTgts"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
+      "effect": {
+        "description": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Amount": "X",
-        "ValidTgts": "Any",
-        "TgtPrompt": "Select any target to prevent damage to",
-        "DividedAsYouChoose": "X",
-        "TargetMin": "0",
-        "SpellDescription": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
-        "TargetMax": "MaxTgts"
-      }
+      "target_prompt": "Select any target to prevent damage to"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter",
-        "Phase": "Upkeep"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

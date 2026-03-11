@@ -2,29 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Knight"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W W"
+        "cost": "1 W W",
+        "type": "Mana"
       },
+      "description": "Target Knight creature gets +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Knight"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Knight creature",
-        "SpellDescription": "Target Knight creature gets +1/+1 until end of turn."
-      }
+      "target_prompt": "Select target Knight creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,47 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Forest"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X G G"
+            "cost": "X G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "X target lands become Forests until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Forest"
         ]
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "X target lands become Forests until end of turn.",
-        "TgtPrompt": "Select target land to become forest",
-        "TargetMin": "0",
-        "TargetMax": "MaxTgt",
-        "RemoveLandTypes": "True"
-      }
+      "target_prompt": "Select target land to become forest"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

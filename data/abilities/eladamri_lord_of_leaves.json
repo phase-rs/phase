@@ -1,25 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Elf"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Elf creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Elf+Other",
-        "AddKeyword": "Landwalk:Forest",
-        "Description": "Other Elf creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Forest",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Elf"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Elves have shroud. (They can't be the targets of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Elves have shroud. (They can't be the targets of spells or abilities.)",
-        "Affected": "Card.Elf+Other",
-        "AddKeyword": "Shroud"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,25 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature can't be blocked and has shroud. (It can't be the target of spells or abilities.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shroud",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't be blocked and has shroud. (It can't be the target of spells or abilities.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

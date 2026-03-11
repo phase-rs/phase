@@ -2,26 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
-      },
       "cost": null,
+      "description": "Cast this spell only during the declare attackers step and only if you've been attacked this step. Destroy target attacking creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Cast this spell only during the declare attackers step and only if you've been attacked this step. Destroy target attacking creature.",
-        "ActivationPhases": "Declare Attackers",
-        "TgtPrompt": "Select target attacking creature",
-        "CheckSVar": "X"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

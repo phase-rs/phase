@@ -2,56 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "5"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
-        "Execute": "TrigDealDamage",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
       "mode": "BecomesTarget",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
-        "ValidSource": "Spell",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "Secondary": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

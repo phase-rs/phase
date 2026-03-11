@@ -2,41 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SwitchBlock",
-        "params": {
-          "TargetMax": "2",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Creature.attacking+blocked",
-          "ActivationPhases": "Declare Blockers",
-          "TargetMin": "2",
-          "TgtPrompt": "Choose two target blocked attacking creatures",
-          "DefinedAttacker": "Targeted",
-          "DefinedBlocker": "Valid Creature.blockingTargeted",
-          "SpellDescription": "Choose two target blocked attacking creatures. If each of those creatures could be blocked by all creatures that the other is blocked by, each creature that's blocking exactly one of those attacking creatures stops blocking it and is blocking the other attacking creature. Activate only during the declare blockers step."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Choose two target blocked attacking creatures. If each of those creatures could be blocked by all creatures that the other is blocked by, each creature that's blocking exactly one of those attacking creatures stops blocking it and is blocking the other attacking creature. Activate only during the declare blockers step.",
+      "effect": {
+        "description": "Choose two target blocked attacking creatures. If each of those creatures could be blocked by all creatures that the other is blocked by, each creature that's blocking exactly one of those attacking creatures stops blocking it and is blocking the other attacking creature. Activate only during the declare blockers step.",
+        "name": "SwitchBlock",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Creature.attacking+blocked",
-        "ActivationPhases": "Declare Blockers",
-        "TargetMin": "2",
-        "TgtPrompt": "Choose two target blocked attacking creatures",
-        "DefinedAttacker": "Targeted",
-        "DefinedBlocker": "Valid Creature.blockingTargeted",
-        "SpellDescription": "Choose two target blocked attacking creatures. If each of those creatures could be blocked by all creatures that the other is blocked by, each creature that's blocking exactly one of those attacking creatures stops blocking it and is blocking the other attacking creature. Activate only during the declare blockers step."
-      }
+      "target_prompt": "Choose two target blocked attacking creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

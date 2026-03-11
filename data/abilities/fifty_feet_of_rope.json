@@ -2,92 +2,81 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Wall"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target Wall can't block this turn.",
-        "IsCurse": "True",
-        "PrecostDesc": "Climb Over —",
-        "KW": "HIDDEN CARDNAME can't block."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "Target Wall can't block this turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Wall"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "HIDDEN This card doesn't untap during your next untap step.",
-        "PrecostDesc": "Tie Up —",
-        "Duration": "Permanent",
-        "SpellDescription": "Target creature doesn't untap during its controller's next untap step.",
-        "IsCurse": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Venture",
-        "params": {
-          "PrecostDesc": "Rappel Down —",
-          "SpellDescription": "Venture into the dungeon. Activate only as a sorcery. (Enter the first room or advance to the next room.)",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Rappel Down —",
-        "SpellDescription": "Venture into the dungeon. Activate only as a sorcery. (Enter the first room or advance to the next room.)",
-        "SorcerySpeed": "True"
-      }
+      "description": "Target creature doesn't untap during its controller's next untap step.",
+      "duration": "Permanent",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
+      "cost": {
+        "costs": [
+          {
+            "cost": "4",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Venture into the dungeon. Activate only as a sorcery. (Enter the first room or advance to the next room.)",
+      "effect": {
+        "description": "Venture into the dungeon. Activate only as a sorcery. (Enter the first room or advance to the next room.)",
+        "name": "Venture",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

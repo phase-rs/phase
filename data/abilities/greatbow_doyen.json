@@ -1,29 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Archer.YouCtrl+inZoneBattlefield",
-        "ValidTarget": "Creature",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an Archer you control deals damage to a creature, that Archer deals that much damage to that creature's controller.",
-        "Execute": "TrigDealDamage"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Archer"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Archer creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Other Archer creatures you control get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Creature.Archer+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever an Archer you control deals damage to a creature, that Archer deals that much damage to that creature's controller.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Archer",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

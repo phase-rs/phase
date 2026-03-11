@@ -1,18 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Creature.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, each of those creatures gets +4/+4.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is paired with another creature, each of those creatures gets +4/+4.",
-        "Affected": "Creature.PairedWith,Creature.Self+Paired",
-        "AddToughness": "4",
-        "AddPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

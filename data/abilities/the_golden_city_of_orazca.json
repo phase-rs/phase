@@ -1,28 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token. Then draw a card if you have the city's blessing.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigToken",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token. Then draw a card if you have the city's blessing.",
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever chaos ensues, you may put a permanent card from your hand onto the battlefield tapped.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, you may put a permanent card from your hand onto the battlefield tapped."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you attacked this turn, create a 1/1 white Human Soldier creature token.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, if you attacked this turn, create a 1/1 white Human Soldier creature token.",
-        "Phase": "End of Turn",
-        "CheckSVar": "RaidTest",
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

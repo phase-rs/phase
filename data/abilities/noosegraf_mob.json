@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell, remove a +1/+1 counter from CARDNAME. If you do, create a 2/2 black Zombie creature token.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigRemoveCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player casts a spell, remove a +1/+1 counter from CARDNAME. If you do, create a 2/2 black Zombie creature token."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

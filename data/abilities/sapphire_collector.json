@@ -2,46 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant.YouCtrl,Sorcery.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U"
+        "cost": "2 U",
+        "type": "Mana"
       },
+      "description": "Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Sorcery.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target instant or sorcery card",
-        "PumpZone": "Graveyard",
-        "SpellDescription": "Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
-        "AILogic": "ReplaySpell",
-        "KW": "Flashback",
-        "TgtZone": "Graveyard"
-      }
+      "target_prompt": "Select target instant or sorcery card"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast your second noncreature spell in a turn, conjure a card named Mox Sapphire into your hand. This ability triggers only once.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigConjure",
-        "TriggerDescription": "When you cast your second noncreature spell in a turn, conjure a card named Mox Sapphire into your hand. This ability triggers only once.",
-        "ActivatorThisTurnCast": "EQ2",
-        "ValidActivatingPlayer": "You",
-        "GameActivationLimit": "1",
-        "ValidCard": "Card.YouCtrl+nonCreature",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

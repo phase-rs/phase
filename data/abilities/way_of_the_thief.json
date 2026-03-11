@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "condition": {
+        "filter": {
+          "card_type": "Gate",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Enchanted creature can't be blocked as long as you control a Gate.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "IsPresent": "Gate.YouCtrl",
-        "ValidAttacker": "Card.EnchantedBy",
-        "Description": "Enchanted creature can't be blocked as long as you control a Gate."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

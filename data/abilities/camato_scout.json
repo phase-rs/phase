@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has landwalk of the chosen type.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:ChosenType",
-        "Description": "CARDNAME has landwalk of the chosen type.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:ChosenType",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Escape:CardManaCost ExileFromGrave<3/Card.Other/other>",
-        "Description": "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)",
-        "Affected": "Card.YouOwn+nonLand",
-        "AffectedZone": "Graveyard"
-      }
+      "modifications": [
+        {
+          "keyword": "Escape:CardManaCost",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "ExileFromGrave<3/Card.Other/other>",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of the end step, sacrifice CARDNAME.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

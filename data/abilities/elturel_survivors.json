@@ -1,17 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is attacking, it gets +X/+0, where X is the number of lands defending player controls.",
-        "Affected": "Creature.Self+attacking",
-        "AddPower": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is attacking, it gets +X/+0, where X is the number of lands defending player controls.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

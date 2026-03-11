@@ -2,36 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature",
-          "AILogic": "Fog",
-          "Name": "Awe Struck",
-          "ReplacementEffects": "StrikeWithAwe",
-          "ExileOnMoved": "Battlefield",
-          "RememberObjects": "Targeted",
-          "TgtPrompt": "Select target creature to entrance",
-          "SpellDescription": "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way."
-        }
-      },
       "cost": null,
+      "description": "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "AILogic": "Fog",
-        "Name": "Awe Struck",
-        "ReplacementEffects": "StrikeWithAwe",
-        "ExileOnMoved": "Battlefield",
-        "RememberObjects": "Targeted",
-        "TgtPrompt": "Select target creature to entrance",
-        "SpellDescription": "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way."
-      }
+      "target_prompt": "Select target creature to entrance"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

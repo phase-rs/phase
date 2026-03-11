@@ -2,41 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U U"
+            "cost": "U U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<X/Card/card(s)>"
+            "cost": "Discard<X/Card/card(s)>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return X target nonland permanents to their owners' hands.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target nonland permanents",
-        "CostDesc": "As an additional cost to cast this spell, discard X cards.",
-        "SpellDescription": "Return X target nonland permanents to their owners' hands.",
-        "TargetMax": "X",
-        "TargetMin": "X"
-      }
+      "target_prompt": "Select X target nonland permanents"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

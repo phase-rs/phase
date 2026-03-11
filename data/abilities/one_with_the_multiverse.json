@@ -1,32 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Description": "You may look at the top card of your library any time. You may play lands and cast spells from the top of your library.",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "AffectedZone": "Library",
-        "MayLookAt": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time. You may play lands and cast spells from the top of your library.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayLimit": "1",
-        "Affected": "Card.nonLand+TopLibrary+YouCtrl,Card.nonLand+YouOwn",
-        "AffectedZone": "Library,Hand",
-        "Condition": "PlayerTurn",
-        "MayPlayWithoutManaCost": "True",
-        "MayPlay": "True",
-        "Description": "Once during each of your turns, you may cast a spell from your hand or the top of your library without paying its mana cost.",
-        "MayPlayDontGrantZonePermissions": "True"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Card.nonLand"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library,Hand",
+      "description": "Once during each of your turns, you may cast a spell from your hand or the top of your library without paying its mana cost.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

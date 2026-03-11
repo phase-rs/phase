@@ -1,27 +1,69 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 2+ {1}, {T}, Sacrifice a land: Draw two cards. You may play an additional land this turn.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE2_CHARGE",
-        "AddAbility": "HearthhullDraw",
-        "Description": "STATION 2+ {1}, {T}, Sacrifice a land: Draw two cards. You may play an additional land this turn."
-      }
+      "modifications": [
+        {
+          "ability": "HearthhullDraw",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 8+ Flying, vigilance, haste,,,Whenever you sacrifice a land, each opponent loses 2 life.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE8_CHARGE",
-        "AddKeyword": "Flying & Vigilance & Haste",
-        "AddType": "Creature",
-        "AddTrigger": "SacrificeTrig",
-        "Description": "STATION 8+ Flying, vigilance, haste,,,Whenever you sacrifice a land, each opponent loses 2 life."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "ValidTgts": "Player",
-          "Look": "True",
-          "SpellDescription": "Look at target player's hand."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "Look": "True",
-        "SpellDescription": "Look at target player's hand."
-      }
+      "description": "Look at target player's hand.",
+      "effect": {
+        "description": "Look at target player's hand.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,73 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo B R",
-        "params": {
-          "SpellDescription": "Add {B} or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B} or {R}."
-      }
+      "description": "Add {B} or {R}.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 B R",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 2/3 black and red Insect creature with menace. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Insect"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 B R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Menace",
-        "Colors": "Black,Red",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 2/3 black and red Insect creature with menace. It's still a land.",
-        "Defined": "Self",
-        "OverwriteColors": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "Execute": "TrigLoot",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may discard a card. If you do, draw a card.",
-        "ValidCard": "Card.Self"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped"
+      "description": "Whenever CARDNAME attacks, you may discard a card. If you do, draw a card.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

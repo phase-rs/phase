@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "Double the number of +1/+1 counters on CARDNAME.",
       "effect": {
-        "type": "MultiplyCounter",
         "counter_type": "P1P1",
         "multiplier": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "MultiplyCounter"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Double the number of +1/+1 counters on CARDNAME.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

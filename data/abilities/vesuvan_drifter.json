@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigReveal",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of each combat, you may reveal the top card of your library. If you reveal a creature card this way, CARDNAME becomes a copy of that card until end of turn, except it has flying."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "You may look at the top card of your library any time.",
-        "MayLookAt": "You",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each combat, you may reveal the top card of your library. If you reveal a creature card this way, CARDNAME becomes a copy of that card until end of turn, except it has flying.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, CARDNAME can attack this turn as though it didn't have defender.",
       "mode": "SpellCastOrCopy",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, CARDNAME can attack this turn as though it didn't have defender.",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

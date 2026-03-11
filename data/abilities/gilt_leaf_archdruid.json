@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<7/Druid>",
+        "type": "Mana"
+      },
+      "description": "Gain control of all lands target player controls.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<7/Druid>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of all lands target player controls.",
-        "CostDesc": "Tap seven untapped Druids you control:",
-        "NewController": "You",
-        "AllValid": "Land.ControlledBy Targeted"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Druid spell, you may draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Druid",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you cast a Druid spell, you may draw a card.",
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Druid",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

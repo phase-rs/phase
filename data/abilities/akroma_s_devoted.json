@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Cleric"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Cleric creatures have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Vigilance",
-        "Affected": "Creature.Cleric",
-        "Description": "Cleric creatures have vigilance."
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

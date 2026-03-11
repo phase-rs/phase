@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Player.Opponent",
-        "ValidCard": "Card.NamedCard",
-        "Description": "Your opponents can't cast spells with the chosen name (as long as this creature is on the battlefield)."
-      }
+      "description": "Your opponents can't cast spells with the chosen name (as long as this creature is on the battlefield).",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

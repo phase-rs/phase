@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle this card, destroy up to one target artifact or enchantment with mana value X.",
       "mode": "Cycled",
-      "params": {
-        "TriggerDescription": "When you cycle this card, destroy up to one target artifact or enchantment with mana value X.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

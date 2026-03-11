@@ -2,32 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "BraceReplace",
-          "SpellDescription": "Prevent all damage that would be dealt to target multicolored creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
-          "ValidTgts": "Creature.MultiColor",
-          "TgtPrompt": "Select target multicolored creature",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": null,
+      "description": "Prevent all damage that would be dealt to target multicolored creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "BraceReplace",
-        "SpellDescription": "Prevent all damage that would be dealt to target multicolored creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
-        "ValidTgts": "Creature.MultiColor",
-        "TgtPrompt": "Select target multicolored creature",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield"
-      }
+      "target_prompt": "Select target multicolored creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

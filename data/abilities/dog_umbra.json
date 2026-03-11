@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As long as another player controls enchanted creature, it can't attack or block. Otherwise, CARDNAME has umbra armor. (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Creature.EnchantedBy+ControlledBy Player.Other",
-        "Description": "As long as another player controls enchanted creature, it can't attack or block. Otherwise, CARDNAME has umbra armor. (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)"
       }
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "EnchantedBy"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as another player controls enchanted creature, it can't attack or block. Otherwise, CARDNAME has umbra armor. (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "IsPresent": "Creature.YouCtrl+EnchantedBy",
-        "Secondary": "True",
-        "Description": "As long as another player controls enchanted creature, it can't attack or block. Otherwise, CARDNAME has umbra armor. (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
-        "AddKeyword": "Umbra armor"
-      }
+      "modifications": [
+        {
+          "keyword": "Umbra",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "armor",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

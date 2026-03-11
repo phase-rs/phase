@@ -1,164 +1,118 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 1,
+            "type": "Loyalty"
+          },
+          "description": "CARDNAME deals 1 damage to each opponent. If you've drawn three or more cards this turn, she deals 3 damage to each opponent instead.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Variable",
               "value": "X"
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "Defined": "Player.Opponent",
-            "SpellDescription": "CARDNAME deals 1 damage to each opponent. If you've drawn three or more cards this turn, she deals 3 damage to each opponent instead."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Ultimate": "True",
-              "Duration": "Permanent",
-              "Planeswalker": "True",
-              "SpellDescription": "You get an emblem with \"Whenever you cast an instant or sorcery spell, you may pay {2}. If you do, copy that spell. You may choose new targets for the copy.\"",
-              "Name": "Emblem — Rowan, Scholar of Sparks",
-              "Triggers": "TRCast"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -4
+            "amount": -4,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Ultimate": "True",
-            "Duration": "Permanent",
-            "Planeswalker": "True",
-            "SpellDescription": "You get an emblem with \"Whenever you cast an instant or sorcery spell, you may pay {2}. If you do, copy that spell. You may choose new targets for the copy.\"",
-            "Name": "Emblem — Rowan, Scholar of Sparks",
-            "Triggers": "TRCast"
-          }
+          "description": "You get an emblem with \"Whenever you cast an instant or sorcery spell, you may pay {2}. If you do, copy that spell. You may choose new targets for the copy.\"",
+          "duration": "Permanent",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "Type": "Spell",
-            "ValidCard": "Instant,Sorcery",
-            "Amount": "1",
-            "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
-            "Activator": "You"
-          }
+          "description": "Instant and sorcery spells you cast cost {1} less to cast.",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 1,
+            "type": "Loyalty"
+          },
+          "description": "Up to one target creature has base power and toughness 0/2 until your next turn.",
+          "duration": "UntilYourNextTurn",
           "effect": {
-            "type": "Animate",
             "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
             "toughness": 2,
-            "types": [],
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+            "type": "Animate",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select up to one target creature",
-            "TargetMax": "1",
-            "TargetMin": "0",
-            "Duration": "UntilYourNextTurn",
-            "Planeswalker": "True",
-            "SpellDescription": "Up to one target creature has base power and toughness 0/2 until your next turn."
-          }
+          "target_prompt": "Select up to one target creature"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -3
+            "amount": -3,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SpellDescription": "Draw two cards."
-          }
+          "description": "Draw two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -7,
+            "type": "Loyalty"
+          },
+          "description": "Exile up to five target permanents. For each permanent exiled this way, its controller creates a 4/4 blue and red Elemental creature token.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
-              "type": "Filtered",
-              "filter": "Permanent"
-            }
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -7
-          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "RememberLKI": "True",
-            "TgtPrompt": "Select up to five target permanents",
-            "Ultimate": "True",
-            "SubAbility": "DBRepeat",
-            "SpellDescription": "Exile up to five target permanents. For each permanent exiled this way, its controller creates a 4/4 blue and red Elemental creature token.",
-            "TargetMin": "0",
-            "TargetMax": "5"
-          }
+          "target_prompt": "Select up to five target permanents"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
-            "Type": "Spell",
-            "Activator": "You",
-            "ValidCard": "Instant,Sorcery",
-            "Amount": "1"
-          }
+          "description": "Instant and sorcery spells you cast cost {1} less to cast.",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

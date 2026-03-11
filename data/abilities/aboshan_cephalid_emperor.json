@@ -2,46 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Octopus>"
+        "cost": "tapXType<1/Octopus>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target permanent."
-      }
+      "description": "Tap target permanent.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature.withoutFlying",
-          "SpellDescription": "Tap all creatures without flying."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U U U"
+        "cost": "U U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.withoutFlying",
-        "SpellDescription": "Tap all creatures without flying."
-      }
+      "description": "Tap all creatures without flying.",
+      "effect": {
+        "description": "Tap all creatures without flying.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

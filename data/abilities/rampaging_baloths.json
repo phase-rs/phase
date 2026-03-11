@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Landfall — Whenever a land you control enters, create a 4/4 green Beast creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, create a 4/4 green Beast creature token."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

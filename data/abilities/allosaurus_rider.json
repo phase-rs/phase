@@ -1,29 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to 1 plus the number of lands you control.",
-        "SetPower": "X",
-        "CharacteristicDefining": "True"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to 1 plus the number of lands you control.",
+      "mode": "Continuous"
     },
     {
+      "description": "You may exile two green cards from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "You may exile two green cards from your hand rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Cost": "ExileFromHand<2/Card.Green>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

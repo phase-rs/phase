@@ -1,42 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME.",
-        "Execute": "DBAttach",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "Attacks",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "Execute": "DBAttach",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME."
-      }
+      "description": "During your turn, prevent all damage that would be dealt to NICKNAME.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "PlayerTurn": "True",
-        "Description": "During your turn, prevent all damage that would be dealt to NICKNAME.",
-        "Prevent": "True",
-        "ValidTarget": "Card.Self"
+      "description": "Whenever CARDNAME enters or attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Whenever CARDNAME attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME.",
+      "mode": "Attacks",
+      "optional": true,
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

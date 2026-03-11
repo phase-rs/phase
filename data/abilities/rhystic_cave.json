@@ -2,31 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SpellDescription": "Choose a color. Add one mana of that color unless any player pays {1}. Activate only as an instant.",
-          "InstantSpeed": "True",
-          "AILogic": "MostProminentInComputerDeck",
-          "SubAbility": "DBMana"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a color. Add one mana of that color unless any player pays {1}. Activate only as an instant.",
-        "InstantSpeed": "True",
-        "AILogic": "MostProminentInComputerDeck",
-        "SubAbility": "DBMana"
-      }
+      "description": "Choose a color. Add one mana of that color unless any player pays {1}. Activate only as an instant.",
+      "effect": {
+        "description": "Choose a color. Add one mana of that color unless any player pays {1}. Activate only as an instant.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

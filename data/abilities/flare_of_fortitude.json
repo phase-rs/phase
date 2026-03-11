@@ -2,40 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Until end of turn, your life total can't change, and permanents you control gain hexproof and indestructible.",
-          "StaticAbilities": "STCantChange",
-          "Duration": "UntilYourNextTurn",
-          "SubAbility": "DBPumpAll"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, your life total can't change, and permanents you control gain hexproof and indestructible.",
-        "StaticAbilities": "STCantChange",
-        "Duration": "UntilYourNextTurn",
-        "SubAbility": "DBPumpAll"
-      }
+      "description": "Until end of turn, your life total can't change, and permanents you control gain hexproof and indestructible.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may sacrifice a nontoken white creature rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Description": "You may sacrifice a nontoken white creature rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "Cost": "Sac<1/Creature.White+!token/a nontoken white creature>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

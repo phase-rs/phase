@@ -1,42 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, it deals 3 damage to each creature and each planeswalker.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Execute": "TrigDamage",
-            "ValidCard": "Card.Self",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, it deals 3 damage to each creature and each planeswalker."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell, CARDNAME deals 2 damage to each opponent.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast a spell, CARDNAME deals 2 damage to each opponent.",
-            "Execute": "TrigDamage",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

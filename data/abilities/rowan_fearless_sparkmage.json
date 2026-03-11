@@ -2,81 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 3,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "KW": "First Strike",
-        "Planeswalker": "True",
-        "SpellDescription": "Up to one target creature gets +3/+0 and gains first strike until end of turn."
-      }
+      "description": "Up to one target creature gets +3/+0 and gains first strike until end of turn.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 1 damage to each of up to two target creatures. Those creatures can't block this turn.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "SubAbility": "DBPump",
-        "TargetMax": "2",
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to each of up to two target creatures. Those creatures can't block this turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -9,
+        "type": "Loyalty"
+      },
+      "description": "Gain control of all creatures until end of turn. Untap them. They gain haste until end of turn.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -9
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "LoseControl": "EOT",
-        "AllValid": "Creature",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Untap": "True",
-        "AddKWs": "Haste",
-        "SpellDescription": "Gain control of all creatures until end of turn. Untap them. They gain haste until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

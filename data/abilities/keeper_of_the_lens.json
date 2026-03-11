@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.faceDown+YouDontCtrl",
-        "AffectedZone": "Battlefield",
-        "MayLookAt": "You",
-        "Description": "You may look at face-down creatures you don't control any time."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "You may look at face-down creatures you don't control any time.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

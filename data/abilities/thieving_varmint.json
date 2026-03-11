@@ -2,38 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "RestrictValid": "Spell.YouDontOwn",
-          "SpellDescription": "Add two mana of any one color. Spend this mana only to cast spells you don't own.",
-          "Amount": "2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.YouDontOwn",
-        "SpellDescription": "Add two mana of any one color. Spend this mana only to cast spells you don't own.",
-        "Amount": "2"
-      }
+      "description": "Add two mana of any one color. Spend this mana only to cast spells you don't own.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

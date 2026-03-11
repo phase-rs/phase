@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R R G G",
+        "type": "Mana"
+      },
+      "description": "NICKNAME must be blocked each combat this turn if able.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R R G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "NICKNAME must be blocked each combat this turn if able.",
-        "AILogic": "Pump",
-        "KW": "HIDDEN CARDNAME must be blocked if able.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, untap each creature you control. After this combat phase, there is an additional combat phase.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntapAll",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, untap each creature you control. After this combat phase, there is an additional combat phase."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

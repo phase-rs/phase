@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, you lose 3 life and create a Treasure token.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, you lose 3 life and create a Treasure token.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLoseLife"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, you lose 3 life and create a Treasure token.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Phase": "Upkeep",
-        "Secondary": "True",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, you lose 3 life and create a Treasure token."
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, create a Food token and a 2/2 black Human Rogue creature token.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, create a Food token and a 2/2 black Human Rogue creature token."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

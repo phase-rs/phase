@@ -2,28 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl,Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Draw cards equal to the mana value of target artifact or creature you control. An opponent gains control of that permanent.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Creature.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw cards equal to the mana value of target artifact or creature you control. An opponent gains control of that permanent.",
-        "TgtPrompt": "Select target artifact or creature you control",
-        "AILogic": "DonateTargetPlayer",
-        "SubAbility": "DBDraw"
-      }
+      "target_prompt": "Select target artifact or creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

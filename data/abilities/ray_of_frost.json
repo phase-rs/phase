@@ -1,41 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "IsPresent": "Creature.EnchantedBy+Red",
-        "TriggerDescription": "When CARDNAME enters, if enchanted creature is red, tap it."
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "As long as enchanted creature is red, it loses all abilities.",
-        "RemoveAllAbilities": "True",
-        "Affected": "Creature.EnchantedBy+Red"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          },
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "description": "As long as enchanted creature is red, it loses all abilities.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if enchanted creature is red, tap it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

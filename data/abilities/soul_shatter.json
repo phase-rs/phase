@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatPlayers": "Player.Opponent",
-          "RepeatSubAbility": "DBChoose",
-          "StackDescription": "Each opponent",
-          "SubAbility": "DBSac",
-          "SpellDescription": "Each opponent sacrifices a creature or planeswalker with the highest mana value among creatures and planeswalkers they control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatPlayers": "Player.Opponent",
-        "RepeatSubAbility": "DBChoose",
-        "StackDescription": "Each opponent",
-        "SubAbility": "DBSac",
-        "SpellDescription": "Each opponent sacrifices a creature or planeswalker with the highest mana value among creatures and planeswalkers they control."
-      }
+      "description": "Each opponent sacrifices a creature or planeswalker with the highest mana value among creatures and planeswalkers they control.",
+      "effect": {
+        "description": "Each opponent sacrifices a creature or planeswalker with the highest mana value among creatures and planeswalkers they control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

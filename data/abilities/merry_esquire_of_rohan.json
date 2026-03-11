@@ -1,29 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "IsPresent": "Creature.attacking+Other+YouCtrl+Legendary",
-        "ValidAttackers": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "NoResolvingCheck": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you attack with NICKNAME and another legendary creature, draw a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has first strike as long as it's equipped.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has first strike as long as it's equipped.",
-        "AddKeyword": "First Strike",
-        "Affected": "Card.Self+equipped"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you attack with NICKNAME and another legendary creature, draw a card.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

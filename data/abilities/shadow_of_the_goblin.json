@@ -1,51 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Unreliable Visions — At the beginning of your first main phase, discard a card. If you do, draw a card.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield",
-        "Phase": "Main1",
-        "TriggerDescription": "Unreliable Visions — At the beginning of your first main phase, discard a card. If you do, draw a card."
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
       "mode": "LandPlayed",
-      "params": {
-        "Origin": "Ante,Command,Exile,Graveyard,Library",
-        "Execute": "TrigDamage",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
-        "TriggerZones": "Battlefield"
+      "origin": "Ante,Command,Exile,Graveyard,Library",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
       "mode": "LandPlayed",
-      "params": {
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
-        "ValidCard": "Land.YouCtrl+YouDontOwn",
-        "Origin": "Hand",
-        "Execute": "TrigDamage"
+      "origin": "Hand",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidCard": "Card.!wasCastFromYourHand"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

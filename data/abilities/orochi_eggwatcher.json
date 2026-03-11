@@ -1,84 +1,78 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "g_1_1_snake",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 G"
+                "cost": "2 G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 1/1 green Snake creature token. If you control ten or more creatures, flip CARDNAME.",
-            "TokenOwner": "You",
-            "SubAbility": "DBFlip"
-          }
+          "description": "Create a 1/1 green Snake creature token. If you control ten or more creatures, flip CARDNAME.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "g_1_1_snake",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 3,
-            "toughness": 3,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "G"
+                "cost": "G",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature gets +3/+3 until end of turn."
-          }
+          "description": "Target creature gets +3/+3 until end of turn.",
+          "effect": {
+            "power": 3,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 3,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

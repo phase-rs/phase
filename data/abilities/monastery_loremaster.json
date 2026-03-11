@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, return target noncreature, nonland card from your graveyard to your hand.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "When CARDNAME is turned face up, return target noncreature, nonland card from your graveyard to your hand.",
-        "Execute": "TrigReturn",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

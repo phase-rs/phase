@@ -2,31 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SubAbility": "ManaB",
-          "ConditionSVarCompare": "EQ0",
-          "ConditionCheckSVar": "X",
-          "SpellDescription": "Add {U}. If you played a land this turn, add {B} instead."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "ManaB",
-        "ConditionSVarCompare": "EQ0",
-        "ConditionCheckSVar": "X",
-        "SpellDescription": "Add {U}. If you played a land this turn, add {B} instead."
-      }
+      "description": "Add {U}. If you played a land this turn, add {B} instead.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

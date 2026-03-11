@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, put a +1/+1 counter on target creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Main",
-        "ValidPlayer": "You",
-        "PresentDefined": "Self",
-        "Execute": "TrigPutCounter",
-        "IsPresent": "Card.tapped",
-        "PhaseCount": "2",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, put a +1/+1 counter on target creature."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

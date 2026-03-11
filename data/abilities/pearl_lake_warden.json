@@ -1,55 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "As long as this card is the top card of your library, you may look at it any time and you may cast it.",
-            "Affected": "Card.Self+TopLibrary",
-            "AffectedZone": "Library",
-            "MayPlay": "True",
-            "EffectZone": "All",
-            "MayLookAt": "You"
-          }
+          "affected": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self"
+              },
+              {
+                "type": "Other",
+                "value": "TopLibrary"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Library",
+          "description": "As long as this card is the top card of your library, you may look at it any time and you may cast it.",
+          "effect_zone": "Battlefield",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Seek",
-            "params": {
-              "RememberFound": "True",
-              "SpellDescription": "Seek a land card and put it onto the battlefield.",
-              "Type": "Land",
-              "SubAbility": "DBPut"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberFound": "True",
-            "SpellDescription": "Seek a land card and put it onto the battlefield.",
-            "Type": "Land",
-            "SubAbility": "DBPut"
-          }
+          "description": "Seek a land card and put it onto the battlefield.",
+          "effect": {
+            "description": "Seek a land card and put it onto the battlefield.",
+            "name": "Seek",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

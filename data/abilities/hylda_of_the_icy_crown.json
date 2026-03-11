@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you tap an untapped creature an opponent controls, you may pay {1}. When you do, ABILITY",
       "mode": "Taps",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigImmediateTrig",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you tap an untapped creature an opponent controls, you may pay {1}. When you do, ABILITY",
-        "ValidCard": "Creature.OppCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

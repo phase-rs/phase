@@ -2,51 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterNum": "1",
-          "CounterType": "P1P1",
-          "ValidCards": "Creature.YouCtrl+withLifelink",
-          "SpellDescription": "Put a +1/+1 counter on each creature you control with lifelink."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterNum": "1",
-        "CounterType": "P1P1",
-        "ValidCards": "Creature.YouCtrl+withLifelink",
-        "SpellDescription": "Put a +1/+1 counter on each creature you control with lifelink."
-      }
+      "description": "Put a +1/+1 counter on each creature you control with lifelink.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature you control with lifelink.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put a lifelink counter on target non-Human creature you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigPut",
-        "TriggerDescription": "When CARDNAME enters, put a lifelink counter on target non-Human creature you control."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

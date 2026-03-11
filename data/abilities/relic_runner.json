@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't be blocked if you've cast a historic spell this turn. (Artifacts, legendaries, and Sagas are historic.)",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked if you've cast a historic spell this turn. (Artifacts, legendaries, and Sagas are historic.)",
-        "CheckSVar": "X",
-        "ValidAttacker": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

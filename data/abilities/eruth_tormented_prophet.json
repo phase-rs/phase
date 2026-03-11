@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ValidPlayer": "You",
-        "ReplaceWith": "ExileTwo",
-        "Description": "If you would draw a card, exile the top two cards of your library instead. You may play those cards this turn.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "If you would draw a card, exile the top two cards of your library instead. You may play those cards this turn.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

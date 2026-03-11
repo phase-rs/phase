@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "RememberObjects": "Targeted",
-          "Phase": "EndCombat",
-          "ValidTgts": "Creature",
-          "ValidPlayer": "Player",
-          "SpellDescription": "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
-          "Mode": "Phase",
-          "ThisTurn": "True",
-          "Execute": "VenomousBreathTrigDestroy"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "Phase": "EndCombat",
-        "ValidTgts": "Creature",
-        "ValidPlayer": "Player",
-        "SpellDescription": "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
-        "Mode": "Phase",
-        "ThisTurn": "True",
-        "Execute": "VenomousBreathTrigDestroy"
-      }
+      "description": "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+      "effect": {
+        "description": "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

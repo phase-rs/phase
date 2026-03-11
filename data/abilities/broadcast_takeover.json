@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Gain control of all artifacts your opponents control until end of turn. Untap them. They gain haste until end of turn.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AllValid": "Artifact.OppCtrl",
-        "SpellDescription": "Gain control of all artifacts your opponents control until end of turn. Untap them. They gain haste until end of turn.",
-        "LoseControl": "EOT",
-        "Untap": "True",
-        "AddKWs": "Haste"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

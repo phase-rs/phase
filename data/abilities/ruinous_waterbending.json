@@ -2,41 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": -2,
-        "toughness": -2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "All creatures get -2/-2 until end of turn. If this spell's additional cost was paid, whenever a creature dies this turn, you gain 1 life.",
-        "IsCurse": "True",
-        "ValidCards": "Creature",
-        "SubAbility": "DBEffect"
-      }
+      "description": "All creatures get -2/-2 until end of turn. If this spell's additional cost was paid, whenever a creature dies this turn, you gain 1 life.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": -2,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may waterbend {4}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "EffectZone": "All",
-        "Description": "As an additional cost to cast this spell, you may waterbend {4}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
-        "Cost": "Waterbend<4>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

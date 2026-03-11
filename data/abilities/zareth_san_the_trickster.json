@@ -2,52 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U B"
+            "cost": "2 U B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/Rogue.unblocked+attacking+YouCtrl/unblocked attacking Rogue you control>"
+            "cost": "Return<1/Rogue.unblocked+attacking+YouCtrl/unblocked attacking Rogue you control>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "ActivationZone": "Hand",
-        "Attacking": "True",
-        "Tapped": "True",
-        "SpellDescription": "Put CARDNAME from your hand onto the battlefield tapped and attacking."
-      }
+      "description": "Put CARDNAME from your hand onto the battlefield tapped and attacking.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, you may put target permanent card from that player's graveyard onto the battlefield under your control.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "Execute": "TrigGainControl",
-        "ValidTarget": "Player",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may put target permanent card from that player's graveyard onto the battlefield under your control."
+      "optional": true,
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

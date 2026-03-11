@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "UntapAll",
-        "params": {
-          "SpellDescription": "Untap all Forests and all green creatures. Activate only once each turn.",
-          "ActivationLimit": "1",
-          "ValidCards": "Forest,Creature.Green"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap all Forests and all green creatures. Activate only once each turn.",
-        "ActivationLimit": "1",
-        "ValidCards": "Forest,Creature.Green"
-      }
+      "description": "Untap all Forests and all green creatures. Activate only once each turn.",
+      "effect": {
+        "description": "Untap all Forests and all green creatures. Activate only once each turn.",
+        "name": "UntapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts an instant or sorcery spell, that player copies it. The player may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopy",
-        "TriggerZones": "Command",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerDescription": "Whenever a player casts an instant or sorcery spell, that player copies it. The player may choose new targets for the copy.",
-        "ValidActivatingPlayer": "Player"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, instant and sorcery spells you cast this turn cost {3} less to cast.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, instant and sorcery spells you cast this turn cost {3} less to cast."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

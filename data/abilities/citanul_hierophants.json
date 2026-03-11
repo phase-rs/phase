@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have \"{T}: Add {G}.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Mana",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have \"{T}: Add {G}.\""
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

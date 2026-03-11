@@ -1,21 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell while CARDNAME is attacking, copy that spell. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "NoResolvingCheck": "True",
-        "ValidCard": "Card",
-        "IsPresent": "Card.Self+attacking",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "Whenever you cast a spell while CARDNAME is attacking, copy that spell. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

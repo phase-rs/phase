@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way. At the beginning of your next upkeep, pay {1}{W}{W}. If you don't, you lose the game.",
-          "AILogic": "NeedsPrevention",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way. At the beginning of your next upkeep, pay {1}{W}{W}. If you don't, you lose the game.",
-        "AILogic": "NeedsPrevention",
-        "SubAbility": "DBEffect"
-      }
+      "description": "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way. At the beginning of your next upkeep, pay {1}{W}{W}. If you don't, you lose the game.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way. At the beginning of your next upkeep, pay {1}{W}{W}. If you don't, you lose the game.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

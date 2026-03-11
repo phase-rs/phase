@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you activate an ability, if it isn't a mana ability, you may pay {2}. If you do, copy that ability. You may choose new targets for the copy.",
       "mode": "AbilityCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidSA": "SpellAbility.!ManaAbility",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopySpell",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you activate an ability, if it isn't a mana ability, you may pay {2}. If you do, copy that ability. You may choose new targets for the copy."
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

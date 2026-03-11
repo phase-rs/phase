@@ -2,37 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player reveals their hand. You choose a nonland card from it. That player discards that card.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DiscardValid": "Card.nonLand",
-        "Mode": "RevealYouChoose",
-        "SpellDescription": "Target player reveals their hand. You choose a nonland card from it. That player discards that card."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile one black card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "You may exile one black card from your hand rather than pay this spell's mana cost.",
-        "Cost": "ExileFromHand<1/Card.Black+Other>",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

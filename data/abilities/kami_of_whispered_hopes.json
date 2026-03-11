@@ -2,40 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add X mana of any one color, where X is CARDNAME's power.",
-          "Amount": "Y"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add X mana of any one color, where X is CARDNAME's power.",
-        "Amount": "Y"
-      }
+      "description": "Add X mana of any one color, where X is CARDNAME's power.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more +1/+1 counters would be put on a permanent you control, that many plus one +1/+1 counters are put on that permanent instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ReplaceWith": "AddOneMoreCounters",
-        "ValidCard": "Permanent.YouCtrl+inZoneBattlefield",
-        "ActiveZones": "Battlefield",
-        "Description": "If one or more +1/+1 counters would be put on a permanent you control, that many plus one +1/+1 counters are put on that permanent instead.",
-        "ValidCounterType": "P1P1"
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

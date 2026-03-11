@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Planeswalker.activated,Creature.tapped"
-        }
-      },
       "cost": null,
+      "description": "Destroy target planeswalker that was activated this turn or tapped creature.",
+      "effect": {
+        "target": {
+          "card_type": "Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target planeswalker that was activated this turn or tapped creature",
-        "SpellDescription": "Destroy target planeswalker that was activated this turn or tapped creature."
-      }
+      "target_prompt": "Select target planeswalker that was activated this turn or tapped creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

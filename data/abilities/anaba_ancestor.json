@@ -2,28 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Minotaur+Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Another target Minotaur creature gets +1/+1 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Minotaur"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Another target Minotaur creature gets +1/+1 until end of turn.",
-        "TgtPrompt": "Select another target Minotaur creature"
-      }
+      "target_prompt": "Select another target Minotaur creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, CARDNAME deals damage to that player equal to the number of nonbasic lands they control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDamage",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals damage to that player equal to the number of nonbasic lands they control.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

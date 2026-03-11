@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control another Elf, create a 1/1 green Elf Warrior creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Card.YouCtrl+Other+Elf",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, if you control another Elf, create a 1/1 green Elf Warrior creature token.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

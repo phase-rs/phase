@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a creature or opponent, CARDNAME deals that much damage to you.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature,Opponent",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a creature or opponent, CARDNAME deals that much damage to you.",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigFleshReaverDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature,Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,41 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Land",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "description": "Lands you control have \"{T}: Add one mana of any color.\"",
           "mode": "Continuous",
-          "params": {
-            "AddAbility": "AnyMana",
-            "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
-            "Affected": "Land.YouCtrl"
-          }
+          "modifications": [
+            {
+              "ability": "AnyMana",
+              "type": "AddAbility"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, mill four cards, then return up to two permanent cards from among them to your hand.",
           "mode": "UnlockDoor",
-          "params": {
-            "Execute": "TrigMill",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When you unlock this door, mill four cards, then return up to two permanent cards from among them to your hand.",
-            "ValidPlayer": "You",
-            "ThisDoor": "True"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

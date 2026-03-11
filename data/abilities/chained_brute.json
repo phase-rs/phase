@@ -2,49 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap this creature. Activate only during your turn.",
-        "PlayerTurn": "True"
-      }
+      "description": "Untap this creature. Activate only during your turn.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This creature doesn't untap during your untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

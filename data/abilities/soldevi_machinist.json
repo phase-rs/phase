@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "Amount": "2",
-          "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities of artifacts.",
-          "RestrictValid": "Activated.Artifact+inZoneBattlefield"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities of artifacts.",
-        "RestrictValid": "Activated.Artifact+inZoneBattlefield"
-      }
+      "description": "Add {C}{C}. Spend this mana only to activate abilities of artifacts.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

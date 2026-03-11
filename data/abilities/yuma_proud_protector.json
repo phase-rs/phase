@@ -1,50 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may sacrifice a land. If you do, draw a card.",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may sacrifice a land. If you do, draw a card.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "TrigDraw"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Desert.!token+YouOwn",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a Desert card is put into your graveyard from anywhere, create a 4/2 green Plant Warrior creature token with reach."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "Count$ValidGraveyard Land.YouOwn",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast for each land card in your graveyard."
-      }
+      "description": "This spell costs {1} less to cast for each land card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME enters or attacks, you may sacrifice a land. If you do, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Whenever CARDNAME enters or attacks, you may sacrifice a land. If you do, draw a card.",
+      "mode": "Attacks",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Whenever a Desert card is put into your graveyard from anywhere, create a 4/2 green Plant Warrior creature token with reach.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Desert",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

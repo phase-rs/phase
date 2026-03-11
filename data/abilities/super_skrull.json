@@ -2,88 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 W",
+        "type": "Mana"
+      },
+      "description": "Create a 0/4 colorless Wall creature token with defender.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_0_4_wall_defender",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 0/4 colorless Wall creature token with defender."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +4/+4 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 4,
-        "toughness": 4,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 4,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +4/+4 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 4 damage to target creature.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 4 damage to target creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 4
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 U"
+        "cost": "5 U",
+        "type": "Mana"
       },
+      "description": "Target player draws four cards.",
+      "effect": {
+        "count": 4,
+        "type": "Draw"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose a player",
-        "SpellDescription": "Target player draws four cards.",
-        "ValidTgts": "Player"
-      }
+      "target_prompt": "Choose a player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,83 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "Planeswalker": "True",
-        "KW": "Lifelink",
-        "SpellDescription": "Until your next turn, creatures you control get +1/+0 and gain lifelink.",
-        "Duration": "UntilYourNextTurn"
-      }
+      "description": "Until your next turn, creatures you control get +1/+0 and gain lifelink.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 black Vampire creature token with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_2_2_vampire_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 black Vampire creature token with flying.",
-        "Planeswalker": "True",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "BOTTrig",
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "Name": "Emblem — Sorin, Solemn Visitor",
-          "Planeswalker": "True",
-          "SpellDescription": "You get an emblem with \"At the beginning of each opponent's upkeep, that player sacrifices a creature.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "BOTTrig",
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "Name": "Emblem — Sorin, Solemn Visitor",
-        "Planeswalker": "True",
-        "SpellDescription": "You get an emblem with \"At the beginning of each opponent's upkeep, that player sacrifices a creature.\""
-      }
+      "description": "You get an emblem with \"At the beginning of each opponent's upkeep, that player sacrifices a creature.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

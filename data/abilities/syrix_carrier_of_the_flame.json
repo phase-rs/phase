@@ -1,32 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, if a creature card left your graveyard this turn, target Phoenix you control deals damage equal to its power to any target.",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "X",
-        "Execute": "TrigPhoenix",
-        "Phase": "End of Turn",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each end step, if a creature card left your graveyard this turn, target Phoenix you control deals damage equal to its power to any target."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever another Phoenix you control dies, you may cast CARDNAME from your graveyard.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Phoenix.Other+YouCtrl",
-        "Execute": "TrigPlay",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever another Phoenix you control dies, you may cast CARDNAME from your graveyard.",
-        "TriggerZones": "Graveyard",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Phoenix",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

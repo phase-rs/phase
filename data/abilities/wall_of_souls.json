@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME is dealt combat damage, it deals that much damage to target opponent or planeswalker.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigDamage",
-        "ValidTarget": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME is dealt combat damage, it deals that much damage to target opponent or planeswalker."
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

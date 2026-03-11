@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Inspired — Whenever CARDNAME becomes untapped, target creature an opponent controls gets -3/-0 until end of turn.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, target creature an opponent controls gets -3/-0 until end of turn.",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

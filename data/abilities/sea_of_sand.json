@@ -1,45 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Command",
-        "ValidCard": "Card.Land",
-        "Execute": "TrigGain",
-        "TriggerDescription": "Whenever a player draws a land card, that player gains 3 life."
-      }
-    },
-    {
-      "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever a player draws a nonland card, that player loses 3 life.",
-        "Execute": "TrigLose",
-        "TriggerZones": "Command",
-        "ValidCard": "Card.nonLand"
-      }
-    },
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, put target permanent on top of its owner's library."
-      }
+      "description": "Players reveal each card they draw.",
+      "event": "Draw"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "ValidPlayer": "Player",
-        "ReplaceWith": "RevealedDraw",
-        "Description": "Players reveal each card they draw.",
-        "ActiveZones": "Command"
+      "description": "Whenever a player draws a land card, that player gains 3 life.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
       }
+    },
+    {
+      "description": "Whenever a player draws a nonland card, that player loses 3 life.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever chaos ensues, put target permanent on top of its owner's library.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

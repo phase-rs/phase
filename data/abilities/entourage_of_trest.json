@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
-        "Execute": "TrigMonarch",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CanBlockAmount": "1",
-        "Affected": "Card.Self",
-        "Condition": "Monarch",
-        "Description": "CARDNAME can block an additional creature each combat as long as you're the monarch."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME can block an additional creature each combat as long as you're the monarch.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you become the monarch.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

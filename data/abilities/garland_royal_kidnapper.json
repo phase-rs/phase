@@ -1,48 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigMonarch",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME enters, target opponent becomes the monarch."
-      }
-    },
-    {
-      "mode": "BecomeMonarch",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent becomes the monarch, gain control of target creature that player controls for as long as they're the monarch.",
-        "Execute": "TrigEffect",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control but don't own get +2/+2 and can't be sacrificed.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Creatures you control but don't own get +2/+2 and can't be sacrificed.",
-        "Affected": "Creature.YouCtrl+YouDontOwn"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CantSacrifice"
-      },
-      "params": {
-        "ValidCard": "Creature.YouCtrl+YouDontOwn",
-        "SpellDescription": "Creatures you control but don't own get +2/+2 and can't be sacrificed.",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, target opponent becomes the monarch.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Whenever an opponent becomes the monarch, gain control of target creature that player controls for as long as they're the monarch.",
+      "mode": "BecomeMonarch",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

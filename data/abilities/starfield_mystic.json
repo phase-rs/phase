@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an enchantment you control is put into a graveyard from the battlefield, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "ValidCard": "Enchantment",
-        "Description": "Enchantment spells you cast cost {1} less to cast.",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Enchantment spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever an enchantment you control is put into a graveyard from the battlefield, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

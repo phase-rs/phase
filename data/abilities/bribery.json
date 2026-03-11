@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Creature",
-        "IsCurse": "True",
-        "ChangeNum": "1",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.",
-        "GainControl": "True"
-      }
+      "description": "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

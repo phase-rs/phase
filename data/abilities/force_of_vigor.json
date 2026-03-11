@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy up to two target artifacts and/or enchantments.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TgtPrompt": "Select target artifact or enchantment",
-        "TargetMax": "2",
-        "SpellDescription": "Destroy up to two target artifacts and/or enchantments."
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "If it's not your turn, you may exile a green card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Description": "If it's not your turn, you may exile a green card from your hand rather than pay this spell's mana cost.",
-        "Condition": "NotPlayerTurn",
-        "Cost": "ExileFromHand<1/Card.Green+Other>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

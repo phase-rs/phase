@@ -2,65 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U"
+        "cost": "2 U",
+        "type": "Mana"
       },
+      "description": "Another target creature gains flying until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Flying",
-        "TgtPrompt": "Select another target creature",
-        "SpellDescription": "Another target creature gains flying until end of turn."
-      }
+      "target_prompt": "Select another target creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X U"
+            "cost": "X U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME>"
+            "cost": "Discard<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "X target creatures gain flying until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target creatures",
-        "SpellDescription": "X target creatures gain flying until end of turn.",
-        "KW": "Flying",
-        "PrecostDesc": "Channel —",
-        "ActivationZone": "Hand",
-        "TargetMax": "X",
-        "TargetMin": "X"
-      }
+      "target_prompt": "Select X target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

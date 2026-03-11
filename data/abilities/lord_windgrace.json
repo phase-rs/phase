@@ -2,79 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Discard a card, then draw a card. If a land card is discarded this way, draw an additional card.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Mode": "TgtChoose",
-        "Defined": "You",
-        "RememberDiscarded": "True",
-        "SpellDescription": "Discard a card, then draw a card. If a land card is discarded this way, draw an additional card.",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Return up to two target land cards from your graveyard to the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return up to two target land cards from your graveyard to the battlefield.",
-        "Planeswalker": "True",
-        "TargetMax": "2",
-        "TgtPrompt": "Choose target land card in your graveyard",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Choose target land card in your graveyard"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -11
+        "amount": -11,
+        "type": "Loyalty"
       },
+      "description": "Destroy up to six target nonland permanents, then create six 2/2 green Cat Warrior creature tokens with forestwalk.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "Ultimate": "True",
-        "TargetMax": "6",
-        "SpellDescription": "Destroy up to six target nonland permanents, then create six 2/2 green Cat Warrior creature tokens with forestwalk.",
-        "TargetMin": "0",
-        "TgtPrompt": "Select target nonland permanent",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Select target nonland permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

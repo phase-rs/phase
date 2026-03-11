@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent,Player",
-        "Description": "If a creature you control that entered this turn would deal damage, it deals twice that much damage instead.",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Creature.YouCtrl+ThisTurnEntered",
-        "ReplaceWith": "DmgTwice"
-      }
+      "description": "If a creature you control that entered this turn would deal damage, it deals twice that much damage instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

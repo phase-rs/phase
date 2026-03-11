@@ -2,47 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "ICE",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 S"
+        "cost": "1 S",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an ice counter on target permanent."
-      }
+      "description": "Put an ice counter on target permanent.",
+      "effect": {
+        "count": 1,
+        "counter_type": "ICE",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power and toughness are each equal to the number of snow permanents on the battlefield.",
-        "SetToughness": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of snow permanents on the battlefield.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Permanent",
+        "type": "Typed"
+      },
+      "description": "Permanents with ice counters on them are snow.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.counters_GE1_ICE",
-        "AddType": "Snow",
-        "Description": "Permanents with ice counters on them are snow.",
-        "EffectZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "core_type": "Snow",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

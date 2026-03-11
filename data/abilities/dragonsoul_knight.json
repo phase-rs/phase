@@ -2,33 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W U B R G",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a Dragon, gets +5/+3, and gains flying and trample.",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [
-          "Dragon"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Dragon"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying & Trample",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a Dragon, gets +5/+3, and gains flying and trample.",
-        "Defined": "Self",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

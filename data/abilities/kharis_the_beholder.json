@@ -1,30 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters and at the beginning of your upkeep, create a 1/1 white Human creature token and make a charisma check. If the result plus the number of creatures you control is greater than 11, put a +1/+1 counter on each creature you control. If the result is a natural 20, for each nonlegendary creature you control, create a token that's a copy of that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, create a 1/1 white Human creature token and make a charisma check. If the result plus the number of creatures you control is greater than 11, put a +1/+1 counter on each creature you control. If the result is a natural 20, for each nonlegendary creature you control, create a token that's a copy of that creature."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and at the beginning of your upkeep, create a 1/1 white Human creature token and make a charisma check. If the result plus the number of creatures you control is greater than 11, put a +1/+1 counter on each creature you control. If the result is a natural 20, for each nonlegendary creature you control, create a token that's a copy of that creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidPlayer": "You",
-        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, create a 1/1 white Human creature token and make a charisma check. If the result plus the number of creatures you control is greater than 11, put a +1/+1 counter on each creature you control. If the result is a natural 20, for each nonlegendary creature you control, create a token that's a copy of that creature.",
-        "Execute": "TrigToken"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

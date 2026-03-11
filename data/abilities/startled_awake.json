@@ -1,71 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target opponent mills thirteen cards.",
           "effect": {
-            "type": "Mill",
             "count": 13,
             "target": {
-              "type": "Filtered",
-              "filter": "Opponent"
-            }
+              "type": "Player"
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target opponent mills thirteen cards."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "3 U U",
+            "type": "Mana"
+          },
+          "description": "Return CARDNAME from your graveyard onto the battlefield transformed. Activate only as a sorcery.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
             "destination": "Battlefield",
+            "origin": "Graveyard",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "3 U U"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "ActivationZone": "Graveyard",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Return CARDNAME from your graveyard onto the battlefield transformed. Activate only as a sorcery.",
-            "Transformed": "True"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "When CARDNAME deals combat damage to a player, return it to its owner's hand.",
           "mode": "DamageDone",
-          "params": {
-            "ValidTarget": "Player",
-            "TriggerDescription": "When CARDNAME deals combat damage to a player, return it to its owner's hand.",
-            "Execute": "TrigBounce",
-            "ValidSource": "Card.Self",
-            "CombatDamage": "True"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

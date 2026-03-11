@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "RevealValid": "Creature.powerGE5+YouCtrl",
-          "SubAbility": "DBSpeakerMana",
-          "AnyNumber": "True",
-          "RememberRevealed": "True",
-          "SpellDescription": "Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RevealValid": "Creature.powerGE5+YouCtrl",
-        "SubAbility": "DBSpeakerMana",
-        "AnyNumber": "True",
-        "RememberRevealed": "True",
-        "SpellDescription": "Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way."
-      }
+      "description": "Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+      "effect": {
+        "description": "Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

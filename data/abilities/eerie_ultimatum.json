@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Return any number of permanent cards with different names from your graveyard to the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeTypeDesc": "permanent cards with different names",
-        "ChangeType": "Permanent.YouOwn",
-        "ChangeNumDesc": "any number of",
-        "Hidden": "True",
-        "SpellDescription": "Return any number of permanent cards with different names from your graveyard to the battlefield.",
-        "DifferentNames": "True",
-        "ChangeNum": "X"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

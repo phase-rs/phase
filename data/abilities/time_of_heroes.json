@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control with a level counter on it gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control with a level counter on it gets +2/+2.",
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Affected": "Creature.counters_GE1_LEVEL+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

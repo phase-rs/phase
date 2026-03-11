@@ -2,31 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "Valid": "Land.YouCtrl",
-          "ReflectProperty": "Produce",
-          "SpellDescription": "Add one mana of any type that a land you control could produce.",
-          "ColorOrType": "Type"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Land.YouCtrl",
-        "ReflectProperty": "Produce",
-        "SpellDescription": "Add one mana of any type that a land you control could produce.",
-        "ColorOrType": "Type"
-      }
+      "description": "Add one mana of any type that a land you control could produce.",
+      "effect": {
+        "description": "Add one mana of any type that a land you control could produce.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,40 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, airbend another target creature. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigAirbend",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When NICKNAME enters, airbend another target creature. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more creatures you control leave the battlefield without dying, you get an experience counter.",
+      "destination": "Ante,Command,Exile,Hand,Library",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever one or more creatures you control leave the battlefield without dying, you get an experience counter.",
-        "Destination": "Ante,Command,Exile,Hand,Library",
-        "ValidCards": "Creature.YouCtrl",
-        "Execute": "TrigExperience"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, create a 1/1 white Ally creature token for each experience counter you have.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of your upkeep, create a 1/1 white Ally creature token for each experience counter you have.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

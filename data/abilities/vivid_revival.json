@@ -2,29 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.MultiColor"
-        }
-      },
       "cost": null,
+      "description": "Return up to three target multicolored cards from your graveyard to your hand. Exile CARDNAME.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "MultiColor"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "3",
-        "TargetMin": "0",
-        "SpellDescription": "Return up to three target multicolored cards from your graveyard to your hand. Exile CARDNAME.",
-        "SubAbility": "DBChange",
-        "TgtPrompt": "Choose target multicolor cards in your graveyard"
-      }
+      "target_prompt": "Choose target multicolor cards in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

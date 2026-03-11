@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withoutHorsemanship"
-        }
-      },
       "cost": null,
+      "description": "Tap one or two target creatures without horsemanship.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap one or two target creatures without horsemanship.",
-        "TargetMin": "1",
-        "TargetMax": "2",
-        "TgtPrompt": "Choose one or two target creatures without horsemanship"
-      }
+      "target_prompt": "Choose one or two target creatures without horsemanship"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

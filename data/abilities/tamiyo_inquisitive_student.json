@@ -1,109 +1,96 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigInvestigate",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever CARDNAME attacks, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever you draw your third card in a turn, exile NICKNAME, then return her to the battlefield transformed under her owner's control.",
           "mode": "Drawn",
-          "params": {
-            "Execute": "TrigTransform",
-            "Number": "3",
-            "TriggerDescription": "Whenever you draw your third card in a turn, exile NICKNAME, then return her to the battlefield transformed under her owner's control.",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.YouCtrl"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Duration": "UntilYourNextTurn",
-              "Triggers": "TrigAttack",
-              "SpellDescription": "Until your next turn, whenever a creature an opponent controls attacks you or a planeswalker you control, it gets -1/-0 until end of turn.",
-              "AILogic": "Main2",
-              "Planeswalker": "True"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Duration": "UntilYourNextTurn",
-            "Triggers": "TrigAttack",
-            "SpellDescription": "Until your next turn, whenever a creature an opponent controls attacks you or a planeswalker you control, it gets -1/-0 until end of turn.",
-            "AILogic": "Main2",
-            "Planeswalker": "True"
-          }
+          "description": "Until your next turn, whenever a creature an opponent controls attacks you or a planeswalker you control, it gets -1/-0 until end of turn.",
+          "duration": "UntilYourNextTurn",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -3,
+            "type": "Loyalty"
+          },
+          "description": "Return target instant or sorcery card from your graveyard to your hand. If it's a green card, add one mana of any color.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
             "destination": "Hand",
+            "origin": "Graveyard",
             "target": {
-              "type": "Filtered",
-              "filter": "Instant.YouCtrl,Sorcery.YouCtrl"
-            }
+              "card_type": "Instant",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Sorcery.YouCtrl"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -3
-          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Choose target instant or sorcery card in your graveyard",
-            "SpellDescription": "Return target instant or sorcery card from your graveyard to your hand. If it's a green card, add one mana of any color.",
-            "SubAbility": "DBAddMana",
-            "Planeswalker": "True",
-            "RememberTargets": "True"
-          }
+          "target_prompt": "Choose target instant or sorcery card in your graveyard"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -7
+            "amount": -7,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Ultimate": "True",
-            "SpellDescription": "Draw cards equal to half the number of cards in your library, rounded up. You get an emblem with \"You have no maximum hand size.\"",
-            "Planeswalker": "True",
-            "SubAbility": "DBEmblem"
-          }
+          "description": "Draw cards equal to half the number of cards in your library, rounded up. You get an emblem with \"You have no maximum hand size.\"",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

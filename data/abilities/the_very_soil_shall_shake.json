@@ -1,32 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Command",
-        "Execute": "Abandon",
-        "TriggerDescription": "When a creature you control dies, abandon this scheme."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +2/+2 and have trample.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Description": "Creatures you control get +2/+2 and have trample.",
-        "EffectZone": "Command",
-        "AddKeyword": "Trample",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When a creature you control dies, abandon this scheme.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

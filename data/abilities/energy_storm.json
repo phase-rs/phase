@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Creatures with flying don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidCard": "Creature.withFlying",
-        "Description": "Creatures with flying don't untap during their controllers' untap steps.",
-        "ValidStepTurnToController": "You",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Instant,Sorcery",
-        "Prevent": "True",
-        "Description": "Prevent all damage that would be dealt by instant and sorcery spells.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "Prevent all damage that would be dealt by instant and sorcery spells.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever you cast a spell, you lose life equal to its mana value."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Spells you cast have delve. (Each card you exile from your graveyard while casting those spells pays for {1}.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.YouCtrl+wasCast",
-        "AddKeyword": "Delve",
-        "AffectedZone": "Stack",
-        "Description": "Spells you cast have delve. (Each card you exile from your graveyard while casting those spells pays for {1}.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Delve",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a spell, you lose life equal to its mana value.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

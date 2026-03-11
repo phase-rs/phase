@@ -1,29 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be the target of spells.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "Description": "Enchanted creature can't be the target of spells.",
-        "ValidSA": "Spell",
-        "ValidTarget": "Creature.EnchantedBy"
       }
     },
     {
+      "description": "Enchanted creature can't be enchanted by other Auras.",
       "mode": {
         "Other": "CantAttach"
-      },
-      "params": {
-        "Target": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't be enchanted by other Auras.",
-        "ValidCard": "Aura.Other"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

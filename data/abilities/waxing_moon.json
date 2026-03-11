@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "TgtPrompt": "Select target Werewolf you control",
-          "SubAbility": "DBPumpAll",
-          "TargetMax": "1",
-          "ValidTgts": "Card.Werewolf+YouCtrl",
-          "SpellDescription": "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.",
-          "Mode": "Transform",
-          "TargetMin": "0"
-        }
-      },
       "cost": null,
+      "description": "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.",
+      "effect": {
+        "description": "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Werewolf you control",
-        "SubAbility": "DBPumpAll",
-        "TargetMax": "1",
-        "ValidTgts": "Card.Werewolf+YouCtrl",
-        "SpellDescription": "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.",
-        "Mode": "Transform",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select target Werewolf you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

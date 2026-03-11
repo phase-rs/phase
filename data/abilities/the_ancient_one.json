@@ -2,37 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U B"
+        "cost": "2 U B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card, then discard a card. When you discard a card this way, target player mills cards equal to its mana value.",
-        "SubAbility": "DBDiscard"
-      }
+      "description": "Draw a card, then discard a card. When you discard a card this way, target player mills cards equal to its mana value.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Descend 8 — CARDNAME can't attack or block unless there are eight or more permanent cards in your graveyard.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "IsPresent": "Permanent.YouOwn",
-        "ValidCard": "Card.Self",
-        "PresentZone": "Graveyard",
-        "PresentCompare": "LE7",
-        "Description": "Descend 8 — CARDNAME can't attack or block unless there are eight or more permanent cards in your graveyard."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

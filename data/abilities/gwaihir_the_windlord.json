@@ -1,29 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "SVarCompare": "GE2",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "EffectZone": "All",
-        "Amount": "2",
-        "Description": "This spell costs {2} less to cast as long as you've drawn two or more cards this turn."
-      }
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {2} less to cast as long as you've drawn two or more cards this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Bird",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Birds you control have vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Bird.Other+YouCtrl",
-        "Description": "Other Birds you control have vigilance.",
-        "AddKeyword": "Vigilance"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,51 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
-        "TgtPrompt": "Select target noncreature artifact"
-      }
+      "target_prompt": "Select target noncreature artifact"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked, it gets -4/+4 until end of turn.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, it gets -4/+4 until end of turn.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked, it gets -4/+4 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, it gets -4/+4 until end of turn.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "Execute": "TrigPump"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

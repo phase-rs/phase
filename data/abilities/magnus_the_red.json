@@ -1,30 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "Execute": "TrigToken",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerDescription": "Blade of Magnus — Whenever CARDNAME deals combat damage to a player, create a 3/3 red Spawn creature token."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Unearthly Power — Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
-        "ValidCard": "Instant,Sorcery",
-        "Type": "Spell",
-        "Activator": "You",
-        "Amount": "X"
-      }
+      "description": "Unearthly Power — Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Blade of Magnus — Whenever CARDNAME deals combat damage to a player, create a 3/3 red Spawn creature token.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

@@ -2,33 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Starting with the next opponent in turn order, each player chooses a creature you don't control. Destroy the chosen creatures.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.YouDontCtrl"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Mandatory": "True",
-        "ChoiceTitle": "Choose a creature to destroy",
-        "Reveal": "True",
-        "SubAbility": "DBDestroy",
-        "StackDescription": "SpellDescription",
-        "Defined": "Player",
-        "StartingWith": "Opponent",
-        "AILogic": "OppPreferred",
-        "SpellDescription": "Starting with the next opponent in turn order, each player chooses a creature you don't control. Destroy the chosen creatures."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

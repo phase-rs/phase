@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you have exactly 1 life, you win the game.",
       "mode": "Phase",
-      "params": {
-        "LifeAmount": "EQ1",
-        "TriggerDescription": "At the beginning of your upkeep, if you have exactly 1 life, you win the game.",
-        "LifeTotal": "You",
-        "Execute": "TrigWin",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

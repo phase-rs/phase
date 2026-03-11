@@ -1,67 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you may discard a card. If you do, draw two cards.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Execute": "TrigDiscard",
-            "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, draw two cards."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "ur_1_1_elemental",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 R"
+                "cost": "2 R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBPump",
-            "TokenAmount": "2",
-            "SpellDescription": "Create two 1/1 blue and red Elemental creature tokens."
-          }
+          "description": "Create two 1/1 blue and red Elemental creature tokens.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "ur_1_1_elemental",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

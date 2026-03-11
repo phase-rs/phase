@@ -1,30 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, tap all creatures your opponents control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTapAll",
-        "TriggerDescription": "When NICKNAME enters, tap all creatures your opponents control.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Opponent",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.YouCtrl",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, draw a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

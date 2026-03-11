@@ -1,55 +1,73 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Card.YouOwn",
-        "TriggerDescription": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, put that many +1/+1 counters on CARDNAME.",
-        "Destination": "Exile",
-        "Origin": "Hand",
-        "Execute": "TrigPutCounter"
-      }
-    },
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, put that many +1/+1 counters on CARDNAME.",
-        "Destination": "Exile",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "ValidCause": "SpellAbility.YouCtrl",
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GT4",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "As long as CARDNAME has five or more counters on it, it has flying and is an Angel in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self",
-        "CheckSVar": "Y",
-        "SVarCompare": "GT4",
-        "AddType": "Angel",
-        "Description": "As long as CARDNAME has five or more counters on it, it has flying and is an Angel in addition to its other types."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Angel",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GT9",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "As long as CARDNAME has ten or more counters on it, it has indestructible and is a God in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "God",
-        "AddKeyword": "Indestructible",
-        "CheckSVar": "Y",
-        "Description": "As long as CARDNAME has ten or more counters on it, it has indestructible and is a God in addition to its other types.",
-        "SVarCompare": "GT9",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "God",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, put that many +1/+1 counters on CARDNAME.",
+      "destination": "Exile",
+      "mode": "ChangesZoneAll",
+      "origin": "Hand",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever one or more cards are put into exile from your hand or a spell or ability you control exiles one or more permanents from the battlefield, put that many +1/+1 counters on CARDNAME.",
+      "destination": "Exile",
+      "mode": "ChangesZoneAll",
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

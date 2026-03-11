@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.blockingSource"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B B"
+        "cost": "B B",
+        "type": "Mana"
       },
+      "description": "Destroy target creature blocking CARDNAME.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature blocking CARDNAME.",
-        "TgtPrompt": "Select target creature blocking CARDNAME"
-      }
+      "target_prompt": "Select target creature blocking CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

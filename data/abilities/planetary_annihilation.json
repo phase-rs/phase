@@ -2,33 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player chooses six lands they control, then sacrifices the rest. CARDNAME deals 6 damage to each creature.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Land"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player chooses six lands they control, then sacrifices the rest. CARDNAME deals 6 damage to each creature.",
-        "ChoiceTitle": "Choose six lands to keep",
-        "Reveal": "True",
-        "SubAbility": "DBSac",
-        "Defined": "Player",
-        "Mandatory": "True",
-        "StackDescription": "SpellDescription",
-        "Amount": "6",
-        "ControlledByPlayer": "Chooser"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,32 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "TriggerDescription": "When CARDNAME enters, you may pay {3}. If you do, tap enchanted permanent."
+      "description": "Enchanted permanent doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Permanent.AttachedBy",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
-        "ValidStepTurnToController": "You"
+      "description": "When CARDNAME enters, you may pay {3}. If you do, tap enchanted permanent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

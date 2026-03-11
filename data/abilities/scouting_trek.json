@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library for any number of basic land cards, reveal those cards, then shuffle and put them on top.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Library",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "0",
-        "ChangeTypeDesc": "basic land",
-        "SpellDescription": "Search your library for any number of basic land cards, reveal those cards, then shuffle and put them on top.",
-        "ChangeType": "Land.Basic",
-        "Reorder": "True",
-        "ChangeNum": "X"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

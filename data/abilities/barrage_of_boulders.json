@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 1 damage to each creature you don't control. Ferocious — If you control a creature with power 4 or greater, creatures can't block this turn.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouDontCtrl",
-        "ValidDescription": "each creature you don't control.",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature you don't control. Ferocious — If you control a creature with power 4 or greater, creatures can't block this turn.",
-        "SubAbility": "DBPumpAll"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

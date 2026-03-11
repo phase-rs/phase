@@ -2,61 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Imprint —",
-        "SpellDescription": "Exile target artifact card from a graveyard.",
-        "Imprint": "True"
-      }
+      "description": "Exile target artifact card from a graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of all cards exiled with it.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBForget",
-        "Destination": "Any",
-        "Origin": "Exile",
-        "Static": "True",
-        "ValidCard": "Card.IsImprinted+ExiledWithSource"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOfZones": "Exile",
-        "GainsAbilitiesOf": "Card.IsImprinted+ExiledWithSource",
-        "Description": "CARDNAME has all activated abilities of all cards exiled with it.",
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

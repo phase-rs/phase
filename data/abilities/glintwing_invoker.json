@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "7 U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +3/+3 and gains flying until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "7 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +3/+3 and gains flying until end of turn.",
-        "KW": "Flying"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

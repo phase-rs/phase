@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's draw step, that player draws an additional card.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's draw step, that player draws an additional card.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player",
-        "Phase": "Draw",
-        "Execute": "TrigDraw"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player draws a card, CARDNAME deals 1 damage to that player.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player draws a card, CARDNAME deals 1 damage to that player.",
-        "ValidCard": "Card",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

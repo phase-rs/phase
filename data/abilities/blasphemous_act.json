@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 13 damage to each creature.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 13
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "ValidDescription": "each creature.",
-        "SpellDescription": "CARDNAME deals 13 damage to each creature."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "CARDNAME costs {1} less to cast for each creature on the battlefield.",
-        "Amount": "X",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Type": "Spell"
-      }
+      "description": "CARDNAME costs {1} less to cast for each creature on the battlefield.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

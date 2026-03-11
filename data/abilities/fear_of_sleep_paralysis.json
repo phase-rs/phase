@@ -1,44 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Eerie — Whenever CARDNAME or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self,Enchantment.YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
-      }
-    },
-    {
-      "mode": "FullyUnlock",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Eerie — Whenever CARDNAME or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.",
-        "ValidPlayer": "You",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Room"
+      "description": "Stun counters can't be removed from permanents your opponents control.",
+      "event": {
+        "Other": "RemoveCounter"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "RemoveCounter"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Permanent.OppCtrl",
-        "ValidCounterType": "STUN",
-        "Layer": "CantHappen",
-        "Description": "Stun counters can't be removed from permanents your opponents control."
+      "description": "Eerie — Whenever CARDNAME or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Enchantment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Eerie — Whenever CARDNAME or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.",
+      "mode": "FullyUnlock",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Room"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

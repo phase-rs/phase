@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "NameCard",
-        "params": {
-          "SpellDescription": "Choose a card at random from among Righteous Confluence, Mystic Confluence, Wretched Confluence, Fiery Confluence, Verdant Confluence, Brokers Confluence, Cabaretti Confluence, Maestros Confluence, Obscura Confluence, and Riveteers Confluence. Create a copy of that card. You may cast the copy without paying its mana cost.",
-          "ChooseFromList": "Righteous Confluence,Mystic Confluence,Wretched Confluence,Fiery Confluence,Verdant Confluence,Brokers Confluence,Cabaretti Confluence,Maestros Confluence,Obscura Confluence,Riveteers Confluence",
-          "SubAbility": "DBCast",
-          "AtRandom": "True",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a card at random from among Righteous Confluence, Mystic Confluence, Wretched Confluence, Fiery Confluence, Verdant Confluence, Brokers Confluence, Cabaretti Confluence, Maestros Confluence, Obscura Confluence, and Riveteers Confluence. Create a copy of that card. You may cast the copy without paying its mana cost.",
-        "ChooseFromList": "Righteous Confluence,Mystic Confluence,Wretched Confluence,Fiery Confluence,Verdant Confluence,Brokers Confluence,Cabaretti Confluence,Maestros Confluence,Obscura Confluence,Riveteers Confluence",
-        "SubAbility": "DBCast",
-        "AtRandom": "True",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Choose a card at random from among Righteous Confluence, Mystic Confluence, Wretched Confluence, Fiery Confluence, Verdant Confluence, Brokers Confluence, Cabaretti Confluence, Maestros Confluence, Obscura Confluence, and Riveteers Confluence. Create a copy of that card. You may cast the copy without paying its mana cost.",
+      "effect": {
+        "description": "Choose a card at random from among Righteous Confluence, Mystic Confluence, Wretched Confluence, Fiery Confluence, Verdant Confluence, Brokers Confluence, Cabaretti Confluence, Maestros Confluence, Obscura Confluence, and Riveteers Confluence. Create a copy of that card. You may cast the copy without paying its mana cost.",
+        "name": "NameCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

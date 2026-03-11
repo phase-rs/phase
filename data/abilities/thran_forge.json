@@ -2,33 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, target nonartifact creature gets +1/+0 and becomes an artifact in addition to its other types.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonArtifact"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target nonartifact creature",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Until end of turn, target nonartifact creature gets +1/+0 and becomes an artifact in addition to its other types."
-      }
+      "target_prompt": "Select target nonartifact creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

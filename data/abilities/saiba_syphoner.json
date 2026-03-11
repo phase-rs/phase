@@ -1,44 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeZone",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand."
+      "description": "If CARDNAME would die, shuffle it into your library instead.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "PresentCompare": "EQ0",
-        "PresentZone": "Hand",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Amount": "2",
-        "Description": "This spell costs {2} less to cast if there are no instant or sorcery cards in your hand."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {2} less to cast if there are no instant or sorcery cards in your hand.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "ReplaceWith": "Exile",
-        "Description": "If CARDNAME would die, shuffle it into your library instead."
+      "description": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

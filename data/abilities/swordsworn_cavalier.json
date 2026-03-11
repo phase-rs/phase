@@ -1,18 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Knight",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "StrictlyOther"
+            },
+            {
+              "type": "Other",
+              "value": "ThisTurnEntered"
+            },
+            {
+              "type": "Other",
+              "value": "EnteredUnder You"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has first strike as long as another Knight entered the battlefield under your control this turn.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has first strike as long as another Knight entered the battlefield under your control this turn.",
-        "IsPresent": "Knight.StrictlyOther+ThisTurnEntered+EnteredUnder You",
-        "AddKeyword": "First Strike",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,52 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a creature you control dies, put a +1/+1 counter on equipped creature.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever a creature you control dies, put a +1/+1 counter on equipped creature.",
-            "Destination": "Graveyard",
-            "Execute": "TrigGainCounter",
-            "ValidCard": "Creature.YouCtrl"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Return target creature card from your graveyard to your hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target creature in your graveyard",
-            "SpellDescription": "Return target creature card from your graveyard to your hand."
-          }
+          "target_prompt": "Select target creature in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

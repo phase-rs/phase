@@ -2,57 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "MultiplyCounter",
-        "counter_type": "TIME",
-        "multiplier": 2,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Double the number of time counters on CARDNAME."
-      }
+      "description": "Double the number of time counters on CARDNAME.",
+      "effect": {
+        "counter_type": "TIME",
+        "multiplier": 2,
+        "target": {
+          "type": "Any"
+        },
+        "type": "MultiplyCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you untap one or more permanents during your untap step, put that many time counters on CARDNAME.",
       "mode": "UntapAll",
-      "params": {
-        "Phase": "Untap",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you untap one or more permanents during your untap step, put that many time counters on CARDNAME.",
-        "PlayerTurn": "True",
-        "ValidCards": "Permanent"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When there are 1,000 or more time counters on CARDNAME, sacrifice it and each opponent loses 1,000 life.",
       "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When there are 1,000 or more time counters on CARDNAME, sacrifice it and each opponent loses 1,000 life.",
-        "IsPresent": "Card.Self+counters_GE1000_TIME"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

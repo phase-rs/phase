@@ -1,82 +1,91 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another artifact you control enters, up to one target creature you control gets +1/+0 and gains haste until end of turn. Then transform CARDNAME if you control four or more artifacts.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigPump",
-            "TriggerDescription": "Whenever CARDNAME or another artifact you control enters, up to one target creature you control gets +1/+0 and gains haste until end of turn. Then transform CARDNAME if you control four or more artifacts.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self,Artifact.YouCtrl+Other",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Card",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Self,Artifact.YouCtrl"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "R",
-            "params": {
-              "SpellDescription": "Add {R}.",
-              "Amount": "1"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {R}.",
-            "Amount": "1"
-          }
+          "description": "Add {R}.",
+          "effect": {
+            "produced": [
+              "Red"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 R"
+                "cost": "2 R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "SpellDescription": "Until end of turn, target creature gains haste and gets +X/+0, where X is the number of artifacts you control. Activate only as a sorcery.",
-            "KW": "Haste"
-          }
+          "description": "Until end of turn, target creature gains haste and gets +X/+0, where X is the number of artifacts you control. Activate only as a sorcery.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

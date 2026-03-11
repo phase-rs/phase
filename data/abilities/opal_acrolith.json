@@ -2,46 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "0",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes an enchantment.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [
-          "Enchantment"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Enchantment"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "0"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "Defined": "Self",
-        "RemoveCardTypes": "True",
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "CARDNAME becomes an enchantment."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 2/4 Soldier creature.",
       "mode": "SpellCast",
-      "params": {
-        "IsPresent": "Card.Self+Enchantment",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 2/4 Soldier creature.",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control six or more lands, CARDNAME and land creatures you control get +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Affected": "Card.Self,Creature.Land+YouCtrl",
-        "IsPresent": "Land.YouCtrl",
-        "PresentCompare": "GE6",
-        "Description": "As long as you control six or more lands, CARDNAME and land creatures you control get +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

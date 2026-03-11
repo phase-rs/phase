@@ -1,37 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures lose all abilities.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of the end step, sacrifice CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME.",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Creatures lose all abilities.",
-        "RemoveAllAbilities": "True",
-        "Affected": "Creature"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

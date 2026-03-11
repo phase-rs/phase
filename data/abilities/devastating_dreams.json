@@ -2,38 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R R"
+            "cost": "R R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<X/Random>"
+            "cost": "Discard<X/Random>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "Amount": "X",
-        "SacValid": "Land",
-        "SubAbility": "DBDamage",
-        "SpellDescription": "Each player sacrifices X lands. CARDNAME deals X damage to each creature."
-      }
+      "description": "Each player sacrifices X lands. CARDNAME deals X damage to each creature.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

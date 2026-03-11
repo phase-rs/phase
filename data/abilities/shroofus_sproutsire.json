@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a Saproling you control deals combat damage to a player, create that many 1/1 green Saproling creature tokens.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "Execute": "TrigToken",
-        "ValidSource": "Saproling.YouCtrl",
-        "TriggerDescription": "Whenever a Saproling you control deals combat damage to a player, create that many 1/1 green Saproling creature tokens."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Saproling",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks alone, defending player sacrifices a creature.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigSac",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks alone, defending player sacrifices a creature.",
-        "Alone": "True"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

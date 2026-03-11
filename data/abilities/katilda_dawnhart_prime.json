@@ -2,51 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
-          "ValidCardsDesc": "creature you control",
-          "ValidCards": "Creature.YouCtrl",
-          "CounterType": "P1P1",
-          "CounterNum": "1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 G W"
+            "cost": "4 G W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
-        "ValidCardsDesc": "creature you control",
-        "ValidCards": "Creature.YouCtrl",
-        "CounterType": "P1P1",
-        "CounterNum": "1"
-      }
+      "description": "Put a +1/+1 counter on each creature you control.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Human"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Human creatures you control have \"{T}: Add one mana of any of this creature's colors.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Human+YouCtrl",
-        "AddAbility": "Mana",
-        "Description": "Human creatures you control have \"{T}: Add one mana of any of this creature's colors.\""
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

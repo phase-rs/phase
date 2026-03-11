@@ -2,49 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W",
-        "params": {
-          "Amount": "2",
-          "SubAbility": "DBSac",
-          "SpellDescription": "Add {W}{W}. If there are no depletion counters on CARDNAME, sacrifice it."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/DEPLETION>"
+            "cost": "SubCounter<1/DEPLETION>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "SubAbility": "DBSac",
-        "SpellDescription": "Add {W}{W}. If there are no depletion counters on CARDNAME, sacrifice it."
-      }
+      "description": "Add {W}{W}. If there are no depletion counters on CARDNAME, sacrifice it.",
+      "effect": {
+        "produced": [
+          "White"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped with two depletion counters on it.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped with two depletion counters on it.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "LandTapped",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

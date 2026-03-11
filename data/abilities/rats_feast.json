@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Exile X target cards from a single graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Exile {c:Targeted}.",
-        "TargetMax": "X",
-        "SpellDescription": "Exile X target cards from a single graveyard.",
-        "TargetMin": "X",
-        "TgtPrompt": "Choose X target cards in a single graveyard",
-        "TargetsWithSameController": "True"
-      }
+      "target_prompt": "Choose X target cards in a single graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

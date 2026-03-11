@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Blocks",
-      "params": {
-        "IsPresent": "Creature.blockedBySource",
-        "NoResolvingCheck": "True",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks two or more creatures, it gains first strike until end of turn.",
-        "Execute": "TrigPump",
-        "PresentCompare": "GE2"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CanBlockAmount": "1",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME can block an additional creature each combat."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME can block an additional creature each combat.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME blocks two or more creatures, it gains first strike until end of turn.",
+      "mode": "Blocks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

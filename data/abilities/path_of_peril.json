@@ -2,47 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.cmcLE2",
-        "SpellDescription": "Destroy all creatures [with mana value 2 or less]."
-      }
+      "description": "Destroy all creatures [with mana value 2 or less].",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     },
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 W B"
+        "cost": "4 W B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{4}{W}{B}",
-        "ValidCards": "Creature",
-        "NonBasicSpell": "True",
-        "PrecostDesc": "Cleave",
-        "StackDescription": "Destroy all creatures.",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
-      }
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

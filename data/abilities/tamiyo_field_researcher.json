@@ -2,101 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "UntilYourNextTurn",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Choose up to two target creatures. Until your next turn, whenever either of those creatures deals combat damage, you draw a card.",
-          "ValidTgts": "Creature",
-          "TargetMin": "0",
-          "TargetMax": "2",
-          "ForgetOnMoved": "Battlefield",
-          "Planeswalker": "True",
-          "Triggers": "TrigDamage",
-          "Name": "Tamiyo, Field Researcher's Effect — Curiosity"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilYourNextTurn",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Choose up to two target creatures. Until your next turn, whenever either of those creatures deals combat damage, you draw a card.",
-        "ValidTgts": "Creature",
-        "TargetMin": "0",
-        "TargetMax": "2",
-        "ForgetOnMoved": "Battlefield",
-        "Planeswalker": "True",
-        "Triggers": "TrigDamage",
-        "Name": "Tamiyo, Field Researcher's Effect — Curiosity"
-      }
+      "description": "Choose up to two target creatures. Until your next turn, whenever either of those creatures deals combat damage, you draw a card.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Tap up to two target nonland permanents. They don't untap during their controller's next untap step.",
       "effect": {
-        "type": "Tap",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand"
-        }
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Tap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "SpellDescription": "Tap up to two target nonland permanents. They don't untap during their controller's next untap step.",
-        "TargetMin": "0",
-        "TgtPrompt": "Select target nonland permanent",
-        "Planeswalker": "True",
-        "SubAbility": "DBPump"
-      }
+      "target_prompt": "Select target nonland permanent"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDraw",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "Duration": "Permanent",
-          "Stackable": "False",
-          "StaticAbilities": "Omniscience",
-          "SpellDescription": "Draw three cards. You get an emblem with \"You may cast spells from your hand without paying their mana costs.\"",
-          "Name": "Emblem — Tamiyo, Field Researcher",
-          "Image": "emblem_tamiyo_field_researcher",
-          "AILogic": "Always"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "Duration": "Permanent",
-        "Stackable": "False",
-        "StaticAbilities": "Omniscience",
-        "SpellDescription": "Draw three cards. You get an emblem with \"You may cast spells from your hand without paying their mana costs.\"",
-        "Name": "Emblem — Tamiyo, Field Researcher",
-        "Image": "emblem_tamiyo_field_researcher",
-        "AILogic": "Always"
-      }
+      "description": "Draw three cards. You get an emblem with \"You may cast spells from your hand without paying their mana costs.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

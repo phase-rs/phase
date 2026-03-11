@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate target creature with power 5 or greater.",
-          "TgtPrompt": "Select target creature with power 5 or greater.",
-          "ValidTgts": "Creature.powerGE5"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Regenerate target creature with power 5 or greater.",
+      "effect": {
+        "description": "Regenerate target creature with power 5 or greater.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate target creature with power 5 or greater.",
-        "TgtPrompt": "Select target creature with power 5 or greater.",
-        "ValidTgts": "Creature.powerGE5"
-      }
+      "target_prompt": "Select target creature with power 5 or greater."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

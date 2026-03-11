@@ -1,27 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a black, red, or green creature spell, it gains devour 5. (As the creature enters, its controller may sacrifice any number of creatures. The creature enters with five times that many +1/+1 counters on it.)",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts a black, red, or green creature spell, it gains devour 5. (As the creature enters, its controller may sacrifice any number of creatures. The creature enters with five times that many +1/+1 counters on it.)",
-        "Execute": "DevourPump",
-        "ValidCard": "Creature.Black,Creature.Red,Creature.Green",
-        "TriggerZones": "Command",
-        "ValidActivatingPlayer": "Player"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black,Creature.Red,Creature.Green"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, create two 1/1 red Goblin creature tokens.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, create two 1/1 red Goblin creature tokens.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

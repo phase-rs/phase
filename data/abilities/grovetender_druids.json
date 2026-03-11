@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Rally — Whenever CARDNAME or another Ally you control enters, you may pay {1}. If you do, create a 1/1 green Plant creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, you may pay {1}. If you do, create a 1/1 green Plant creature token.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Ally.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

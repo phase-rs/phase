@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Forest",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 5 life.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 5 life.",
-        "Cost": "GainLife<5/Player.Other/*>",
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "IsPresent": "Forest.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

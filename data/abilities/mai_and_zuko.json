@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "Description": "You may cast Ally spells and artifact spells as though they had flash.",
-        "ValidCard": "Ally,Artifact",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast Ally spells and artifact spells as though they had flash.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

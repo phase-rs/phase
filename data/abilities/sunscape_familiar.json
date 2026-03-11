@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Blue,Card.Green",
-        "Type": "Spell",
-        "Amount": "1",
-        "Activator": "You",
-        "Description": "Green spells and blue spells you cast cost {1} less to cast."
-      }
+      "description": "Green spells and blue spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

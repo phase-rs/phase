@@ -2,44 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+1 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls a Forest and you control a Swamp, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "If an opponent controls a Forest and you control a Swamp, you may cast this spell without paying its mana cost.",
-        "Cost": "0",
-        "CheckSecondSVar": "Y",
-        "ValidSA": "Spell",
-        "CheckSVar": "X",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

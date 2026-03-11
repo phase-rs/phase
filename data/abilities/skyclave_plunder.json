@@ -2,26 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Hand"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DestinationZone2": "Library",
-        "SpellDescription": "Look at the top X cards of your library, where X is three plus the number of creatures in your party. Put three of those cards into your hand and the rest on the bottom of your library in a random order.",
-        "RestRandomOrder": "True",
-        "ChangeNum": "3",
-        "StackDescription": "SpellDescription",
-        "LibraryPosition": "-1"
-      }
+      "description": "Look at the top X cards of your library, where X is three plus the number of creatures in your party. Put three of those cards into your hand and the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 1,
+        "destination": "Hand",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

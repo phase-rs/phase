@@ -2,47 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "c_3_3_a_phyrexian_golem",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayEnergy<3>"
+            "cost": "PayEnergy<3>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 3/3 colorless Phyrexian Golem artifact creature token. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "description": "Create a 3/3 colorless Phyrexian Golem artifact creature token. Activate only as a sorcery.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "c_3_3_a_phyrexian_golem",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, you get {E} (an energy counter).",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigEnergy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you attack, you get {E} (an energy counter).",
-        "AttackingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

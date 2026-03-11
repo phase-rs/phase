@@ -2,72 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Draw two cards, then put a card from your hand on the bottom of your library.",
-        "SubAbility": "DBBottom"
-      }
+      "description": "Draw two cards, then put a card from your hand on the bottom of your library.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a blue Dog Illusion creature token with \"This creature's power and toughness are each equal to twice the number of cards in your hand.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_x_x_dog_illusion_cardsinhand",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a blue Dog Illusion creature token with \"This creature's power and toughness are each equal to twice the number of cards in your hand.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Hand",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exchange your hand and library, then shuffle. You get an emblem with \"You have no maximum hand size.\"",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "ChangeType": "Card.YouCtrl",
-        "RememberChanged": "True",
-        "SubAbility": "DBChangeZoneAll"
-      }
+      "description": "Exchange your hand and library, then shuffle. You get an emblem with \"You have no maximum hand size.\"",
+      "effect": {
+        "destination": "Library",
+        "origin": "Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

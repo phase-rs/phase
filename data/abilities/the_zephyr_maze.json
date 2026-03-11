@@ -1,36 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, target creature gains flying until end of turn."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures with flying get +2/+0.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.withFlying",
-        "EffectZone": "Command",
-        "AddPower": "2",
-        "Description": "Creatures with flying get +2/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Creatures without flying get -2/-0.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "-2",
-        "Description": "Creatures without flying get -2/-0.",
-        "EffectZone": "Command",
-        "Affected": "Creature.withoutFlying"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, target creature gains flying until end of turn.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

@@ -1,42 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if you discarded a card this turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, if you discarded a card this turn, transform CARDNAME.",
-            "CheckSVar": "CardsDiscarded",
-            "Execute": "TrigTransform"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, defending player loses 1 life and you gain 1 life.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME attacks, defending player loses 1 life and you gain 1 life.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigLoseLife"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

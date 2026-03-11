@@ -1,26 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDealtOnce",
-      "params": {
-        "TriggerDescription": "When CARDNAME deals combat damage, sacrifice a permanent.",
-        "Execute": "TrigSac",
-        "CombatDamage": "True",
-        "ValidSource": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "When CARDNAME deals combat damage, sacrifice a permanent.",
+      "mode": "DamageDealtOnce",
+      "valid_source": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

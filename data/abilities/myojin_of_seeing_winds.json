@@ -2,32 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/DIVINITY>"
+        "cost": "SubCounter<1/DIVINITY>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card for each permanent you control."
-      }
+      "description": "Draw a card for each permanent you control.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has indestructible as long as it has a divinity counter on it.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "Affected": "Card.Self+counters_GE1_DIVINITY",
-        "Description": "CARDNAME has indestructible as long as it has a divinity counter on it."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

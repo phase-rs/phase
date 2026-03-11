@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Flurry of Blows — Whenever you cast your second spell each turn, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "EQ2",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Flurry of Blows — Whenever you cast your second spell each turn, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

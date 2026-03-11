@@ -2,46 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "SpellDescription": "Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
-          "RememberObjects": "Targeted",
-          "TgtPrompt": "Select target creature you control",
-          "ForgetOnMoved": "Battlefield",
-          "StaticAbilities": "CombatDamageToughness"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "WU"
+        "cost": "WU",
+        "type": "Mana"
       },
+      "description": "Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "SpellDescription": "Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
-        "RememberObjects": "Targeted",
-        "TgtPrompt": "Select target creature you control",
-        "ForgetOnMoved": "Battlefield",
-        "StaticAbilities": "CombatDamageToughness"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card for each creature you control with toughness greater than its power.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw a card for each creature you control with toughness greater than its power.",
-        "Execute": "TrigDraw",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

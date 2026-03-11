@@ -2,45 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, target creature you control has base power and toughness X/X and becomes a Giant in addition to its other types. Activate only as a sorcery.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Giant"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X"
-      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, target creature you control has base power and toughness X/X and becomes a Giant in addition to its other types. Activate only as a sorcery.",
-        "AILogic": "SetPT",
-        "TgtPrompt": "Select target creature you control",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigMinsc",
-        "TriggerDescription": "When CARDNAME enters, create Boo, a legendary 1/1 red Hamster creature token with trample and haste."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

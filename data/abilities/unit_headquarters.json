@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create a tapped 1/1 white Soldier creature token.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create a tapped 1/1 white Soldier creature token.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create a tapped 1/1 white Soldier creature token.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create a tapped 1/1 white Soldier creature token.",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerZones": "Command",
-        "Secondary": "True"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, put a +1/+1 counter on each creature you control.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigPutCounterAll",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, put a +1/+1 counter on each creature you control."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

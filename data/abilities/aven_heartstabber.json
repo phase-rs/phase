@@ -1,32 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigMill",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, mill two cards, then draw a card.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are five or more mana values among cards in your graveyard, CARDNAME gets +2/+2 and has deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddKeyword": "Deathtouch",
-        "AddPower": "2",
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "Description": "As long as there are five or more mana values among cards in your graveyard, CARDNAME gets +2/+2 and has deathtouch.",
-        "SVarCompare": "GE5"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME dies, mill two cards, then draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

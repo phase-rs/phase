@@ -1,38 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Your opponents can't cast spells with the same name as a card exiled with CARDNAME.",
+      "mode": "CantBeCast"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you cast a blue spell, exile the top card of target player's library.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Blue",
-        "ValidActivatingPlayer": "You",
-        "Execute": "ExileTop",
-        "TriggerDescription": "Whenever you cast a blue spell, exile the top card of target player's library."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a black spell, exile the top card of target player's library.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a black spell, exile the top card of target player's library.",
-        "ValidCard": "Card.Black",
-        "Execute": "ExileTop",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.nonLand+sharesNameWith ValidExile Card.ExiledWithSource",
-        "Description": "Your opponents can't cast spells with the same name as a card exiled with CARDNAME.",
-        "Caster": "Opponent"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

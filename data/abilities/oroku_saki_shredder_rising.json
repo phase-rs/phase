@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, you draw a card and lose 1 life.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you draw a card and lose 1 life.",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

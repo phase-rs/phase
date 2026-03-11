@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "SubAbility": "DBDamage",
-          "Random": "True",
-          "SpellDescription": "Target player reveals a card at random from their hand. CARDNAME deals damage to that player equal to that card's mana value.",
-          "RememberRevealed": "True",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamage",
-        "Random": "True",
-        "SpellDescription": "Target player reveals a card at random from their hand. CARDNAME deals damage to that player equal to that card's mana value.",
-        "RememberRevealed": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player reveals a card at random from their hand. CARDNAME deals damage to that player equal to that card's mana value.",
+      "effect": {
+        "description": "Target player reveals a card at random from their hand. CARDNAME deals damage to that player equal to that card's mana value.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

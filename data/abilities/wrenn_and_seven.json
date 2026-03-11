@@ -2,99 +2,74 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": ""
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Reveal": "True",
-        "ChangeNum": "All",
-        "ChangeValid": "Land",
-        "Planeswalker": "True",
-        "DestinationZone2": "Graveyard",
-        "SpellDescription": "Reveal the top four cards of your library. Put all land cards revealed this way into your hand and the rest into your graveyard."
-      }
+      "description": "Reveal the top four cards of your library. Put all land cards revealed this way into your hand and the rest into your graveyard.",
+      "effect": {
+        "count": 4,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Put any number of land cards from your hand onto the battlefield tapped.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:You} puts any number of land cards from their hand onto the battlefield tapped.",
-        "Tapped": "True",
-        "SpellDescription": "Put any number of land cards from your hand onto the battlefield tapped.",
-        "Planeswalker": "True",
-        "ChangeNum": "X",
-        "ChangeType": "Land"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Create a green Treefolk creature token with reach and \"This creature's power and toughness are each equal to the number of lands you control.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_x_x_treefolk_reach_total_lands",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a green Treefolk creature token with reach and \"This creature's power and toughness are each equal to the number of lands you control.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ChangeType": "Card.YouOwn+Permanent",
-        "SpellDescription": "Return all permanent cards from your graveyard to your hand. You get an emblem with \"You have no maximum hand size.\"",
-        "SubAbility": "DBEmblem",
-        "Ultimate": "True"
-      }
+      "description": "Return all permanent cards from your graveyard to your hand. You get an emblem with \"You have no maximum hand size.\"",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

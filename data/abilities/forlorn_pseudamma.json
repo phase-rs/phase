@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Inspired — Whenever CARDNAME becomes untapped, you may pay {2}{B}. If you do, create a 2/2 black Zombie enchantment creature token.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "GFGToken",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, you may pay {2}{B}. If you do, create a 2/2 black Zombie enchantment creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

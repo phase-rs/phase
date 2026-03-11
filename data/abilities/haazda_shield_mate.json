@@ -2,43 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "AILogic": "NeedsPrevention",
-          "Choices": "Card,Emblem",
-          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W"
+        "cost": "W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "NeedsPrevention",
-        "Choices": "Card,Emblem",
-        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
-        "SubAbility": "DBEffect"
-      }
+      "description": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUpkeep",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

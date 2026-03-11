@@ -2,58 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Mill three cards. Then you may return a creature or land card from your graveyard to your hand.",
       "effect": {
-        "type": "Mill",
         "count": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Mill three cards. Then you may return a creature or land card from your graveyard to your hand.",
-        "Defined": "You",
-        "SubAbility": "DBChangeZone"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<2/Card.Other+YouOwn+namedSay Its Name>"
+            "cost": "ExileFromGrave<2/Card.Other+YouOwn+namedSay Its Name>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card.YouOwn+namedAltanak; the Thrice-Called",
-        "SorcerySpeed": "True",
-        "ActivationZone": "Graveyard",
-        "OriginAlternative": "Graveyard,Hand",
-        "Hidden": "True",
-        "SpellDescription": "Search your graveyard, hand, and/or library for a card named Altanak, the Thrice-Called and put it onto the battlefield. If you search your library this way, shuffle. Activate only as a sorcery."
-      }
+      "description": "Search your graveyard, hand, and/or library for a card named Altanak, the Thrice-Called and put it onto the battlefield. If you search your library this way, shuffle. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,35 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Spider.Other+YouCtrl",
-        "Description": "Other Spiders you control have riot.",
-        "AddKeyword": "Riot"
-      }
-    },
-    {
-      "mode": {
-        "Other": "CantPreventDamage"
-      },
-      "params": {
-        "Description": "Damage can't be prevented."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidSA": "Spell,Activated,Triggered",
-        "Description": "Spells and abilities can't be countered."
+      "description": "Spells and abilities can't be countered.",
+      "event": "Counter"
+    }
+  ],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Spider",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Spiders you control have riot.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Riot",
+          "type": "AddKeyword"
+        }
+      ]
+    },
+    {
+      "description": "Damage can't be prevented.",
+      "mode": {
+        "Other": "CantPreventDamage"
       }
     }
   ],
-  "faces": []
+  "triggers": []
 }

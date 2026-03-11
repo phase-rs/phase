@@ -1,41 +1,69 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Static": "True",
-        "TriggerDescription": "If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.",
-        "ValidSA": "Spell.MayPlaySource",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigEffect"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "You",
-        "AffectedZone": "Library",
-        "Description": "You may look at the top card of your library any time.",
-        "Affected": "Card.TopLibrary+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Land.TopLibrary+YouOwn,Mutant.TopLibrary+YouOwn,Ninja.TopLibrary+YouOwn,Turtle.TopLibrary+YouOwn",
-        "MayPlay": "True",
-        "AffectedZone": "Library",
-        "Description": "You may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it."
-      }
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn,Mutant.TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn,Ninja.TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn,Turtle.TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.",
+      "mode": "SpellCast",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,31 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to any target and 1 damage to you.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "DamageMap": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to any target and 1 damage to you.",
-        "SubAbility": "DBDealDamage"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

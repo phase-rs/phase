@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Hellbent — CARDNAME has shadow as long as you have no cards in hand. (It can block or be blocked by only creatures with shadow.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Hellbent — CARDNAME has shadow as long as you have no cards in hand. (It can block or be blocked by only creatures with shadow.)",
-        "Affected": "Card.Self",
-        "AddKeyword": "Shadow",
-        "Condition": "Hellbent"
-      }
+      "modifications": [
+        {
+          "keyword": "Shadow",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

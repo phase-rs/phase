@@ -2,50 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 2,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SpellDescription": "Exile the top two cards of your library, then choose one of them. You may play that card this turn.",
-        "ChangeNum": "All",
-        "Defined": "You",
-        "SubAbility": "DBChoose",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Exile the top two cards of your library, then choose one of them. You may play that card this turn.",
+      "effect": {
+        "count": 2,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there are four or more instant and/or sorcery cards in your graveyard, CARDNAME gets +3/+1.",
       "mode": "Continuous",
-      "params": {
-        "PresentZone": "Graveyard",
-        "Affected": "Card.Self",
-        "AddToughness": "1",
-        "PresentCompare": "GE4",
-        "Description": "As long as there are four or more instant and/or sorcery cards in your graveyard, CARDNAME gets +3/+1.",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "AddPower": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

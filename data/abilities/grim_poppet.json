@@ -2,30 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "M1M1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/M1M1>"
+        "cost": "SubCounter<1/M1M1>",
+        "type": "Mana"
       },
+      "description": "Put a -1/-1 counter on target creature.",
+      "effect": {
+        "count": 1,
+        "counter_type": "M1M1",
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature",
-        "SpellDescription": "Put a -1/-1 counter on target creature.",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select another target creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

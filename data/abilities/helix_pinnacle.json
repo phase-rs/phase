@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X",
+        "type": "Mana"
+      },
+      "description": "Put a tower counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "TOWER",
         "count": 1,
+        "counter_type": "TOWER",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a tower counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if there are 100 or more tower counters on CARDNAME, you win the game.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if there are 100 or more tower counters on CARDNAME, you win the game.",
-        "Execute": "TrigWinGame",
-        "IsPresent": "Card.Self+counters_GE100_TOWER",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

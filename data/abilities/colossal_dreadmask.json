@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +6/+6 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "6",
-        "AddKeyword": "Trample",
-        "AddToughness": "6",
-        "Description": "Equipped creature gets +6/+6 and has trample.",
-        "Affected": "Card.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 6
+        },
+        {
+          "type": "AddToughness",
+          "value": 6
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

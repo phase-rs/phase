@@ -1,43 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, this Room deals 4 damage to target creature an opponent controls.",
           "mode": "UnlockDoor",
-          "params": {
-            "ThisDoor": "True",
-            "Execute": "TrigDamage",
-            "TriggerDescription": "When you unlock this door, this Room deals 4 damage to target creature an opponent controls.",
-            "ValidCard": "Card.Self",
-            "ValidPlayer": "You"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, this Room deals 1 damage to each opponent.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigAllDamage",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "TriggerDescription": "At the beginning of your end step, this Room deals 1 damage to each opponent."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

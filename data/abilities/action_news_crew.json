@@ -2,47 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "ActivationZone": "Hand",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Put a +1/+1 counter on each creature you control. Draw a card.",
-          "CounterType": "P1P1",
-          "CounterNum": "1",
-          "PrecostDesc": "Channel —",
-          "ValidCards": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "6"
+            "cost": "6",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/CARDNAME/this card>"
+            "cost": "Discard<1/CARDNAME/this card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Hand",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Put a +1/+1 counter on each creature you control. Draw a card.",
-        "CounterType": "P1P1",
-        "CounterNum": "1",
-        "PrecostDesc": "Channel —",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Put a +1/+1 counter on each creature you control. Draw a card.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature you control. Draw a card.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

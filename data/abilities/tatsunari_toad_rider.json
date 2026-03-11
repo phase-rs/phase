@@ -2,48 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "CARDNAME and target Frog you control can't be blocked this turn except by creatures with flying or reach.",
-          "RememberObjects": "Targeted",
-          "StackDescription": "CARDNAME and {c:Targeted} can't be blocked this turn except by creatures with flying or reach.",
-          "ValidTgts": "Frog.YouCtrl",
-          "StaticAbilities": "STCantBlockBy,STCantBlockByFrog",
-          "TgtPrompt": "Select target Frog you control"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 GU"
+        "cost": "1 GU",
+        "type": "Mana"
       },
+      "description": "CARDNAME and target Frog you control can't be blocked this turn except by creatures with flying or reach.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME and target Frog you control can't be blocked this turn except by creatures with flying or reach.",
-        "RememberObjects": "Targeted",
-        "StackDescription": "CARDNAME and {c:Targeted} can't be blocked this turn except by creatures with flying or reach.",
-        "ValidTgts": "Frog.YouCtrl",
-        "StaticAbilities": "STCantBlockBy,STCantBlockByFrog",
-        "TgtPrompt": "Select target Frog you control"
-      }
+      "target_prompt": "Select target Frog you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an enchantment spell, if you don't control a creature named Keimi, create Keimi, a legendary 3/3 black and green Frog creature token with \"Whenever you cast an enchantment spell, each opponent loses 1 life and you gain 1 life.\"",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigToken",
-        "PresentCompare": "EQ0",
-        "ValidCard": "Enchantment",
-        "IsPresent": "Creature.YouCtrl+namedKeimi",
-        "TriggerDescription": "Whenever you cast an enchantment spell, if you don't control a creature named Keimi, create Keimi, a legendary 3/3 black and green Frog creature token with \"Whenever you cast an enchantment spell, each opponent loses 1 life and you gain 1 life.\"",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

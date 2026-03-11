@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, roll two six-sided dice. If you rolled 2, 3, or 12, sacrifice CARDNAME. If you rolled 7 or 11, don't roll dice for CARDNAME during any of your following upkeeps. If you rolled any other total, note that total.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigRollETB",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, roll two six-sided dice. If you rolled 2, 3, or 12, sacrifice CARDNAME. If you rolled 7 or 11, don't roll dice for CARDNAME during any of your following upkeeps. If you rolled any other total, note that total."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, roll two six-sided dice. If you rolled 7, sacrifice CARDNAME. If you roll the noted total, don't roll dice for CARDNAME during any of your following upkeeps. Otherwise, do nothing.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "SVarCompare": "NE0",
-        "ValidPlayer": "You",
-        "Execute": "TrigRoll",
-        "CheckSVar": "Safe",
-        "TriggerDescription": "At the beginning of your upkeep, roll two six-sided dice. If you rolled 7, sacrifice CARDNAME. If you roll the noted total, don't roll dice for CARDNAME during any of your following upkeeps. Otherwise, do nothing.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

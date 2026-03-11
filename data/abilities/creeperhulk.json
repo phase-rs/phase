@@ -2,31 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": 5,
-        "toughness": 5,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
+      "description": "Until end of turn, target creature you control has base power and toughness 5/5 and gains trample.",
+      "effect": {
+        "power": 5,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 5,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, target creature you control has base power and toughness 5/5 and gains trample.",
-        "TgtPrompt": "Select target creature you control",
-        "Keywords": "Trample"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

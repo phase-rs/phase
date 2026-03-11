@@ -2,72 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME loses defender and gains \"This creature can't be blocked.\"",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Any"
-        }
-      },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "CARDNAME loses defender and gains \"This creature can't be blocked.\"",
-        "staticAbilities": "Unblockable",
-        "RemoveKeywords": "Defender"
-      }
-    },
-    {
-      "kind": "Activated",
-      "effect": {
         "type": "Animate",
-        "power": 5,
-        "toughness": 4,
-        "types": [],
-        "target": {
-          "type": "Any"
-        }
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME becomes blue and has base power and toughness 5/4. Activate only if CARDNAME doesn't have defender.",
-        "OverwriteColors": "True",
-        "Duration": "Permanent",
-        "Colors": "Blue",
-        "IsPresent": "Card.Self+!withDefender"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 U U"
+        "cost": "2 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw three cards. Activate only if CARDNAME is blue and only once.",
-        "IsPresent": "Card.Self+Blue",
-        "GameActivationLimit": "1"
-      }
+      "description": "CARDNAME becomes blue and has base power and toughness 5/4. Activate only if CARDNAME doesn't have defender.",
+      "duration": "Permanent",
+      "effect": {
+        "power": 5,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 4,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
+      "cost": {
+        "cost": "4 U U",
+        "type": "Mana"
+      },
+      "description": "Draw three cards. Activate only if CARDNAME is blue and only once.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

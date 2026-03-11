@@ -1,20 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Samurai",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a legendary Samurai, CARDNAME gets +1/+2 and has vigilance. (Attacking doesn't cause this creature to tap.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Vigilance",
-        "Description": "As long as you control a legendary Samurai, CARDNAME gets +1/+2 and has vigilance. (Attacking doesn't cause this creature to tap.)",
-        "IsPresent": "Samurai.Legendary+YouCtrl",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

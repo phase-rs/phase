@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "3",
-          "SpellDescription": "Add {G}{G}{G}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<3/Creature>"
+        "cost": "tapXType<3/Creature>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "3",
-        "SpellDescription": "Add {G}{G}{G}."
-      }
+      "description": "Add {G}{G}{G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a creature spell, draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "TrigDestroy",
-        "ValidCard": "Creature",
-        "TriggerDescription": "When enchanted creature blocks, destroy it.",
-        "ValidBlocker": "Creature.EnchantedBy",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets -6/-0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "-6",
-        "Description": "Enchanted creature gets -6/-0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -6
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature blocks, destroy it.",
+      "mode": "AttackerBlockedByCreature",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

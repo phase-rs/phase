@@ -1,39 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "CheckSVar": "X",
-        "SVarCompare": "LT8",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, if you have fewer than eight cards in hand, draw cards equal to the difference.",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Villain",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Villains you control get +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Affected": "Villain.Other+YouCtrl",
-        "Description": "Other Villains you control get +2/+2.",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "SetMaxHandSize": "8",
-        "Description": "Your maximum hand size is eight.",
-        "Affected": "You"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "Your maximum hand size is eight.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you have fewer than eight cards in hand, draw cards equal to the difference.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

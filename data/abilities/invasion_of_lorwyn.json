@@ -1,42 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDestroy",
-            "TriggerDescription": "When CARDNAME enters, destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "SetPower": "X",
-            "SetToughness": "X",
-            "CharacteristicDefining": "True",
-            "Description": "CARDNAME's power and toughness are each equal to the number of lands you control."
-          }
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

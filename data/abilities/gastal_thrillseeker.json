@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "When this creature enters, it deals 1 damage to target opponent and you gain 1 life.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddStaticAbility": "MaxSpeedStatic",
-        "Description": "Max speed — This creature has deathtouch and haste."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — This creature has deathtouch and haste.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this creature enters, it deals 1 damage to target opponent and you gain 1 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

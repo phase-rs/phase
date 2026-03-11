@@ -1,41 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 1,
-            "toughness": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Target creature you control gets +1/+1 until end of turn. It can't be blocked by creatures with power 3 or greater this turn.",
+          "effect": {
+            "power": 1,
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 1,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBUnblockable",
-            "TgtPrompt": "Select target creature you control",
-            "SpellDescription": "Target creature you control gets +1/+1 until end of turn. It can't be blocked by creatures with power 3 or greater this turn."
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

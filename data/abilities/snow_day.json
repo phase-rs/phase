@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "TrigPump",
-        "TargetMax": "2",
-        "SpellDescription": "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.",
-        "TgtPrompt": "Choose up to two target creatures",
-        "TargetMin": "0",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Choose up to two target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

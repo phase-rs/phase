@@ -2,45 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChoosePlayer",
-        "params": {
-          "SubAbility": "DBGainControl",
-          "Choices": "Player.Other",
-          "ChoiceTitle": "Choose another player",
-          "SpellDescription": "Choose another player. That player gains control of target Treasure you control. You draw a card."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainControl",
-        "Choices": "Player.Other",
-        "ChoiceTitle": "Choose another player",
-        "SpellDescription": "Choose another player. That player gains control of target Treasure you control. You draw a card."
-      }
+      "description": "Choose another player. That player gains control of target Treasure you control. You draw a card.",
+      "effect": {
+        "description": "Choose another player. That player gains control of target Treasure you control. You draw a card.",
+        "name": "ChoosePlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if an opponent controls more lands than you, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "SVarCompare": "GTX",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, if an opponent controls more lands than you, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
-        "Execute": "TrigTreasure",
-        "Phase": "Upkeep",
-        "CheckSVar": "Y"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

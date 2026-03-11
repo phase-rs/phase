@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice another permanent, you may pay {3}. If you do, create a token that's a copy of CARDNAME.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Permanent.Other",
-        "TriggerDescription": "Whenever you sacrifice another permanent, you may pay {3}. If you do, create a token that's a copy of CARDNAME.",
-        "Execute": "TrigCopy",
-        "ValidPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

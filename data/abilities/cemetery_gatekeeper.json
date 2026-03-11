@@ -1,39 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, exile a card from a graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, exile a card from a graveyard.",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a player plays a land or casts a spell, if it shares a card type with the exiled card, CARDNAME deals 2 damage to that player.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.sharesCardTypeWith ValidExile Card.ExiledWithSource",
-        "TriggerDescription": "Whenever a player plays a land or casts a spell, if it shares a card type with the exiled card, CARDNAME deals 2 damage to that player.",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a player plays a land or casts a spell, if it shares a card type with the exiled card, CARDNAME deals 2 damage to that player.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player plays a land or casts a spell, if it shares a card type with the exiled card, CARDNAME deals 2 damage to that player.",
-        "ValidActivatingPlayer": "Player",
-        "ValidCard": "Card.sharesCardTypeWith ValidExile Card.ExiledWithSource",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "Secondary": "True"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,35 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You control enchanted creature.",
-        "Affected": "Creature.EnchantedBy",
-        "GainControl": "You"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner or a permanent its owner controls.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner or a permanent its owner controls.",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.!ControlledBy EnchantedOwner",
-        "ValidAttacker": "Creature.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

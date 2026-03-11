@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, up to one target creature you control becomes a copy of target creature an opponent controls.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Execute": "TrigPump",
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, up to one target creature you control becomes a copy of target creature an opponent controls."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Will of the council — Whenever chaos ensues, starting with you, each player votes for a creature you don't control. Exile each creature with the most votes or tied for most votes.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Will of the council — Whenever chaos ensues, starting with you, each player votes for a creature you don't control. Exile each creature with the most votes or tied for most votes.",
-        "TriggerZones": "Command",
-        "Execute": "TrigVote"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

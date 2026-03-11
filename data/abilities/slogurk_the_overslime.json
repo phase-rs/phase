@@ -2,49 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<3/P1P1>",
+        "type": "Mana"
+      },
+      "description": "Return it to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/P1P1>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return it to its owner's hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a land card is put into your graveyard from anywhere, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Graveyard",
-        "ValidCard": "Land.!token+YouOwn",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBPutCounter",
-        "TriggerDescription": "Whenever a land card is put into your graveyard from anywhere, put a +1/+1 counter on CARDNAME."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When NICKNAME leaves the battlefield, return up to three target land cards from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME leaves the battlefield, return up to three target land cards from your graveyard to your hand.",
-        "Execute": "DBChangeZone",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

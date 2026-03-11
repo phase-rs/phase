@@ -2,94 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Exile up to one target artifact or creature. Return that card to the battlefield under its owner's control at the beginning of that player's next end step.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TgtPrompt": "Select up to one target artifact or creature",
-        "Planeswalker": "True",
-        "RememberChanged": "True",
-        "SubAbility": "DBDelTrig",
-        "SpellDescription": "Exile up to one target artifact or creature. Return that card to the battlefield under its owner's control at the beginning of that player's next end step."
-      }
+      "target_prompt": "Select up to one target artifact or creature"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 white Samurai creature token with double strike.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_2_2_samurai_double_strike",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 2/2 white Samurai creature token with double strike."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBChoose",
-          "StackDescription": "SpellDescription",
-          "Planeswalker": "True",
-          "SpellDescription": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
-          "SubAbility": "DBSacAll",
-          "RepeatPlayers": "Player"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBChoose",
-        "StackDescription": "SpellDescription",
-        "Planeswalker": "True",
-        "SpellDescription": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
-        "SubAbility": "DBSacAll",
-        "RepeatPlayers": "Player"
-      }
+      "description": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
+      "effect": {
+        "description": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "No more than one creature can attack CARDNAME each combat.",
       "mode": {
         "Other": "AttackRestrict"
-      },
-      "params": {
-        "MaxAttackers": "1",
-        "Description": "No more than one creature can attack CARDNAME each combat.",
-        "ValidDefender": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

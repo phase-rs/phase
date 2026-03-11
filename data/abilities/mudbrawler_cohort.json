@@ -1,19 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Red"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control another red creature.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Creature.YouCtrl+Red+Other",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "Description": "CARDNAME gets +1/+1 as long as you control another red creature.",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

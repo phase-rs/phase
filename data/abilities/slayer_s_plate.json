@@ -1,29 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.AttachedBy+Human",
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever equipped creature dies, if it was a Human, create a 1/1 white Spirit creature token with flying.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +4/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +4/+2.",
-        "AddPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature dies, if it was a Human, create a 1/1 white Spirit creature token with flying.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          },
+          {
+            "type": "Other",
+            "value": "Human"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Proclamator Hailer — Each creature you control gets +1/+1 for each +1/+1 counter on it.",
-        "AddToughness": "AffectedX",
-        "AddPower": "AffectedX",
-        "Affected": "Creature.YouCtrl"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Proclamator Hailer — Each creature you control gets +1/+1 for each +1/+1 counter on it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +3/+0 as long as there are two or more unlocked doors among Rooms you control.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "Description": "CARDNAME gets +3/+0 as long as there are two or more unlocked doors among Rooms you control.",
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "SVarCompare": "GE2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

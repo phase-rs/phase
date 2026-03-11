@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes plotted, it deals 2 damage to any target.",
       "mode": "BecomesPlotted",
-      "params": {
-        "TriggerZones": "Exile",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "When CARDNAME becomes plotted, it deals 2 damage to any target."
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

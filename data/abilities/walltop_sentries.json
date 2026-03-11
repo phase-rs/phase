@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature dies, if there's a Lesson card in your graveyard, you gain 2 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When this creature dies, if there's a Lesson card in your graveyard, you gain 2 life.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block unless you control a Goblin or Orc.",
-        "IsPresent": "Goblin.YouCtrl,Orc.YouCtrl",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "EQ0"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Goblin",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Orc.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't block unless you control a Goblin or Orc.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

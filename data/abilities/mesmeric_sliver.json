@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "All Slivers have \"When this permanent enters, you may fateseal 1.\" (To fateseal 1, its controller looks at the top card of an opponent's library, then they may put that card on the bottom of that library.)",
-        "EffectZone": "Battlefield",
-        "Affected": "Sliver",
-        "AddTrigger": "MesmericETB"
-      }
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"When this permanent enters, you may fateseal 1.\" (To fateseal 1, its controller looks at the top card of an opponent's library, then they may put that card on the bottom of that library.)",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts an enchantment spell, counter it.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts an enchantment spell, counter it.",
-        "ValidCard": "Enchantment",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

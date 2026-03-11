@@ -2,41 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "SpellDescription": "Until end of turn, CARDNAME loses defender and gains flying.",
-          "Keywords": "Defender",
-          "Defined": "Self",
-          "SubAbility": "DBFlight"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, CARDNAME loses defender and gains flying.",
-        "Keywords": "Defender",
-        "Defined": "Self",
-        "SubAbility": "DBFlight"
-      }
+      "description": "Until end of turn, CARDNAME loses defender and gains flying.",
+      "effect": {
+        "description": "Until end of turn, CARDNAME loses defender and gains flying.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has indestructible as long as it has defender.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has indestructible as long as it has defender.",
-        "AddKeyword": "Indestructible",
-        "Affected": "Card.Self+withDefender"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,88 +2,82 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "X",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "You may exile a nonland card from your hand. You may cast that card for as long as it remains exiled. Put a charge counter on CARDNAME and note the type and amount of mana spent to pay this activation cost. Activate only if there are no charge counters on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "CHARGE",
         "count": 1,
+        "counter_type": "CHARGE",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "X"
-          },
-          {
-            "type": "Tap"
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "CheckSVar": "Y",
-        "SVarCompare": "EQ0",
-        "SubAbility": "DBExile",
-        "RememberCostMana": "True",
-        "SpellDescription": "You may exile a nonland card from your hand. You may cast that card for as long as it remains exiled. Put a charge counter on CARDNAME and note the type and amount of mana spent to pay this activation cost. Activate only if there are no charge counters on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Special LastNotedType",
-        "params": {
-          "RestrictValid": "Spell.IsRemembered",
-          "SpellDescription": "Add CARDNAME's last noted type and amount of mana. Spend this mana only to cast the last card exiled with CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/CHARGE>"
+            "cost": "SubCounter<1/CHARGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.IsRemembered",
-        "SpellDescription": "Add CARDNAME's last noted type and amount of mana. Spend this mana only to cast the last card exiled with CARDNAME."
-      }
+      "description": "Add CARDNAME's last noted type and amount of mana. Spend this mana only to cast the last card exiled with CARDNAME.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "ValidCard": "Card.IsRemembered+ExiledWithSource",
-        "Origin": "Exile",
-        "Destination": "Any",
-        "Execute": "ForgetCard"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup",
-        "Origin": "Battlefield",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

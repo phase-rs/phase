@@ -2,48 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "DBTap,DBPump"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DBTap,DBPump"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of each upkeep, create a 3/3 blue Serpent creature token named Koma's Coil.",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "Description": "This spell can't be countered.",
-        "ValidSA": "Spell"
-      }
+      "description": "At the beginning of each upkeep, create a 3/3 blue Serpent creature token named Koma's Coil.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

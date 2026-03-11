@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ValidCard": "Artifact.YouCtrl+inZoneBattlefield,Creature.YouCtrl+inZoneBattlefield",
-        "ReplaceWith": "AddOneMoreCounters",
-        "ActiveZones": "Battlefield",
-        "Description": "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead."
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "If you would get one or more counters, you get that many plus one of each of those kinds of counters instead.",
       "event": {
         "Other": "AddCounter"
-      },
-      "params": {
-        "Description": "If you would get one or more counters, you get that many plus one of each of those kinds of counters instead.",
-        "ReplaceWith": "AddOneMoreCounters",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

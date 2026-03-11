@@ -2,26 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Aura.AttachedTo Permanent"
-        }
-      },
       "cost": null,
+      "description": "Gain control of target Aura that's attached to a permanent. Attach it to another permanent it can enchant.",
+      "effect": {
+        "target": {
+          "card_type": "Aura",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedTo Permanent"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "TgtPrompt": "Select target Aura attached to a permanent",
-        "SubAbility": "ReEnchant",
-        "SpellDescription": "Gain control of target Aura that's attached to a permanent. Attach it to another permanent it can enchant."
-      }
+      "target_prompt": "Select target Aura attached to a permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

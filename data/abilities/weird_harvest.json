@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player may search their library for up to X creature cards, reveal those cards, put them into their hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Creature",
-        "ChangeNum": "X",
-        "ShuffleNonMandatory": "True",
-        "DefinedPlayer": "Player",
-        "Reveal": "True",
-        "Optional": "True",
-        "SpellDescription": "Each player may search their library for up to X creature cards, reveal those cards, put them into their hand, then shuffle."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

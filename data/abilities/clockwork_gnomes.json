@@ -2,38 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "TgtPrompt": "Select target artifact creature.",
-          "SpellDescription": "Regenerate target artifact creature.",
-          "ValidTgts": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Regenerate target artifact creature.",
+      "effect": {
+        "description": "Regenerate target artifact creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact creature.",
-        "SpellDescription": "Regenerate target artifact creature.",
-        "ValidTgts": "Creature.Artifact"
-      }
+      "target_prompt": "Select target artifact creature."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

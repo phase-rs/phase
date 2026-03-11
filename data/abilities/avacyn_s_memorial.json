@@ -1,17 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other legendary permanents you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.Other+YouCtrl+Legendary",
-        "Description": "Other legendary permanents you control have indestructible.",
-        "AddKeyword": "Indestructible"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

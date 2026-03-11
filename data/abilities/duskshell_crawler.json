@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "GoodWood",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control with a +1/+1 counter on it has trample.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
-        "AddKeyword": "Trample",
-        "Description": "Each creature you control with a +1/+1 counter on it has trample."
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, put a +1/+1 counter on target creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

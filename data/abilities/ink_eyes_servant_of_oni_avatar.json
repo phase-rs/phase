@@ -2,49 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppOwn+cmcEQX"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<X>"
+            "cost": "PayLife<X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put target creature card with mana value X from an opponent's graveyard onto the battlefield under your control.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "GainControl": "True",
-        "SpellDescription": "Put target creature card with mana value X from an opponent's graveyard onto the battlefield under your control.",
-        "ActivationZone": "Command",
-        "TgtPrompt": "Select target creature with mana value X from an opponent's graveyard"
-      }
+      "target_prompt": "Select target creature with mana value X from an opponent's graveyard"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the game, look at target opponent's hand and choose a nonland card from it. That player discards that card.",
       "mode": "NewGame",
-      "params": {
-        "TriggerDescription": "At the beginning of the game, look at target opponent's hand and choose a nonland card from it. That player discards that card.",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

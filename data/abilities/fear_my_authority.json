@@ -1,31 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "DBAbandonCheck",
-        "Phase": "Upkeep",
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +2/+2 and have fear.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddKeyword": "Fear",
-        "Description": "Creatures you control get +2/+2 and have fear.",
-        "AddPower": "2",
-        "Affected": "Creature.YouCtrl",
-        "EffectZone": "Command"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Fear",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, another target Warrior creature you control gains double strike until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, another target Warrior creature you control gains double strike until end of turn.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, another target Warrior creature you control gains double strike until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, another target Warrior creature you control gains double strike until end of turn.",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

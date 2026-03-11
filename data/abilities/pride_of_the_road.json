@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Max speed — At the beginning of combat on your turn, target creature or Vehicle you control gains double strike until end of turn.",
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddTrigger": "PhaseTrig"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — At the beginning of combat on your turn, target creature or Vehicle you control gains double strike until end of turn.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

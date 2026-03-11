@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Dark One's Own Luck — Whenever you roll one or more dice, CARDNAME gains flying and menace until end of turn. If any of those results was 10 or higher, draw a card.",
       "mode": "RolledDieOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Dark One's Own Luck — Whenever you roll one or more dice, CARDNAME gains flying and menace until end of turn. If any of those results was 10 or higher, draw a card.",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

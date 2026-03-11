@@ -2,73 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AlterAttribute",
-        "params": {
-          "Attributes": "Harnessed",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
-          "Defined": "Self"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "6 B"
+            "cost": "6 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/Creature>"
+            "cost": "Exile<1/Creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Attributes": "Harnessed",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
-        "Defined": "Self"
-      }
+      "description": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
+      "effect": {
+        "description": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
+        "name": "AlterAttribute",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "∞ — At the beginning of your upkeep, return target creature card from your graveyard to the battlefield.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+harnessed",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "∞ — At the beginning of your upkeep, return target creature card from your graveyard to the battlefield."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

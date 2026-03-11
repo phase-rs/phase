@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, tap target creature an opponent controls.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigTap",
-        "TriggerDescription": "Whenever CARDNAME attacks, tap target creature an opponent controls.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

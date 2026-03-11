@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature or Vehicle you control.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.EnchantedBy",
-        "AddAbility": "ABManaAny2",
-        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\""
-      }
+      "modifications": [
+        {
+          "ability": "ABManaAny2",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, put a +1/+1 counter on target creature or Vehicle you control.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

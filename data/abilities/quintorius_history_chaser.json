@@ -2,64 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "UnlessSwitched": "True",
-        "UnlessResolveSubs": "WhenPaid",
-        "SubAbility": "DBMill",
-        "UnlessPayer": "You",
-        "Planeswalker": "True",
-        "SpellDescription": "You may discard a card. If you do, draw two cards, then mill a card.",
-        "UnlessCost": "Discard<1/Card>"
-      }
+      "description": "You may discard a card. If you do, draw two cards, then mill a card.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Spirit.YouCtrl",
-        "KW": "Double Strike & Vigilance",
-        "SpellDescription": "Spirits you control gain double strike and vigilance until end of turn.",
-        "Planeswalker": "True"
-      }
+      "description": "Spirits you control gain double strike and vigilance until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more cards leave your graveyard, create a 3/2 red and white Spirit creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Whenever one or more cards leave your graveyard, create a 3/2 red and white Spirit creature token.",
-        "Execute": "TrigToken",
-        "Origin": "Graveyard",
-        "ValidCards": "Card.YouOwn",
-        "Destination": "Any",
-        "TriggerZones": "Battlefield"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

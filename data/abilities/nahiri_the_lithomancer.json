@@ -2,78 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 white Kor Soldier creature token. You may attach an Equipment you control to it.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_kor_soldier",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberTokens": "True",
-        "SubAbility": "DBAttach",
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 1/1 white Kor Soldier creature token. You may attach an Equipment you control to it.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "You may put an Equipment card from your hand or graveyard onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand,Graveyard",
         "destination": "Battlefield",
+        "origin": "Hand,Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "Hidden": "True",
-        "ChangeType": "Equipment.YouCtrl",
-        "Planeswalker": "True",
-        "SpellDescription": "You may put an Equipment card from your hand or graveyard onto the battlefield."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -10,
+        "type": "Loyalty"
+      },
+      "description": "Create a colorless Equipment artifact token named Stoneforged Blade. It has indestructible, \"Equipped creature gets +5/+5 and has double strike,\" and equip {0}.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "stoneforged_blade",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -10
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a colorless Equipment artifact token named Stoneforged Blade. It has indestructible, \"Equipped creature gets +5/+5 and has double strike,\" and equip {0}.",
-        "Ultimate": "True",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

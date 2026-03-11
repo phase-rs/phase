@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a card, you gain 1 life.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouOwn",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever you draw a card, you gain 1 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Inspired — Whenever CARDNAME becomes untapped, each opponent discards a card, then each opponent mills a card.",
       "mode": "Untaps",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, each opponent discards a card, then each opponent mills a card.",
-        "Execute": "TrigDiscard",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,149 +1,108 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 2,
-            "toughness": 2,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 1
+            "amount": 1,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SpellDescription": "Until end of turn, up to one target creature gets +2/+2 and gains vigilance and haste.",
-            "KW": "Vigilance & Haste",
-            "TargetMin": "0",
-            "TargetMax": "1"
-          }
+          "description": "Until end of turn, up to one target creature gets +2/+2 and gains vigilance and haste.",
+          "effect": {
+            "power": 2,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 2,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "Create a 2/2 green Wolf creature token. Transform CARDNAME.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_2_2_wolf",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SubAbility": "DBTransform",
-            "SpellDescription": "Create a 2/2 green Wolf creature token. Transform CARDNAME.",
-            "TokenOwner": "You"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 1,
-            "toughness": 1,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 1
+            "amount": 1,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "Trample",
-            "Planeswalker": "True",
-            "ValidCards": "Creature.YouCtrl",
-            "SpellDescription": "Creatures you control get +1/+1 and gain trample until end of turn."
-          }
+          "description": "Creatures you control get +1/+1 and gain trample until end of turn.",
+          "effect": {
+            "power": 1,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 1,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -1,
+            "type": "Loyalty"
+          },
+          "description": "CARDNAME deals 3 damage to any target. Transform CARDNAME.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBTransform",
-            "SpellDescription": "CARDNAME deals 3 damage to any target. Transform CARDNAME.",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Duration": "Permanent",
-              "Ultimate": "True",
-              "StaticAbilities": "STArlinn",
-              "Image": "emblem_arlinn_embraced_by_the_moon",
-              "Name": "Emblem — Arlinn, Embraced by the Moon",
-              "Planeswalker": "True",
-              "Stackable": "False",
-              "AILogic": "Always",
-              "SpellDescription": "You get an emblem with \"Creatures you control have haste and '{T}: This creature deals damage equal to its power to any target.'\""
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -6
+            "amount": -6,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Duration": "Permanent",
-            "Ultimate": "True",
-            "StaticAbilities": "STArlinn",
-            "Image": "emblem_arlinn_embraced_by_the_moon",
-            "Name": "Emblem — Arlinn, Embraced by the Moon",
-            "Planeswalker": "True",
-            "Stackable": "False",
-            "AILogic": "Always",
-            "SpellDescription": "You get an emblem with \"Creatures you control have haste and '{T}: This creature deals damage equal to its power to any target.'\""
-          }
+          "description": "You get an emblem with \"Creatures you control have haste and '{T}: This creature deals damage equal to its power to any target.'\"",
+          "duration": "Permanent",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

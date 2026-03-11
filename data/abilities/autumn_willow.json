@@ -2,37 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "ValidTgts": "Player",
-          "StackDescription": "Until end of turn, {p:Targeted} can target CARDNAME as though it didn't have shroud.",
-          "StaticAbilities": "STLoseAB",
-          "SpellDescription": "Until end of turn, CARDNAME can be the target of spells and abilities controlled by target player as though it didn't have shroud.",
-          "TgtPrompt": "Select target player to be able to target CARDNAME",
-          "RememberObjects": "TargetedPlayer"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
+      "description": "Until end of turn, CARDNAME can be the target of spells and abilities controlled by target player as though it didn't have shroud.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "ValidTgts": "Player",
-        "StackDescription": "Until end of turn, {p:Targeted} can target CARDNAME as though it didn't have shroud.",
-        "StaticAbilities": "STLoseAB",
-        "SpellDescription": "Until end of turn, CARDNAME can be the target of spells and abilities controlled by target player as though it didn't have shroud.",
-        "TgtPrompt": "Select target player to be able to target CARDNAME",
-        "RememberObjects": "TargetedPlayer"
-      }
+      "target_prompt": "Select target player to be able to target CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

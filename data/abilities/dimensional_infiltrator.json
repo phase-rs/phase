@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 C"
+        "cost": "1 C",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Opponent",
-        "RememberChanged": "True",
-        "ChangeNum": "All",
-        "SpellDescription": "Target opponent exiles the top card of their library. If it's a land card, you may return CARDNAME to its owner's hand.",
-        "SubAbility": "DBBounce"
-      }
+      "description": "Target opponent exiles the top card of their library. If it's a land card, you may return CARDNAME to its owner's hand.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell with a single target, you may copy it. If you do, those spells gain wither. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "ValidSA": "Instant.singleTarget,Sorcery.singleTarget",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell with a single target, you may copy it. If you do, those spells gain wither. You may choose new targets for the copy.",
-        "Execute": "TrigCopy",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,30 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME and that creature phase out.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPhaseAttacker",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME and that creature phase out.",
-        "ValidBlocker": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME and that creature phase out.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "Execute": "TrigPhaseBlocker",
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "ValidBlocker": "Creature",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME and that creature phase out."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,63 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You gain 1 life."
-      }
+      "description": "You gain 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SpellDescription": "Draw a card.",
-        "Planeswalker": "True",
-        "Defined": "You"
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "CantAttack",
-      "params": {
-        "Target": "You",
-        "ValidCard": "Creature",
-        "Description": "Creatures can't attack you."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If CARDNAME would leave the battlefield, exile it instead of putting it anywhere else.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ExcludeDestination": "Exile",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ToExile",
-        "Description": "If CARDNAME would leave the battlefield, exile it instead of putting it anywhere else.",
-        "Origin": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Creatures can't attack you.",
+      "mode": "CantAttack"
+    }
+  ],
+  "triggers": []
 }

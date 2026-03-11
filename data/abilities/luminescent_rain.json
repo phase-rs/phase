@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "SpellDescription": "Choose a creature type. You gain 2 life for each permanent you control of that type.",
-          "Type": "Creature",
-          "AILogic": "MostProminentComputerControls",
-          "SubAbility": "DBGainLife",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a creature type. You gain 2 life for each permanent you control of that type.",
-        "Type": "Creature",
-        "AILogic": "MostProminentComputerControls",
-        "SubAbility": "DBGainLife",
-        "Defined": "You"
-      }
+      "description": "Choose a creature type. You gain 2 life for each permanent you control of that type.",
+      "effect": {
+        "description": "Choose a creature type. You gain 2 life for each permanent you control of that type.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

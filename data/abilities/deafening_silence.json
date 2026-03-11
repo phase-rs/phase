@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "NumLimitEachTurn": "1",
-        "ValidCard": "Card.nonCreature",
-        "Caster": "Player",
-        "Description": "Each player can't cast more than one noncreature spell each turn."
-      }
+      "description": "Each player can't cast more than one noncreature spell each turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

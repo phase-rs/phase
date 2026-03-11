@@ -1,19 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as an opponent controls an Island.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Island.OppCtrl",
-        "Description": "CARDNAME gets +1/+1 as long as an opponent controls an Island.",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

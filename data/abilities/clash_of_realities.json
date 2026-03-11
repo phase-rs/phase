@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "CoRSpiritETB",
-        "EffectZone": "Battlefield",
-        "AddSVar": "CoRSpiritDmg",
-        "Affected": "Creature.Spirit",
-        "Description": "All Spirits have \"When this permanent enters, you may have it deal 3 damage to target non-Spirit creature.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Spirit"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All Spirits have \"When this permanent enters, you may have it deal 3 damage to target non-Spirit creature.\"",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.nonSpirit",
-        "EffectZone": "Battlefield",
-        "AddTrigger": "CoRNonETB",
-        "Description": "Non-Spirit creatures have \"When this permanent enters, you may have it deal 3 damage to target Spirit creature.\"",
-        "AddSVar": "CoRNonDmg"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Non-Spirit creatures have \"When this permanent enters, you may have it deal 3 damage to target Spirit creature.\"",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

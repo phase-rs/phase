@@ -2,30 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put CARDNAME and each creature it's blocking on top of their owners' libraries, then those players shuffle.",
-        "ChangeType": "Card.Self,Creature.blockedBySource",
-        "LibraryPosition": "0",
-        "Shuffle": "True"
-      }
+      "description": "Put CARDNAME and each creature it's blocking on top of their owners' libraries, then those players shuffle.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

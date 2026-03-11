@@ -1,53 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature enters, you gain 5 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigGainLife",
-            "TriggerDescription": "When this creature enters, you gain 5 life."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 5 damage to target creature without flying. (Then shuffle this card into its owner's library.)",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 5
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature.withoutFlying"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 5 damage to target creature without flying. (Then shuffle this card into its owner's library.)",
-            "TgtPrompt": "Select target creature without flying"
-          }
+          "target_prompt": "Select target creature without flying"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

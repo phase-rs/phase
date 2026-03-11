@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent sacrifices an artifact, CARDNAME deals 2 damage to them.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an opponent sacrifices an artifact, CARDNAME deals 2 damage to them.",
-        "Execute": "TrigDamage",
-        "ValidCard": "Artifact.OppCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

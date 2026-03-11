@@ -1,63 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card"
-            }
-          },
           "cost": null,
+          "description": "Counter target spell unless its controller pays {3}.",
+          "effect": {
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target spell",
-            "TargetType": "Spell",
-            "UnlessCost": "3",
-            "SpellDescription": "Counter target spell unless its controller pays {3}."
-          }
+          "target_prompt": "Select target spell"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Land"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Up to three target lands don't untap during their controller's next untap step.",
-            "TargetMin": "0",
-            "Duration": "Permanent",
-            "TargetMax": "3",
-            "IsCurse": "True",
-            "KW": "HIDDEN This card doesn't untap during your next untap step."
-          }
+          "description": "Up to three target lands don't untap during their controller's next untap step.",
+          "duration": "Permanent",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

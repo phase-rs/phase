@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Description": "Spells your opponents cast that target one or more commanders you control cost {3} more to cast.",
-        "ValidTarget": "Card.IsCommander+YouCtrl+inZoneBattlefield",
-        "Amount": "3",
-        "Type": "Spell",
-        "Activator": "Opponent"
-      }
+      "description": "Spells your opponents cast that target one or more commanders you control cost {3} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

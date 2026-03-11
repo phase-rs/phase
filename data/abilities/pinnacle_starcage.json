@@ -2,42 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Exile",
-        "destination": "Graveyard",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "6 W W"
+        "cost": "6 W W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Card.ExiledWithSource",
-        "SpellDescription": "Put each card exiled with this artifact into its owner's graveyard, then create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way. Sacrifice this artifact.",
-        "RememberChanged": "True",
-        "SubAbility": "DBToken"
-      }
+      "description": "Put each card exiled with this artifact into its owner's graveyard, then create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way. Sacrifice this artifact.",
+      "effect": {
+        "destination": "Graveyard",
+        "origin": "Exile",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this artifact enters, exile all artifacts and creatures with mana value 2 or less until this artifact leaves the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this artifact enters, exile all artifacts and creatures with mana value 2 or less until this artifact leaves the battlefield.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

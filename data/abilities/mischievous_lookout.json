@@ -1,33 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidSA": "Spell.MayPlaySource",
-        "Static": "True",
-        "TriggerDescription": "If you do, it perpetually becomes a 2/1 Rat creature in addition to its other types.",
-        "Execute": "DBAnimate",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Once during each of your turns, you may cast a noncreature, non-Aura permanent spell from your graveyard.",
-        "Condition": "PlayerTurn",
-        "MayPlay": "True",
-        "MayPlayLimit": "1",
-        "EffectZone": "Battlefield",
-        "Affected": "Permanent.nonCreature+nonAura+nonLand",
-        "AffectedZone": "Graveyard"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Once during each of your turns, you may cast a noncreature, non-Aura permanent spell from your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "If you do, it perpetually becomes a 2/1 Rat creature in addition to its other types.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

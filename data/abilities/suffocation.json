@@ -2,48 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to the controller of the last red instant or sorcery spell that dealt damage to you this turn. Draw a card at the beginning of the next turn's upkeep.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrigSlowtrip",
-        "SpellDescription": "CARDNAME deals 4 damage to the controller of the last red instant or sorcery spell that dealt damage to you this turn. Draw a card at the beginning of the next turn's upkeep.",
-        "CheckSVar": "X",
-        "Defined": "Remembered",
-        "SVarCompare": "EQ1"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
       "mode": "DamageDone",
-      "params": {
-        "Static": "True",
-        "ValidTarget": "You",
-        "Execute": "TrigClearRem",
-        "ValidSource": "Sorcery.Red,Instant.Red"
+      "valid_source": {
+        "card_type": "Sorcery",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red,Instant.Red"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     },
     {
       "mode": "Phase",
-      "params": {
-        "Phase": "Cleanup",
-        "Execute": "TrigReset",
-        "Static": "True"
-      }
+      "phase": "Cleanup"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Land"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or land. It can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Land",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or land",
-        "NoRegen": "True",
-        "SpellDescription": "Destroy target creature or land. It can't be regenerated."
-      }
+      "target_prompt": "Select target creature or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

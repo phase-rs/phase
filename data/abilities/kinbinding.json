@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of combat on your turn, create a 1/1 green and white Kithkin creature token.",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control get +X/+X, where X is the number of creatures that entered the battlefield under your control this turn.",
-        "AddPower": "X",
-        "Affected": "Creature.YouCtrl",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +X/+X, where X is the number of creatures that entered the battlefield under your control this turn.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, create a 1/1 green and white Kithkin creature token.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -2,46 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "EffectOwner": "CardOwner",
-          "ReplacementEffects": "RedirectDamage",
-          "Activator": "Player.Owner",
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "Name": "Personal Incarnation Redirection",
-          "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to its owner instead. Only CARDNAME's owner may activate this ability."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "EffectOwner": "CardOwner",
-        "ReplacementEffects": "RedirectDamage",
-        "Activator": "Player.Owner",
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "Name": "Personal Incarnation Redirection",
-        "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to its owner instead. Only CARDNAME's owner may activate this ability."
-      }
+      "description": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to its owner instead. Only CARDNAME's owner may activate this ability.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, its owner loses half their life, rounded up.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME dies, its owner loses half their life, rounded up.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLoseLife",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

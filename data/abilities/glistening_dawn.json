@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Incubate",
-        "params": {
-          "SpellDescription": "Incubate X twice, where X is the number of lands you control. (To incubate X, create an incubator token with X +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
-          "Amount": "Count$Valid Land.YouCtrl",
-          "Times": "2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Incubate X twice, where X is the number of lands you control. (To incubate X, create an incubator token with X +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
-        "Amount": "Count$Valid Land.YouCtrl",
-        "Times": "2"
-      }
+      "description": "Incubate X twice, where X is the number of lands you control. (To incubate X, create an incubator token with X +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+      "effect": {
+        "description": "Incubate X twice, where X is the number of lands you control. (To incubate X, create an incubator token with X +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+        "name": "Incubate",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When the last time counter is removed from CARDNAME while it's exiled, creatures can't be blocked this turn.",
       "mode": "CounterRemoved",
-      "params": {
-        "Execute": "TrigEffect",
-        "TriggerZones": "Exile",
-        "ValidCard": "Card.Self",
-        "NewCounterAmount": "0",
-        "TriggerDescription": "When the last time counter is removed from CARDNAME while it's exiled, creatures can't be blocked this turn.",
-        "CounterType": "TIME"
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

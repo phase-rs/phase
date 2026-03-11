@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBTokenInfestation",
-        "ValidDescription": "all creatures targeted player controls",
-        "ValidCards": "Creature",
-        "RememberDestroyed": "True",
-        "SpellDescription": "Destroy all creatures target player controls. For each creature that died this way, that player creates two 1/1 red Goblin creature tokens."
-      }
+      "description": "Destroy all creatures target player controls. For each creature that died this way, that player creates two 1/1 red Goblin creature tokens.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

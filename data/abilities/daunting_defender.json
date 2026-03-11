@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Creature.Cleric+YouCtrl",
-        "ReplaceWith": "DBReplace",
-        "Description": "If a source would deal damage to a Cleric creature you control, prevent 1 of that damage.",
-        "PreventionEffect": "True"
-      }
+      "description": "If a source would deal damage to a Cleric creature you control, prevent 1 of that damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

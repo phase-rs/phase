@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When CARDNAME enters, return target permanent card from your graveyard to your hand.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "description": "If CARDNAME would die, exile it instead.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "If CARDNAME would die, exile it instead.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "Exile",
-        "ActiveZones": "Battlefield"
+      "description": "When CARDNAME enters, return target permanent card from your graveyard to your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

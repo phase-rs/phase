@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "SetColor": "Colorless",
-        "RemoveCardTypes": "True",
-        "AddType": "Land",
-        "RemoveAllAbilities": "True",
-        "AddAbility": "ABMana",
-        "Description": "Enchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities."
-      }
+      "modifications": [
+        {
+          "ability": "ABMana",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Land",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

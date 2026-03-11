@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, target opponent loses 2 life and you gain 2 life.",
       "mode": "Exploited",
-      "params": {
-        "TriggerDescription": "When CARDNAME exploits a creature, target opponent loses 2 life and you gain 2 life.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDrain"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

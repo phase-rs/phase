@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more other creatures you control die, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Creature.Other+YouCtrl",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever one or more other creatures you control die, put a +1/+1 counter on CARDNAME."
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

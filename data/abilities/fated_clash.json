@@ -2,41 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Target creature you control and target creature an opponent controls each gain indestructible until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPumpOpp",
-        "KW": "Indestructible",
-        "SpellDescription": "Target creature you control and target creature an opponent controls each gain indestructible until end of turn.",
-        "TgtPrompt": "Select target creature you control"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "IsPresent2": "Creature.blocking",
-        "IsPresent": "Creature.attacking",
-        "Caster": "You",
-        "ValidSA": "Spell",
-        "Description": "You may cast this spell as though it had flash if a creature is attacking and a creature is blocking."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "You may cast this spell as though it had flash if a creature is attacking and a creature is blocking.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

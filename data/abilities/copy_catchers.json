@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you surveil, you may pay {1}{U}. If you do, create a token that's a copy of CARDNAME.",
       "mode": "Surveil",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "Whenever you surveil, you may pay {1}{U}. If you do, create a token that's a copy of CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

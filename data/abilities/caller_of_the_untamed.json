@@ -2,44 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SubAbility": "DBCleanup",
-          "CostDesc": "{X}, {T}",
-          "SpellDescription": "Create a token that's a copy of a card you exiled with cards named Caller of the Untamed. X is the mana value of that card.",
-          "Defined": "Revealed"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "RevealFromExile<1/Creature.YouOwn+NotedForCallerOfTheUntamed>"
+            "cost": "RevealFromExile<1/Creature.YouOwn+NotedForCallerOfTheUntamed>",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCleanup",
-        "CostDesc": "{X}, {T}",
-        "SpellDescription": "Create a token that's a copy of a card you exiled with cards named Caller of the Untamed. X is the mana value of that card.",
-        "Defined": "Revealed"
-      }
+      "description": "Create a token that's a copy of a card you exiled with cards named Caller of the Untamed. X is the mana value of that card.",
+      "effect": {
+        "description": "Create a token that's a copy of a card you exiled with cards named Caller of the Untamed. X is the mana value of that card.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay.",
-        "Activator": "You",
-        "Type": "Spell",
-        "Color": "B",
-        "Amount": "1",
-        "EffectZone": "Command",
-        "ValidCard": "Creature"
-      }
+      "description": "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay.",
+      "effect_zone": "Command",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

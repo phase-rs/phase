@@ -1,31 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, it deals X damage to each creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDamageAll",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, it deals X damage to each creature.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more creatures your opponents control die, you create a Treasure token. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ActivationLimit": "1",
-        "ValidCards": "Creature.OppCtrl",
-        "Execute": "TrigTreasure",
-        "TriggerDescription": "Whenever one or more creatures your opponents control die, you create a Treasure token. This ability triggers only once each turn."
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

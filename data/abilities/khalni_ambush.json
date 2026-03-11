@@ -1,72 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)",
-            "TgtPrompt": "Choose target creature you control",
-            "AILogic": "Fight",
-            "StackDescription": "None",
-            "SubAbility": "DBFight"
-          }
+          "target_prompt": "Choose target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G}."
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "ReplacementResult": "Updated",
-            "ReplaceWith": "ETBTapped",
-            "Description": "CARDNAME enters tapped.",
-            "Destination": "Battlefield"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Amount": "3",
-        "Description": "Sorcery spells cost {3} more to cast.",
-        "ValidCard": "Sorcery",
-        "Type": "Spell"
-      }
+      "description": "Sorcery spells cost {3} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

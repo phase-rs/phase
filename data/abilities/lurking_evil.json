@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayLife<X>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 4/4 Phyrexian Horror creature with flying.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Phyrexian",
           "Horror"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayLife<X>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "CARDNAME becomes a 4/4 Phyrexian Horror creature with flying.",
-        "CostDesc": "Pay half your life, rounded up:",
-        "Duration": "Permanent",
-        "RemoveCardTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

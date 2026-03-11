@@ -2,51 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add X mana of any one color, where X is NICKNAME's power. Spend this mana only to activate abilities.",
-          "Amount": "X",
-          "RestrictValid": "Activated"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add X mana of any one color, where X is NICKNAME's power. Spend this mana only to activate abilities.",
-        "Amount": "X",
-        "RestrictValid": "Activated"
-      }
+      "description": "Add X mana of any one color, where X is NICKNAME's power. Spend this mana only to activate abilities.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "10 R G",
+        "type": "Mana"
+      },
+      "description": "Put any number of permanent cards from your hand onto the battlefield. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "10 R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put any number of permanent cards from your hand onto the battlefield. (Activate each exhaust ability only once.)",
-        "ChangeType": "Permanent",
-        "Exhaust": "True",
-        "ChangeNum": "Y"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted player casts a spell other than the first spell they cast each turn or copies a spell, CARDNAME deals 2 damage to them.",
       "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "GT1",
-        "TriggerDescription": "Whenever enchanted player casts a spell other than the first spell they cast each turn or copies a spell, CARDNAME deals 2 damage to them.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage",
-        "ValidActivatingPlayer": "Player.EnchantedBy"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever enchanted player casts a spell other than the first spell they cast each turn or copies a spell, CARDNAME deals 2 damage to them.",
       "mode": "SpellCopy",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever enchanted player casts a spell other than the first spell they cast each turn or copies a spell, CARDNAME deals 2 damage to them.",
-        "ValidActivatingPlayer": "Player.EnchantedBy",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

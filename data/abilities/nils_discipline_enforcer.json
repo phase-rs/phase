@@ -1,32 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, for each player, put a +1/+1 counter on up to one target creature that player controls.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "PutCounterOneEach"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature with one or more counters on it can't attack you or planeswalkers you control unless its controller pays {X}, where X is the number of counters on that creature.",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "Description": "Each creature with one or more counters on it can't attack you or planeswalkers you control unless its controller pays {X}, where X is the number of counters on that creature.",
-        "RememberingAttacker": "True",
-        "ValidCard": "Creature.HasCounters",
-        "Target": "You,Planeswalker.YouCtrl",
-        "Cost": "X"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, for each player, put a +1/+1 counter on up to one target creature that player controls.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

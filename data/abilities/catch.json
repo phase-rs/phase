@@ -1,58 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GainControl",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "LoseControl": "EOT",
-            "Untap": "True",
-            "AddKWs": "Haste",
-            "SpellDescription": "Gain control of target permanent until end of turn. Untap it. It gains haste until end of turn."
-          }
+          "description": "Gain control of target permanent until end of turn. Untap it. It gains haste until end of turn.",
+          "effect": {
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "GainControl"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Each player sacrifices an artifact, a creature, an enchantment, a land, and a planeswalker.",
           "effect": {
-            "type": "Sacrifice",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Each player sacrifices an artifact, a creature, an enchantment, a land, and a planeswalker.",
-            "SacValid": "Artifact & Creature & Enchantment & Land & Planeswalker",
-            "Defined": "Player",
-            "SacEachValid": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

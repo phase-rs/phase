@@ -1,36 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a creature, it has lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Lifelink",
-        "Description": "As long as enchanted permanent is a creature, it has lifelink.",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Equipment.EnchantedBy",
-        "AddStaticAbility": "RuneSustenanceST",
-        "Description": "As long as enchanted permanent is an Equipment, it has \"Equipped creature has lifelink.\""
-      }
+      "affected": {
+        "card_type": "Equipment",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is an Equipment, it has \"Equipped creature has lifelink.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

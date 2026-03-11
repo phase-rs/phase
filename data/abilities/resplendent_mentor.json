@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "White creatures you control have \"{T}: You gain 1 life.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "GainLife",
-        "Affected": "Creature.White+YouCtrl",
-        "Description": "White creatures you control have \"{T}: You gain 1 life.\""
-      }
+      "modifications": [
+        {
+          "ability": "GainLife",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

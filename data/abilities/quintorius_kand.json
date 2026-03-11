@@ -2,90 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 3/2 red and white Spirit creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "rw_3_2_spirit",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 3/2 red and white Spirit creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Discover",
-        "params": {
-          "Num": "4",
-          "SpellDescription": "Discover 4.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Num": "4",
-        "SpellDescription": "Discover 4.",
-        "Planeswalker": "True"
-      }
+      "description": "Discover 4.",
+      "effect": {
+        "description": "Discover 4.",
+        "name": "Discover",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "Exile any number of target cards from your graveyard. Add {R} for each card exiled this way. You may play those cards this turn.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Exile",
+        "origin": "Graveyard",
         "target": {
-          "type": "Filtered",
-          "filter": "Card.YouOwn"
-        }
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TargetMax": "Yard",
-        "RememberChanged": "True",
-        "TgtPrompt": "Select any number of target cards in your graveyard",
-        "Ultimate": "True",
-        "StackDescription": "SpellDescription",
-        "TargetMin": "0",
-        "SubAbility": "DBMana",
-        "SpellDescription": "Exile any number of target cards from your graveyard. Add {R} for each card exiled this way. You may play those cards this turn."
-      }
+      "target_prompt": "Select any number of target cards in your graveyard"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell from exile, CARDNAME deals 2 damage to each opponent and you gain 2 life.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever you cast a spell from exile, CARDNAME deals 2 damage to each opponent and you gain 2 life.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.wasCastFromExile"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,21 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature of the chosen type dies, you may draw a card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigDraw",
-        "ValidCard": "Creature.ChosenType",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature of the chosen type dies, you may draw a card.",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

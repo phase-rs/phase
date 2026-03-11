@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "AINoRecursiveCheck": "True",
-          "SpellDescription": "Add {R}{R}, then add {R} for each card named Rite of Flame in each graveyard.",
-          "AILogic": "ManaRitual",
-          "Amount": "2",
-          "SubAbility": "SubMana"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AINoRecursiveCheck": "True",
-        "SpellDescription": "Add {R}{R}, then add {R} for each card named Rite of Flame in each graveyard.",
-        "AILogic": "ManaRitual",
-        "Amount": "2",
-        "SubAbility": "SubMana"
-      }
+      "description": "Add {R}{R}, then add {R} for each card named Rite of Flame in each graveyard.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

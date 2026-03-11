@@ -1,26 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Taps",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever fortified land becomes tapped, target creature gets +1/+1 until end of turn.",
-        "ValidCard": "Land.FortifiedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "FortifiedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Fortified land has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "Affected": "Land.FortifiedBy",
-        "Description": "Fortified land has indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever fortified land becomes tapped, target creature gets +1/+1 until end of turn.",
+      "mode": "Taps",
+      "valid_card": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "FortifiedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

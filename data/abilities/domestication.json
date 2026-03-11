@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, if enchanted creature's power is 4 or greater, sacrifice CARDNAME.",
-        "IsPresent": "Card.AttachedBy+powerGE4"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "GainControl": "You",
-        "Description": "You control enchanted creature."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if enchanted creature's power is 4 or greater, sacrifice CARDNAME.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if an opponent lost life this turn, put a +1/+1 counter on CARDNAME. (Damage causes loss of life.)",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your end step, if an opponent lost life this turn, put a +1/+1 counter on CARDNAME. (Damage causes loss of life.)",
-        "Phase": "End of Turn",
-        "CheckSVar": "X"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

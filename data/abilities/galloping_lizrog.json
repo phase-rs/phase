@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may remove any number of +1/+1 counters from among creatures you control. If you do, put twice that many +1/+1 counters on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "Execute": "TrigRemoveCounters",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you may remove any number of +1/+1 counters from among creatures you control. If you do, put twice that many +1/+1 counters on CARDNAME."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

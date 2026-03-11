@@ -1,27 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "No more than one creature can attack each combat.",
       "mode": {
         "Other": "AttackRestrict"
-      },
-      "params": {
-        "Description": "No more than one creature can attack each combat.",
-        "MaxAttackers": "1"
       }
     },
     {
+      "description": "No more than one creature can block each combat.",
       "mode": {
         "Other": "BlockRestrict"
-      },
-      "params": {
-        "MaxBlockers": "1",
-        "Description": "No more than one creature can block each combat."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

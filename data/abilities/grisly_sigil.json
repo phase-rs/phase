@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Branch",
-        "params": {
-          "ValidTgts": "Creature,Planeswalker",
-          "TrueSubAbility": "Damage3",
-          "AILogic": "GrislySigil",
-          "SpellDescription": "Choose target creature or planeswalker. If it was dealt noncombat damage this turn, CARDNAME deals 3 damage to it and you gain 3 life. Otherwise, CARDNAME deals 1 damage to it and you gain 1 life.",
-          "FalseSubAbility": "Damage1",
-          "TgtPrompt": "Choose target creature or planeswalker",
-          "BranchConditionSVar": "X"
-        }
-      },
       "cost": null,
+      "description": "Choose target creature or planeswalker. If it was dealt noncombat damage this turn, CARDNAME deals 3 damage to it and you gain 3 life. Otherwise, CARDNAME deals 1 damage to it and you gain 1 life.",
+      "effect": {
+        "description": "Choose target creature or planeswalker. If it was dealt noncombat damage this turn, CARDNAME deals 3 damage to it and you gain 3 life. Otherwise, CARDNAME deals 1 damage to it and you gain 1 life.",
+        "name": "Branch",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature,Planeswalker",
-        "TrueSubAbility": "Damage3",
-        "AILogic": "GrislySigil",
-        "SpellDescription": "Choose target creature or planeswalker. If it was dealt noncombat damage this turn, CARDNAME deals 3 damage to it and you gain 3 life. Otherwise, CARDNAME deals 1 damage to it and you gain 1 life.",
-        "FalseSubAbility": "Damage1",
-        "TgtPrompt": "Choose target creature or planeswalker",
-        "BranchConditionSVar": "X"
-      }
+      "target_prompt": "Choose target creature or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

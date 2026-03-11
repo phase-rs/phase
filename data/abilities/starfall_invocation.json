@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy all creatures. If the gift was promised, return a creature card put into your graveyard this way to the battlefield under your control.",
-        "ValidCards": "Creature",
-        "RememberDestroyed": "True",
-        "SubAbility": "DBReturn"
-      }
+      "description": "Destroy all creatures. If the gift was promised, return a creature card put into your graveyard this way to the battlefield under your control.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

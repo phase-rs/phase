@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"Whenever you cast a noncreature spell, this creature gets +2/+0 until end of turn.\" and is a Wizard in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Wizard",
-        "AddTrigger": "TrigSpellCast",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has \"Whenever you cast a noncreature spell, this creature gets +2/+0 until end of turn.\" and is a Wizard in addition to its other types."
-      }
+      "modifications": [
+        {
+          "core_type": "Wizard",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

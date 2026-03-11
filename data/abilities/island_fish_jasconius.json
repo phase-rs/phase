@@ -1,51 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Always",
-      "params": {
-        "TriggerDescription": "When you control no Islands, sacrifice this creature.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "IsPresent": "Island.YouCtrl",
-        "PresentCompare": "EQ0"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigUntap",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may pay {U}{U}{U}. If you do, untap this creature."
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Card.Self",
-        "UnlessDefender": "controlsIsland",
-        "Description": "This creature can't attack unless defending player controls an Island."
-      }
+      "description": "This creature can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This creature doesn't untap during your untap step."
-      }
+      "description": "When you control no Islands, sacrifice this creature.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "At the beginning of your upkeep, you may pay {U}{U}{U}. If you do, untap this creature.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

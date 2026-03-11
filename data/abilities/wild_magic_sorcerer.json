@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "The first spell you cast from exile each turn has cascade.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.YouCtrl+wasCastFromExile",
-        "AffectedZone": "Stack",
-        "SVarCompare": "EQ0",
-        "AddKeyword": "Cascade",
-        "CheckSVar": "Y",
-        "Description": "The first spell you cast from exile each turn has cascade."
-      }
+      "modifications": [
+        {
+          "keyword": "Cascade",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

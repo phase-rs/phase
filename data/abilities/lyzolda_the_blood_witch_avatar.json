@@ -1,31 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Hellbent": "True",
-        "Execute": "LyzoldasDiscard",
-        "TriggerDescription": "Hellbent — At the beginning of your end step, if you have no cards in hand, each of your opponents discards a card."
-      }
+      "description": "Hellbent — As long as you have no cards in hand, if a source you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "Hellbent — As long as you have no cards in hand, if a source you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "ReplaceWith": "DmgTwice",
-        "ValidTarget": "Permanent,Player",
-        "Hellbent": "True"
-      }
+      "description": "Hellbent — At the beginning of your end step, if you have no cards in hand, each of your opponents discards a card.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

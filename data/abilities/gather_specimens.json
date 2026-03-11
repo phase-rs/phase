@@ -2,24 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "OppCreatEnters",
-          "SpellDescription": "If a creature would enter the battlefield under an opponent's control this turn, it enters under your control instead."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "OppCreatEnters",
-        "SpellDescription": "If a creature would enter the battlefield under an opponent's control this turn, it enters under your control instead."
-      }
+      "description": "If a creature would enter the battlefield under an opponent's control this turn, it enters under your control instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

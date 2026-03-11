@@ -2,42 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "SubAbility": "DBEffect",
-          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent half that damage, rounded down.",
-          "AILogic": "NeedsPrevention"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent half that damage, rounded down.",
-        "AILogic": "NeedsPrevention"
-      }
+      "description": "The next time a source of your choice would deal damage to you this turn, prevent half that damage, rounded down.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage to you this turn, prevent half that damage, rounded down.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

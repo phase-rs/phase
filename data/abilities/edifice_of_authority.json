@@ -2,80 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "HIDDEN CARDNAME can't attack.",
-        "SubAbility": "DBPutCounter",
-        "IsCurse": "True",
-        "SpellDescription": "Target creature can't attack this turn. Put a brick counter on CARDNAME."
-      }
+      "description": "Target creature can't attack this turn. Put a brick counter on CARDNAME.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature",
-          "CheckSVar": "X",
-          "SVarCompare": "GE3",
-          "StaticAbilities": "DBCantStatic",
-          "Duration": "UntilYourNextTurn",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Until your next turn, target creature can't attack or block and its activated abilities can't be activated. Activate only if there are three or more brick counters on CARDNAME.",
-          "IsCurse": "True",
-          "ForgetOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "CheckSVar": "X",
-        "SVarCompare": "GE3",
-        "StaticAbilities": "DBCantStatic",
-        "Duration": "UntilYourNextTurn",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Until your next turn, target creature can't attack or block and its activated abilities can't be activated. Activate only if there are three or more brick counters on CARDNAME.",
-        "IsCurse": "True",
-        "ForgetOnMoved": "Battlefield"
-      }
+      "description": "Until your next turn, target creature can't attack or block and its activated abilities can't be activated. Activate only if there are three or more brick counters on CARDNAME.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

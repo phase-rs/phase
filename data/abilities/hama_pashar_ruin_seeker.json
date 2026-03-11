@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidZone": "Command",
-        "ValidMode": "RoomEntered",
-        "Description": "Room abilities of dungeons you own trigger an additional time.",
-        "ValidCard": "Dungeon.YouOwn"
-      }
+      "description": "Room abilities of dungeons you own trigger an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

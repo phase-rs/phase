@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent sacrifices a nontoken permanent, put that card onto the battlefield under your control.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigReturn",
-        "ValidCard": "Permanent.!token+OppCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an opponent sacrifices a nontoken permanent, put that card onto the battlefield under your control."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

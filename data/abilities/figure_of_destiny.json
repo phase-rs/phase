@@ -2,89 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "RW",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a Kithkin Spirit with base power and toughness 2/2.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Spirit"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "RW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "Duration": "Permanent",
-        "SpellDescription": "CARDNAME becomes a Kithkin Spirit with base power and toughness 2/2."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "RW RW RW",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Spirit",
           "Warrior"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "RW RW RW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Card.Self+Spirit",
-        "RemoveCreatureTypes": "True",
-        "Duration": "Permanent",
-        "SpellDescription": "If CARDNAME is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "RW RW RW RW RW RW",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 8,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 8,
+        "type": "Animate",
         "types": [
           "Kithkin",
           "Spirit",
           "Warrior",
           "Avatar"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "RW RW RW RW RW RW"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying & First Strike",
-        "RemoveCreatureTypes": "True",
-        "ConditionPresent": "Card.Self+Warrior",
-        "SpellDescription": "If CARDNAME is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
-        "Duration": "Permanent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

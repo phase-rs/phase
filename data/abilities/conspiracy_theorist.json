@@ -1,27 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may pay {1} and discard a card. If you do, draw a card.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {1} and discard a card. If you do, draw a card."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you discard one or more nonland cards, you may exile one of them from your graveyard. If you do, you may cast it this turn.",
       "mode": "DiscardedAll",
-      "params": {
-        "ValidPlayer": "You",
-        "ValidCard": "Card.nonLand",
-        "Execute": "TrigEffect",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you discard one or more nonland cards, you may exile one of them from your graveyard. If you do, you may cast it this turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,41 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+0 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "6",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "Type": "Spell",
-        "Description": "If an opponent controls seven or more lands, CARDNAME costs {6} less to cast.",
-        "SVarCompare": "GE7",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "compare": "GE7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls seven or more lands, CARDNAME costs {6} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

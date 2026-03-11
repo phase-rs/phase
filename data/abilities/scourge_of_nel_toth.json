@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may cast CARDNAME from your graveyard by paying {B}{B} and sacrificing two creatures rather than paying its mana cost.",
+      "effect_zone": "Graveyard",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "Graveyard",
-        "ValidSA": "Spell.Self",
-        "Cost": "B B Sac<2/Creature>",
-        "Description": "You may cast CARDNAME from your graveyard by paying {B}{B} and sacrificing two creatures rather than paying its mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

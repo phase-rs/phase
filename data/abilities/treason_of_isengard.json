@@ -2,29 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant.YouOwn,Sorcery.YouOwn"
-        }
-      },
       "cost": null,
+      "description": "Put up to one target instant or sorcery card from your graveyard on top of your library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "TgtPrompt": "Choose up to one target instant or sorcery card in your graveyard",
-        "TargetMin": "0",
-        "SubAbility": "DBAmass",
-        "SpellDescription": "Put up to one target instant or sorcery card from your graveyard on top of your library."
-      }
+      "target_prompt": "Choose up to one target instant or sorcery card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

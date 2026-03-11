@@ -2,50 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "7",
+        "type": "Mana"
+      },
+      "description": "Put a conqueror counter on NICKNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "CONQUEROR",
         "count": 1,
+        "counter_type": "CONQUEROR",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "7"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a conqueror counter on NICKNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Land.nonBasic",
-        "IsPresent": "Card.Self+counters_GE1_CONQUEROR",
-        "AddType": "Mountain",
-        "Description": "As long as NICKNAME has a conqueror counter on him, nonbasic lands are Mountains. (They lose all other land types and abilities and have \"{T}: Add {R}.\")",
-        "RemoveLandTypes": "True"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Nonbasic lands enter tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "Nonbasic lands enter tapped.",
-        "ActiveZones": "Battlefield",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Land.nonBasic",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as NICKNAME has a conqueror counter on him, nonbasic lands are Mountains. (They lose all other land types and abilities and have \"{T}: Add {R}.\")",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "Mountain",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

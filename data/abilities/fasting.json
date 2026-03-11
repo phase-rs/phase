@@ -1,43 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutHunger",
-        "TriggerDescription": "At the beginning of your upkeep, put a hunger counter on CARDNAME. Then destroy CARDNAME if it has five or more hunger counters on it."
-      }
-    },
-    {
-      "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "When you draw a card, destroy CARDNAME.",
-        "Execute": "DBDestroySelf",
-        "ValidCard": "Card.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "description": "If you would begin your draw step, you may skip that step instead. If you do, you gain 2 life.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "Description": "If you would begin your draw step, you may skip that step instead. If you do, you gain 2 life.",
-        "Layer": "Other",
-        "Optional": "True",
-        "Phase": "Draw",
-        "ReplaceWith": "DBGainLife"
+      "description": "At the beginning of your upkeep, put a hunger counter on CARDNAME. Then destroy CARDNAME if it has five or more hunger counters on it.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "When you draw a card, destroy CARDNAME.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

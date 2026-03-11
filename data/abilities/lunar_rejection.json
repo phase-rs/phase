@@ -2,52 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Wolf,Creature.Werewolf"
-        }
-      },
       "cost": null,
+      "description": "Return target [Wolf or Werewolf] creature to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Wolf,Creature.Werewolf"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "TgtPrompt": "Select target Wolf or Werewolf",
-        "SpellDescription": "Return target [Wolf or Werewolf] creature to its owner's hand."
-      }
+      "target_prompt": "Select target Wolf or Werewolf"
     },
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NonBasicSpell": "True",
-        "StackDescription": "Return {c:Targeted} to its owner's hand.",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
-        "CostDesc": "{3}{U}",
-        "PrecostDesc": "Cleave",
-        "SubAbility": "DBDraw"
-      }
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

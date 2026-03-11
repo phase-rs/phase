@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, target opponent drafts a card from CARDNAME's spellbook. They may cast that card without paying its mana cost.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, target opponent drafts a card from CARDNAME's spellbook. They may cast that card without paying its mana cost.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChooseTgt"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,22 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)"
-      }
+      "description": "Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

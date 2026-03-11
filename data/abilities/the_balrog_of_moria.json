@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may exile it. When you do, for each opponent, exile up to one target creature that player controls.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigImmediateTrig",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, you may exile it. When you do, for each opponent, exile up to one target creature that player controls.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you cycle CARDNAME, create two Treasure tokens.",
       "mode": "Cycled",
-      "params": {
-        "TriggerDescription": "When you cycle CARDNAME, create two Treasure tokens.",
-        "Execute": "TrigTreasure",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

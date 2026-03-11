@@ -2,32 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerLE2"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Target creature with power 2 or less gains haste until end of turn and can't be blocked this turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature with power 2 or less gains haste until end of turn and can't be blocked this turn.",
-        "StackDescription": "{c:Targeted} gains haste until end of turn and can't be blocked this turn.",
-        "KW": "Haste",
-        "SubAbility": "DBUnblockable",
-        "TgtPrompt": "Select target creature with power 2 or less"
-      }
+      "target_prompt": "Select target creature with power 2 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

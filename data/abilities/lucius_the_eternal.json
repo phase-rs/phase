@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Armor of Shrieking Souls — When CARDNAME dies, exile it and choose target creature an opponent controls. When that creature leaves the battlefield, return CARDNAME from exile to the battlefield under its owner's control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Armor of Shrieking Souls — When CARDNAME dies, exile it and choose target creature an opponent controls. When that creature leaves the battlefield, return CARDNAME from exile to the battlefield under its owner's control.",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MustBlock",
-        "params": {
-          "ValidTgts": "Creature",
-          "SpellDescription": "Target creature blocks CARDNAME this turn if able."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "SpellDescription": "Target creature blocks CARDNAME this turn if able."
-      }
+      "description": "Target creature blocks CARDNAME this turn if able.",
+      "effect": {
+        "description": "Target creature blocks CARDNAME this turn if able.",
+        "name": "MustBlock",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,51 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SetInMotion",
-      "params": {
-        "TriggerDescription": "When you set this scheme in motion, choose an opponent.",
-        "TriggerZones": "Command",
-        "ValidCard": "Card.Self",
-        "Execute": "ChooseTheWretch"
-      }
-    },
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "Abandon",
-        "Attacked": "Player.Chosen",
-        "TriggerDescription": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
-        "ValidCard": "Card"
-      }
-    },
-    {
-      "mode": "BecomesTarget",
-      "params": {
-        "Execute": "Abandon",
-        "TriggerDescription": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
-        "Secondary": "True",
-        "ValidTarget": "Player.Chosen",
-        "TriggerZones": "Command"
+      "description": "Permanents the chosen player controls don't untap during their untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "Permanents the chosen player controls don't untap during their untap step.",
-        "ValidCard": "Permanent.ChosenCtrl",
-        "ActiveZones": "Command",
-        "ValidStepTurnToController": "You"
+      "description": "When you set this scheme in motion, choose an opponent.",
+      "mode": "SetInMotion",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+      "mode": "BecomesTarget",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_target": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Chosen"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

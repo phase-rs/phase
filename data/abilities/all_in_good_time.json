@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, take an extra turn after this one. Schemes can't be set in motion that turn.",
       "mode": "SetInMotion",
-      "params": {
-        "Execute": "GoodTimes",
-        "TriggerZones": "Command",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you set this scheme in motion, take an extra turn after this one. Schemes can't be set in motion that turn."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

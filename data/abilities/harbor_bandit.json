@@ -2,42 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "CARDNAME can't be blocked this turn.",
-          "RememberObjects": "Self",
-          "StaticAbilities": "Unblockable"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "CARDNAME can't be blocked this turn.",
-        "RememberObjects": "Self",
-        "StaticAbilities": "Unblockable"
-      }
+      "description": "CARDNAME can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control an Island.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Card.Self",
-        "AddToughness": "1",
-        "IsPresent": "Island.YouCtrl",
-        "Description": "CARDNAME gets +1/+1 as long as you control an Island."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "SetToughness": "Y",
-        "Description": "CARDNAME's power is equal to the number of red creatures on the battlefield. CARDNAME's toughness is equal to the number of green creatures on the battlefield."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of red creatures on the battlefield. CARDNAME's toughness is equal to the number of green creatures on the battlefield.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

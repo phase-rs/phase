@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "IsPresent": "Permanent.Snow+YouCtrl",
-          "PresentCompare": "GE4",
-          "ValidTgts": "Permanent",
-          "SpellDescription": "You may tap or untap target permanent. Activate only if you control four or more snow permanents."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Permanent.Snow+YouCtrl",
-        "PresentCompare": "GE4",
-        "ValidTgts": "Permanent",
-        "SpellDescription": "You may tap or untap target permanent. Activate only if you control four or more snow permanents."
-      }
+      "description": "You may tap or untap target permanent. Activate only if you control four or more snow permanents.",
+      "effect": {
+        "description": "You may tap or untap target permanent. Activate only if you control four or more snow permanents.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

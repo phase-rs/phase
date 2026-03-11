@@ -2,45 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatPlayers": "Player",
-          "SubAbility": "DBDestroy",
-          "RepeatSubAbility": "DBTap",
-          "SpellDescription": "Each player may tap any number of untapped white creatures they control. For each creature tapped this way, that player chooses up to two Plains. Then destroy all Plains that weren't chosen this way by any player."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatPlayers": "Player",
-        "SubAbility": "DBDestroy",
-        "RepeatSubAbility": "DBTap",
-        "SpellDescription": "Each player may tap any number of untapped white creatures they control. For each creature tapped this way, that player chooses up to two Plains. Then destroy all Plains that weren't chosen this way by any player."
-      }
+      "description": "Each player may tap any number of untapped white creatures they control. For each creature tapped this way, that player chooses up to two Plains. Then destroy all Plains that weren't chosen this way by any player.",
+      "effect": {
+        "description": "Each player may tap any number of untapped white creatures they control. For each creature tapped this way, that player chooses up to two Plains. Then destroy all Plains that weren't chosen this way by any player.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of white spells or abilities from white sources.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidSource": "Card.White",
-        "ValidTarget": "Card.Self",
-        "Description": "CARDNAME can't be the target of white spells or abilities from white sources."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,39 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target creature you control becomes all colors until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "SpellDescription": "Target creature you control becomes all colors until end of turn.",
-        "Colors": "All"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other creature you control has hexproof from each of its colors.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each other creature you control has hexproof from each of its colors.",
-        "AddKeyword": "Hexproof:CardColors",
-        "Affected": "Creature.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof:CardColors",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

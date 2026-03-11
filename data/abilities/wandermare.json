@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell that has an Adventure, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature.AdventureCard",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a creature spell that has an Adventure, put a +1/+1 counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AdventureCard"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

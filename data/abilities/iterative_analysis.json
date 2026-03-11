@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell with the chosen name, you may draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Instant.NamedCard,Sorcery.NamedCard",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell with the chosen name, you may draw a card.",
-        "TriggerZones": "Command"
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NamedCard,Sorcery.NamedCard"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

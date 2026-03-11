@@ -1,41 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Creature"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Stack",
+          "description": "Creature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a creature spell pays for {1} or one mana of that creature's color.)",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Card.Creature+YouCtrl+wasCast",
-            "AddKeyword": "Convoke",
-            "AffectedZone": "Stack",
-            "Description": "Creature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a creature spell pays for {1} or one mana of that creature's color.)"
-          }
+          "modifications": [
+            {
+              "keyword": "Convoke",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "description": "Untap each creature you control during each other player's untap step.",
           "mode": {
             "Other": "UntapOtherPlayer"
-          },
-          "params": {
-            "Description": "Untap each creature you control during each other player's untap step.",
-            "ValidCard": "Creature.YouCtrl"
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

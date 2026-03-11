@@ -1,48 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, destroy up to one target artifact. If you controlled that permanent, draw a card.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME attacks, destroy up to one target artifact. If you controlled that permanent, draw a card.",
-            "Execute": "TrigDestroy"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Investigate",
-            "params": {
-              "SubAbility": "DBEffect",
-              "SpellDescription": "Investigate. You may play an additional land this turn."
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBEffect",
-            "SpellDescription": "Investigate. You may play an additional land this turn."
-          }
+          "description": "Investigate. You may play an additional land this turn.",
+          "effect": {
+            "description": "Investigate. You may play an additional land this turn.",
+            "name": "Investigate",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

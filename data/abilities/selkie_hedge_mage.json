@@ -1,35 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Forests, you may gain 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigGainLife",
-        "PresentCompare": "GE2",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Forests, you may gain 3 life.",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Forest.YouCtrl",
-        "OptionalDecider": "You",
-        "Origin": "Any"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters, if you control two or more Islands, you may return target tapped creature to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "PresentCompare": "GE2",
-        "IsPresent": "Island.YouCtrl",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Islands, you may return target tapped creature to its owner's hand.",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigBounce"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,74 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatPlayers": "Opponent",
-          "RepeatSubAbility": "DBDrain",
-          "SubAbility": "DBGainLife",
-          "SpellDescription": "Each opponent loses 2 life unless they discard a card. If you control a Demon or Devil, you gain 2 life.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatPlayers": "Opponent",
-        "RepeatSubAbility": "DBDrain",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Each opponent loses 2 life unless they discard a card. If you control a Demon or Devil, you gain 2 life.",
-        "Planeswalker": "True"
-      }
+      "description": "Each opponent loses 2 life unless they discard a card. If you control a Demon or Devil, you gain 2 life.",
+      "effect": {
+        "description": "Each opponent loses 2 life unless they discard a card. If you control a Demon or Devil, you gain 2 life.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_1_1_devil_burn",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 7
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SubAbility": "DBLoseLife",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Target player draws seven cards and loses 7 life."
-      }
+      "description": "Target player draws seven cards and loses 7 life.",
+      "effect": {
+        "count": 7,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

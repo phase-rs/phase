@@ -2,95 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
+      "description": "Untap target artifact or creature. If it's an artifact creature, put a +1/+1 counter on it.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact or creature",
-        "SubAbility": "DBPutCounter",
-        "Planeswalker": "True",
-        "SpellDescription": "Untap target artifact or creature. If it's an artifact creature, put a +1/+1 counter on it."
-      }
+      "target_prompt": "Select target artifact or creature"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Search your library for an artifact card with mana value 1 or less, reveal it, put it into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Search your library for an artifact card with mana value 1 or less, reveal it, put it into your hand, then shuffle.",
-        "StackDescription": "SpellDescription",
-        "ChangeNum": "1",
-        "ChangeType": "Artifact.cmcLE1",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Name": "Emblem — Tezzeret, Cruel Captain",
-          "AILogic": "Always",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "Triggers": "EffPhase",
-          "Image": "emblem_tezzeret_cruel_captain",
-          "SpellDescription": "You get an emblem with \"At the beginning of combat on your turn, put three +1/+1 counters on target artifact you control. If it's not a creature, it becomes a 0/0 Robot artifact creature.\"",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Emblem — Tezzeret, Cruel Captain",
-        "AILogic": "Always",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "Triggers": "EffPhase",
-        "Image": "emblem_tezzeret_cruel_captain",
-        "SpellDescription": "You get an emblem with \"At the beginning of combat on your turn, put three +1/+1 counters on target artifact you control. If it's not a creature, it becomes a 0/0 Robot artifact creature.\"",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"At the beginning of combat on your turn, put three +1/+1 counters on target artifact you control. If it's not a creature, it becomes a 0/0 Robot artifact creature.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact you control enters, put a loyalty counter on NICKNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigPutCounter1",
-        "ValidCard": "Artifact.YouCtrl",
-        "TriggerDescription": "Whenever an artifact you control enters, put a loyalty counter on NICKNAME.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

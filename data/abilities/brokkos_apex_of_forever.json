@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "Affected": "Card.Self",
-        "AffectedZone": "Graveyard",
-        "ValidSA": "Spell.Mutate",
-        "EffectZone": "Graveyard",
-        "Description": "You may cast CARDNAME from your graveyard using its mutate ability."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast CARDNAME from your graveyard using its mutate ability.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,36 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Chosen",
-        "params": {
-          "SpellDescription": "Add one mana of the chosen color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of the chosen color."
-      }
+      "description": "Add one mana of the chosen color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may reveal a Dragon card from your hand. CARDNAME enters tapped unless you revealed a Dragon card this way or you control a Dragon.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "DBReveal",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "As CARDNAME enters, you may reveal a Dragon card from your hand. CARDNAME enters tapped unless you revealed a Dragon card this way or you control a Dragon.",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

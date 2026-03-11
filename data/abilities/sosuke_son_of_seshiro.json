@@ -1,29 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever a Warrior you control deals combat damage to a creature, destroy that creature at end of combat.",
-        "ValidSource": "Warrior.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "Execute": "DelTrig",
-        "ValidTarget": "Creature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Snake"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Snake creatures you control get +1/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Creature.Snake+Other+YouCtrl",
-        "Description": "Other Snake creatures you control get +1/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever a Warrior you control deals combat damage to a creature, destroy that creature at end of combat.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Warrior",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

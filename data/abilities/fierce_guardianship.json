@@ -2,40 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonCreature"
-        }
-      },
       "cost": null,
+      "description": "Counter target noncreature spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature spell",
-        "SpellDescription": "Counter target noncreature spell.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target noncreature spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a commander, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Cost": "0",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.IsCommander+YouCtrl",
-        "Description": "If you control a commander, you may cast this spell without paying its mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

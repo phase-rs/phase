@@ -2,105 +2,74 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "NoRegen",
-          "IsCurse": "True",
-          "ForgetOnMoved": "Battlefield",
-          "AILogic": "CantRegenerate",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Target creature can't be regenerated this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R R"
+            "cost": "R R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "NoRegen",
-        "IsCurse": "True",
-        "ForgetOnMoved": "Battlefield",
-        "AILogic": "CantRegenerate",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Target creature can't be regenerated this turn."
-      }
+      "description": "Target creature can't be regenerated this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate target black or green creature.",
-          "ValidTgts": "Creature.Black,Creature.Green",
-          "TgtPrompt": "Select target black or green creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B B R"
+            "cost": "B B R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Regenerate target black or green creature.",
+      "effect": {
+        "description": "Regenerate target black or green creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate target black or green creature.",
-        "ValidTgts": "Creature.Black,Creature.Green",
-        "TgtPrompt": "Select target black or green creature"
-      }
+      "target_prompt": "Select target black or green creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "TgtPrompt": "Select target black or green creature",
-          "ValidTgts": "Creature.Black,Creature.Green",
-          "SpellDescription": "Regenerate target black or green creature."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R G G"
+            "cost": "R G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Regenerate target black or green creature.",
+      "effect": {
+        "description": "Regenerate target black or green creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target black or green creature",
-        "ValidTgts": "Creature.Black,Creature.Green",
-        "SpellDescription": "Regenerate target black or green creature."
-      }
+      "target_prompt": "Select target black or green creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

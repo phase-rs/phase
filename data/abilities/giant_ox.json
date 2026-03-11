@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME crews Vehicles using its toughness rather than its power.",
       "mode": {
         "Other": "TapPowerValue"
-      },
-      "params": {
-        "Value": "Toughness",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Activated.Crew+Vehicle",
-        "Description": "CARDNAME crews Vehicles using its toughness rather than its power."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

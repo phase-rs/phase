@@ -2,95 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterType": "LOYALTY",
-          "ValidCards": "Planeswalker.YouCtrl+Red",
-          "CounterNum": "1",
-          "SpellDescription": "Put a loyalty counter on each red planeswalker you control.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterType": "LOYALTY",
-        "ValidCards": "Planeswalker.YouCtrl+Red",
-        "CounterNum": "1",
-        "SpellDescription": "Put a loyalty counter on each red planeswalker you control.",
-        "Planeswalker": "True"
-      }
+      "description": "Put a loyalty counter on each red planeswalker you control.",
+      "effect": {
+        "description": "Put a loyalty counter on each red planeswalker you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "r_1_1_elemental",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "PumpKeywords": "Haste",
-        "AtEOT": "Sacrifice",
-        "TokenOwner": "You",
-        "TokenAmount": "2",
-        "SpellDescription": "Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "AILogic": "ReplaySpell",
-          "ValidSA": "Spell",
-          "ExileOnMoved": "Graveyard",
-          "SpellDescription": "You may cast target instant or sorcery card with mana cost 3 or less from your graveyard. If that card would be put into your graveyard this turn, exile it instead.",
-          "TgtPrompt": "Select target instant or sorcery card with mana cost 3 or less",
-          "TgtZone": "Graveyard",
-          "Planeswalker": "True",
-          "ValidTgts": "Instant.YouCtrl+cmcLE3,Sorcery.YouCtrl+cmcLE3",
-          "Optional": "True",
-          "ReplaceGraveyard": "Exile"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
+      "description": "You may cast target instant or sorcery card with mana cost 3 or less from your graveyard. If that card would be put into your graveyard this turn, exile it instead.",
+      "effect": {
+        "description": "You may cast target instant or sorcery card with mana cost 3 or less from your graveyard. If that card would be put into your graveyard this turn, exile it instead.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "ReplaySpell",
-        "ValidSA": "Spell",
-        "ExileOnMoved": "Graveyard",
-        "SpellDescription": "You may cast target instant or sorcery card with mana cost 3 or less from your graveyard. If that card would be put into your graveyard this turn, exile it instead.",
-        "TgtPrompt": "Select target instant or sorcery card with mana cost 3 or less",
-        "TgtZone": "Graveyard",
-        "Planeswalker": "True",
-        "ValidTgts": "Instant.YouCtrl+cmcLE3,Sorcery.YouCtrl+cmcLE3",
-        "Optional": "True",
-        "ReplaceGraveyard": "Exile"
-      }
+      "target_prompt": "Select target instant or sorcery card with mana cost 3 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

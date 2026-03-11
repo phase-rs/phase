@@ -1,28 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each of your postcombat main phases, return target Plant, Treefolk, or land card from your graveyard to your hand.",
-        "Phase": "Main2",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZone"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Plant",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Treefolk.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Plants and Treefolk you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Description": "Other Plants and Treefolk you control get +2/+0.",
-        "Affected": "Plant.Other+YouCtrl,Treefolk.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each of your postcombat main phases, return target Plant, Treefolk, or land card from your graveyard to your hand.",
+      "mode": "Phase",
+      "phase": "PostCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

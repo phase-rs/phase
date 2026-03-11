@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "AddKeyword": "Lifelink",
-        "Affected": "Card.Self",
-        "Description": "During your turn, CARDNAME has lifelink."
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

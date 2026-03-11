@@ -1,30 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During your turn, you may cast creature spells with power or toughness 1 or less from your graveyard. If you cast a spell this way, that creature enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigEffect",
-        "ValidCard": "Card.CastSa Spell.MayPlaySource",
-        "TriggerZones": "Battlefield",
-        "Static": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "CastSa Spell.MayPlaySource"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, you may cast creature spells with power or toughness 1 or less from your graveyard. If you cast a spell this way, that creature enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
-        "MayPlay": "True",
-        "Affected": "Creature.nonLand+YouOwn+powerLE1,Creature.nonLand+YouOwn+toughnessLE1",
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Graveyard"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

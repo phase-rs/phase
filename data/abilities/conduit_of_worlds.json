@@ -2,57 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "AILogic": "NeedsChosenCard",
-          "ConditionCheckSVar": "X",
-          "Optional": "True",
-          "SorcerySpeed": "True",
-          "TgtZone": "Graveyard",
-          "ValidTgts": "Permanent.nonLand+YouOwn",
-          "TgtPrompt": "Choose target nonland permanent card in your graveyard",
-          "SpellDescription": "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
-          "ValidSA": "Spell",
-          "SubAbility": "DBEffect",
-          "ConditionSVarCompare": "EQ0",
-          "RememberPlayed": "True"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
+      "effect": {
+        "description": "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "NeedsChosenCard",
-        "ConditionCheckSVar": "X",
-        "Optional": "True",
-        "SorcerySpeed": "True",
-        "TgtZone": "Graveyard",
-        "ValidTgts": "Permanent.nonLand+YouOwn",
-        "TgtPrompt": "Choose target nonland permanent card in your graveyard",
-        "SpellDescription": "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
-        "ValidSA": "Spell",
-        "SubAbility": "DBEffect",
-        "ConditionSVarCompare": "EQ0",
-        "RememberPlayed": "True"
-      }
+      "target_prompt": "Choose target nonland permanent card in your graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Graveyard",
-        "Description": "You may play lands from your graveyard.",
-        "MayPlay": "True",
-        "Affected": "Land.YouOwn"
-      }
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may play lands from your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

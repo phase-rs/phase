@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more tokens you control enter, put that many +1/+1 counters on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever one or more tokens you control enter, put that many +1/+1 counters on CARDNAME.",
-        "ValidCards": "Card.token+YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

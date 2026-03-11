@@ -1,28 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, CARDNAME deals 6 damage to target creature an opponent controls. If a creature dealt damage this way would die this turn, exile it instead.",
-        "Execute": "TrigDamage"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Still Point in Time — All spells have split second. (As long as a spell with split second is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card",
-        "AffectedZone": "Stack",
-        "EffectZone": "Command",
-        "Description": "Still Point in Time — All spells have split second. (As long as a spell with split second is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)",
-        "AddKeyword": "Split second"
-      }
+      "modifications": [
+        {
+          "keyword": "Split",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "second",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever chaos ensues, CARDNAME deals 6 damage to target creature an opponent controls. If a creature dealt damage this way would die this turn, exile it instead.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
+    }
+  ]
 }

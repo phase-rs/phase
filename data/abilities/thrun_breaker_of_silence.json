@@ -1,38 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [
+    {
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of nongreen spells your opponents control or abilities from nongreen sources your opponents control.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidSource": "Card.nonGreen+OppCtrl",
-        "Description": "CARDNAME can't be the target of nongreen spells your opponents control or abilities from nongreen sources your opponents control.",
-        "ValidTarget": "Card.Self"
       }
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, NICKNAME has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Indestructible",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, NICKNAME has indestructible."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [
-    {
-      "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell"
-      }
-    }
-  ],
-  "faces": []
+  "triggers": []
 }

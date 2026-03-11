@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "You",
-        "DamageTarget": "Self",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DmgSelf",
-        "Description": "All damage that would be dealt to you is dealt to CARDNAME instead."
-      }
+      "description": "All damage that would be dealt to you is dealt to CARDNAME instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

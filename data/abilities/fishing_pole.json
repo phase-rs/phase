@@ -1,27 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Untaps",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature becomes untapped, remove a bait counter from this Equipment. If you do, create a 1/1 blue Fish creature token.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.EquippedBy",
-        "Execute": "TrigRemoveCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{1}, {T}, Tap CARDNAME: Put a bait counter on CARDNAME.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "FishingPoleBaiting",
-        "Description": "Equipped creature has \"{1}, {T}, Tap CARDNAME: Put a bait counter on CARDNAME.\"",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "ability": "FishingPoleBaiting",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature becomes untapped, remove a bait counter from this Equipment. If you do, create a 1/1 blue Fish creature token.",
+      "mode": "Untaps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

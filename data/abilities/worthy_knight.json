@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Knight spell, create a 1/1 white Human creature token.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you cast a Knight spell, create a 1/1 white Human creature token.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Knight",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Knight"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

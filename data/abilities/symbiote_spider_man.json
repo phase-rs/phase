@@ -2,53 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 UB"
+            "cost": "2 UB",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME/this card>"
+            "cost": "ExileFromGrave<1/CARDNAME/this card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put a +1/+1 counter on target creature you control. It gains this card's other abilities. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Graveyard",
-        "PrecostDesc": "Find New Host —",
-        "TgtPrompt": "Select target creature you control",
-        "SpellDescription": "Put a +1/+1 counter on target creature you control. It gains this card's other abilities. Activate only as a sorcery.",
-        "SubAbility": "DBAnimate",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever this creature deals combat damage to a player, look at that many cards from the top of your library. Put one of them into your hand and the rest into your graveyard.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever this creature deals combat damage to a player, look at that many cards from the top of your library. Put one of them into your hand and the rest into your graveyard.",
-        "Execute": "TrigDig",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:You} puts a random creature card with mana value X or less from {p:Targeted}'s library onto the battlefield under their control.",
-        "AtRandom": "True",
-        "NoShuffle": "True",
-        "SubAbility": "DBAnimate",
-        "RememberChanged": "True",
-        "Mandatory": "True",
-        "SpellDescription": "Put a random creature card with mana value X or less from target opponent's library onto the battlefield under your control.",
-        "NoLooking": "True",
-        "ChangeType": "Creature.cmcLEX+TargetedPlayerOwn",
-        "GainControl": "True",
-        "ChangeNum": "1",
-        "Hidden": "True"
-      }
+      "description": "Put a random creature card with mana value X or less from target opponent's library onto the battlefield under your control.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Library",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

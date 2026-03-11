@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Attacking creatures you control get +1/+0.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "EffectZone": "Command",
-        "AddPower": "1",
-        "Description": "Attacking creatures you control get +1/+0.",
-        "Affected": "Creature.attacking+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

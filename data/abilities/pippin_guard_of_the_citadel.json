@@ -2,33 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "TgtPrompt": "Select another target creature you control",
-          "Gains": "Choice",
-          "SpellDescription": "Another target creature you control gains protection from the card type of your choice until end of turn. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything of that type.)",
-          "ValidTgts": "Creature.YouCtrl+Other",
-          "Choices": "CardType"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Another target creature you control gains protection from the card type of your choice until end of turn. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything of that type.)",
+      "effect": {
+        "description": "Another target creature you control gains protection from the card type of your choice until end of turn. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything of that type.)",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature you control",
-        "Gains": "Choice",
-        "SpellDescription": "Another target creature you control gains protection from the card type of your choice until end of turn. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything of that type.)",
-        "ValidTgts": "Creature.YouCtrl+Other",
-        "Choices": "CardType"
-      }
+      "target_prompt": "Select another target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

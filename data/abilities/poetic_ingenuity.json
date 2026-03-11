@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more Dinosaurs you control attack, create that many Treasure tokens.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever one or more Dinosaurs you control attack, create that many Treasure tokens.",
-        "ValidAttackers": "Dinosaur.YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you cast an artifact spell, create a 3/1 red Dinosaur creature token. This ability triggers only once each turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigTokenBis",
-        "TriggerDescription": "Whenever you cast an artifact spell, create a 3/1 red Dinosaur creature token. This ability triggers only once each turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Artifact",
-        "ActivationLimit": "1"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

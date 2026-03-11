@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have protection from the chosen card name. (You can't be targeted, dealt damage, or enchanted by anything with that name.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "AddKeyword": "Protection:ChosenName",
-        "Description": "You have protection from the chosen card name. (You can't be targeted, dealt damage, or enchanted by anything with that name.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:ChosenName",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

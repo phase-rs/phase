@@ -1,41 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        "Origin": "Any"
-      }
+      "description": "If a spell or ability you control would counter a spell, instead exile that spell and you may play that card without paying its mana cost.",
+      "event": "Counter"
     }
   ],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked except by three or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't be blocked except by three or more creatures.",
-        "Min": "3"
       }
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "ReplaceWith": "DBRemove",
-        "ValidCause": "SpellAbility.YouCtrl",
-        "Description": "If a spell or ability you control would counter a spell, instead exile that spell and you may play that card without paying its mana cost.",
-        "ActiveZones": "Battlefield"
+      "description": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

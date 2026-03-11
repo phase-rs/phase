@@ -2,51 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "GameActivationLimit": "1",
-          "SpellDescription": "Seek a nonland card. Activate only once.",
-          "StackDescription": "{p:You} seeks a nonland card.",
-          "Type": "Card.nonLand"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W"
+            "cost": "3 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "GameActivationLimit": "1",
-        "SpellDescription": "Seek a nonland card. Activate only once.",
-        "StackDescription": "{p:You} seeks a nonland card.",
-        "Type": "Card.nonLand"
-      }
+      "description": "Seek a nonland card. Activate only once.",
+      "effect": {
+        "description": "Seek a nonland card. Activate only once.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

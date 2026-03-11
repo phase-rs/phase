@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME for each card in your hand, then remove a +1/+1 counter from CARDNAME for each card in target opponent's hand.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME for each card in your hand, then remove a +1/+1 counter from CARDNAME for each card in target opponent's hand.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

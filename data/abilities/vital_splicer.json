@@ -2,41 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "TgtPrompt": "Select target Golem you control.",
-          "SpellDescription": "Regenerate target Golem you control.",
-          "ValidTgts": "Golem.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Regenerate target Golem you control.",
+      "effect": {
+        "description": "Regenerate target Golem you control.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Golem you control.",
-        "SpellDescription": "Regenerate target Golem you control.",
-        "ValidTgts": "Golem.YouCtrl"
-      }
+      "target_prompt": "Select target Golem you control."
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

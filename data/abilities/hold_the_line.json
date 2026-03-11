@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 7,
-        "toughness": 7,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Blocking creatures get +7/+7 until end of turn.",
-        "ValidCards": "Creature.blocking"
-      }
+      "description": "Blocking creatures get +7/+7 until end of turn.",
+      "effect": {
+        "power": 7,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 7,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

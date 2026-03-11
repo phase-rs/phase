@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Look at target player's hand and choose two cards from it. Put them on top of that player's library in any order.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Library",
+        "origin": "Hand",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "0",
-        "SpellDescription": "Look at target player's hand and choose two cards from it. Put them on top of that player's library in any order.",
-        "IsCurse": "True",
-        "ChangeType": "Card",
-        "ChangeNum": "2",
-        "Mandatory": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

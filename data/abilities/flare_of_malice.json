@@ -2,41 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each opponent sacrifices a creature or planeswalker with the greatest mana value among creatures and planeswalkers they control.",
-          "SubAbility": "DBSacAll",
-          "RepeatPlayers": "Player.Opponent",
-          "RepeatSubAbility": "DBChooseCard"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent sacrifices a creature or planeswalker with the greatest mana value among creatures and planeswalkers they control.",
-        "SubAbility": "DBSacAll",
-        "RepeatPlayers": "Player.Opponent",
-        "RepeatSubAbility": "DBChooseCard"
-      }
+      "description": "Each opponent sacrifices a creature or planeswalker with the greatest mana value among creatures and planeswalkers they control.",
+      "effect": {
+        "description": "Each opponent sacrifices a creature or planeswalker with the greatest mana value among creatures and planeswalkers they control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may sacrifice a nontoken black creature rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Description": "You may sacrifice a nontoken black creature rather than pay this spell's mana cost.",
-        "Cost": "Sac<1/Creature.Black+!token/a nontoken black creature>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

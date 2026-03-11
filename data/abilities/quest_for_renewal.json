@@ -1,30 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Taps",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature you control becomes tapped, you may put a quest counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there are four or more quest counters on CARDNAME, untap all creatures you control during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "IsPresent": "Card.Self+counters_GE4_QUEST",
-        "ValidCard": "Creature.YouCtrl",
-        "Description": "As long as there are four or more quest counters on CARDNAME, untap all creatures you control during each other player's untap step."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control becomes tapped, you may put a quest counter on CARDNAME.",
+      "mode": "Taps",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

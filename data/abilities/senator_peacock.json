@@ -1,29 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Clue",
-        "Execute": "TrigUnblockable",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you sacrifice a Clue, target creature can't be blocked this turn.",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Artifacts you control are Clues in addition to their other types and have \"{2}, Sacrifice this artifact: Draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "ClueSac",
-        "Affected": "Artifact.YouCtrl",
-        "AddType": "Clue",
-        "Description": "Artifacts you control are Clues in addition to their other types and have \"{2}, Sacrifice this artifact: Draw a card.\""
-      }
+      "modifications": [
+        {
+          "ability": "ClueSac",
+          "type": "AddAbility"
+        },
+        {
+          "core_type": "Clue",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you sacrifice a Clue, target creature can't be blocked this turn.",
+      "mode": "Sacrificed",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Clue",
+        "type": "Typed"
+      }
+    }
+  ]
 }

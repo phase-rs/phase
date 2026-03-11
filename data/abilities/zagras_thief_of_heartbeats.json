@@ -1,39 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to a planeswalker, destroy that planeswalker.",
-        "ValidTarget": "Planeswalker",
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "Type": "Spell",
-        "Description": "This spell costs {1} less to cast for each creature in your party.",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {1} less to cast for each creature in your party.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "Affected": "Creature.Other+YouCtrl",
-        "Description": "Other creatures you control have deathtouch."
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to a planeswalker, destroy that planeswalker.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Planeswalker",
+        "type": "Typed"
+      }
+    }
+  ]
 }

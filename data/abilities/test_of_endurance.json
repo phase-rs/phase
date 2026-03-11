@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you have 50 or more life, you win the game.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if you have 50 or more life, you win the game.",
-        "LifeAmount": "GE50",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "LifeTotal": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigWin"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

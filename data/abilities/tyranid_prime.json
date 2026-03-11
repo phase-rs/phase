@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Synapse Creature — Other creatures you control have evolve.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "AddKeyword": "Evolve",
-        "Description": "Synapse Creature — Other creatures you control have evolve."
-      }
+      "modifications": [
+        {
+          "keyword": "Evolve",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

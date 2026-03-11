@@ -1,53 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "WerewolfTransformCondition": "True",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "Phase": "Upkeep"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Phase": "Upkeep",
-            "WerewolfUntransformCondition": "True",
-            "Execute": "TrigTransform"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Attacking"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Attacking creatures you control get +1/+0 and have trample.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Trample",
-            "AddPower": "1",
-            "Affected": "Creature.YouCtrl+attacking",
-            "Description": "Attacking creatures you control get +1/+0 and have trample."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "keyword": "Trample",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

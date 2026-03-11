@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless defending player controls an Island.",
-        "UnlessDefender": "controlsIsland",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, cards you own named Chittering Skullspeaker intensify by 1. Then you draw X cards and lose X life, where X is CARDNAME's intensity.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigIntensify",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, cards you own named Chittering Skullspeaker intensify by 1. Then you draw X cards and lose X life, where X is CARDNAME's intensity.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

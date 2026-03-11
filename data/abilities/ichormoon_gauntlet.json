@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a noncreature spell, choose a counter on target permanent. Put an additional counter of that kind on that permanent.",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.nonCreature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Planeswalker",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Planeswalkers you control have \"[0]: Proliferate\" and \"[-12]: Take an extra turn after this one.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Planeswalkers you control have \"[0]: Proliferate\" and \"[-12]: Take an extra turn after this one.\"",
-        "AddAbility": "PWProliferate & PWExtraTurn",
-        "Affected": "Planeswalker.YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "PWProliferate & PWExtraTurn",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a noncreature spell, choose a counter on target permanent. Put an additional counter of that kind on that permanent.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

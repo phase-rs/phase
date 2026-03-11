@@ -2,26 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 B"
+        "cost": "3 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "ValidTgts": "Opponent",
-        "IsPresent": "Planeswalker.Liliana+YouCtrl",
-        "SpellDescription": "Target opponent loses 2 life and you gain 2 life. Activate only if you control a Liliana planeswalker."
-      }
+      "description": "Target opponent loses 2 life and you gain 2 life. Activate only if you control a Liliana planeswalker.",
+      "effect": {
+        "amount": 2,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

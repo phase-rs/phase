@@ -2,35 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 B B"
+            "cost": "3 B B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<X>"
+            "cost": "PayLife<X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "ActivationPhases": "End of Turn",
-        "SpellDescription": "Draw X cards.",
-        "PlayerTurn": "True"
-      }
+      "description": "Draw X cards.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Gates, gain 7 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "PresentCompare": "GE2",
-        "Execute": "TrigGainLife",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Gates, gain 7 life.",
-        "IsPresent": "Gate.YouCtrl",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

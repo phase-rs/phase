@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Morbid — At the beginning of each end step, if a creature died this turn, you may draw a card.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "Phase": "End of Turn",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Morbid — At the beginning of each end step, if a creature died this turn, you may draw a card.",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

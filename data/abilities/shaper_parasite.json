@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, target creature gets +2/-2 or -2/+2 until end of turn.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME is turned face up, target creature gets +2/-2 or -2/+2 until end of turn.",
-        "Execute": "TrigChoice",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

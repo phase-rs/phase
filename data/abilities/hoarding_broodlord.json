@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, search your library for a card, exile it face down, then shuffle. For as long as that card remains exiled, you may play it.",
-        "Execute": "TrigSearch",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Spells you cast from exile have convoke.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Convoke",
-        "AffectedZone": "Stack",
-        "Description": "Spells you cast from exile have convoke.",
-        "Affected": "Card.YouCtrl+wasCastFromExile"
-      }
+      "modifications": [
+        {
+          "keyword": "Convoke",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, search your library for a card, exile it face down, then shuffle. For as long as that card remains exiled, you may play it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

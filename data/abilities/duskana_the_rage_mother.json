@@ -1,28 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card for each creature you control with base power and toughness 2/2.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, draw a card for each creature you control with base power and toughness 2/2.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a creature you control with base power and toughness 2/2 attacks, it gets +3/+3 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.YouCtrl+basePowerEQ2+baseToughnessEQ2",
-        "TriggerDescription": "Whenever a creature you control with base power and toughness 2/2 attacks, it gets +3/+3 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

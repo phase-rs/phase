@@ -2,66 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U B"
+            "cost": "U B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Creatures you don't control get -1/-1 for each slime counter on them.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of each end step, put a slime counter on each creature you don't control.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each end step, put a slime counter on each creature you don't control.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounters"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a creature you don't control with a slime counter on it dies, create a 1/1 black Slug creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Creature.YouDontCtrl+counters_GE1_SLIME",
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a creature you don't control with a slime counter on it dies, create a 1/1 black Slug creature token."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "-AffectedX",
-        "AddPower": "-AffectedX",
-        "AffectedZone": "Battlefield",
-        "Description": "Creatures you don't control get -1/-1 for each slime counter on them.",
-        "Affected": "Creature.YouDontCtrl"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

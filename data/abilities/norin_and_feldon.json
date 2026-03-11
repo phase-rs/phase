@@ -2,50 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "AddTriggers": "Norin1,Norin2",
-          "TgtPrompt": "Select target creature card in your graveyard",
-          "AddTypes": "Artifact",
-          "TgtZone": "Graveyard",
-          "SorcerySpeed": "True",
-          "PumpKeywords": "Haste",
-          "ValidTgts": "Creature.YouOwn",
-          "AddSVars": "NorinExile",
-          "SpellDescription": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types, gains haste, and has \"Whenever a player casts a spell or a creature attacks, exile this token.\" Activate only as a sorcery."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 R"
+            "cost": "2 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types, gains haste, and has \"Whenever a player casts a spell or a creature attacks, exile this token.\" Activate only as a sorcery.",
+      "effect": {
+        "description": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types, gains haste, and has \"Whenever a player casts a spell or a creature attacks, exile this token.\" Activate only as a sorcery.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "AddTriggers": "Norin1,Norin2",
-        "TgtPrompt": "Select target creature card in your graveyard",
-        "AddTypes": "Artifact",
-        "TgtZone": "Graveyard",
-        "SorcerySpeed": "True",
-        "PumpKeywords": "Haste",
-        "ValidTgts": "Creature.YouOwn",
-        "AddSVars": "NorinExile",
-        "SpellDescription": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types, gains haste, and has \"Whenever a player casts a spell or a creature attacks, exile this token.\" Activate only as a sorcery."
-      }
+      "target_prompt": "Select target creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

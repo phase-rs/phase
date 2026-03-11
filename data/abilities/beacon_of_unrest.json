@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Artifact"
-        }
-      },
       "cost": null,
+      "description": "Put target artifact or creature card from a graveyard onto the battlefield under your control. Shuffle CARDNAME into its owner's library.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature,Artifact",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select a target creature or artifact in a graveyard",
-        "GainControl": "True",
-        "SpellDescription": "Put target artifact or creature card from a graveyard onto the battlefield under your control. Shuffle CARDNAME into its owner's library.",
-        "SubAbility": "DBShuffle"
-      }
+      "target_prompt": "Select a target creature or artifact in a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

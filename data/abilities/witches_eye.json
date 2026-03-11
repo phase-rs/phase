@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{1}, {T}: Scry 1.\".",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "WitchScry",
-        "Description": "Equipped creature has \"{1}, {T}: Scry 1.\".",
-        "Affected": "Card.EquippedBy"
-      }
+      "modifications": [
+        {
+          "ability": "WitchScry",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

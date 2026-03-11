@@ -2,46 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "5 B B"
+            "cost": "5 B B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target player loses X life, where X is CARDNAME's power.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select a player",
-        "SpellDescription": "Target player loses X life, where X is CARDNAME's power.",
-        "ValidTgts": "Player"
-      }
+      "target_prompt": "Select a player"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, put a +1/+1 counter on CARDNAME.",
       "mode": "LifeGained",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

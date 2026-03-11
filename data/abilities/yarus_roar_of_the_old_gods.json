@@ -1,40 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have haste.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more face-down creatures you control deal combat damage to a player, draw a card.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever one or more face-down creatures you control deal combat damage to a player, draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.faceDown+YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever a face-down creature you control dies, return it to the battlefield face down under its owner's control if it's a permanent card, then turn it face up.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a face-down creature you control dies, return it to the battlefield face down under its owner's control if it's a permanent card, then turn it face up.",
-        "Execute": "TrigReturn",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.faceDown+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+Other",
-        "Description": "Other creatures you control have haste.",
-        "AddKeyword": "Haste"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

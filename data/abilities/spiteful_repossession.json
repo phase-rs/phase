@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "CARDNAME deals damage to each opponent who controls more lands than you equal to the difference.",
-          "DamageMap": "True",
-          "SubAbility": "DBTreasure",
-          "RepeatSubAbility": "DBDamage",
-          "RepeatPlayers": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage to each opponent who controls more lands than you equal to the difference.",
-        "DamageMap": "True",
-        "SubAbility": "DBTreasure",
-        "RepeatSubAbility": "DBDamage",
-        "RepeatPlayers": "Opponent"
-      }
+      "description": "CARDNAME deals damage to each opponent who controls more lands than you equal to the difference.",
+      "effect": {
+        "description": "CARDNAME deals damage to each opponent who controls more lands than you equal to the difference.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

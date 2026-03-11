@@ -2,29 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "Exile,Return",
-          "AdditionalDescription": ". If you control an artifact and an enchantment as you cast this spell, you may choose both.",
-          "CharmNum": "Count$Compare B GE2.2.1",
-          "MinCharmNum": "1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Exile,Return",
-        "AdditionalDescription": ". If you control an artifact and an enchantment as you cast this spell, you may choose both.",
-        "CharmNum": "Count$Compare B GE2.2.1",
-        "MinCharmNum": "1"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

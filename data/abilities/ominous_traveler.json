@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draft a card from CARDNAME's spellbook. That card perpetually gains \"You may spend mana as though it were mana of any color to cast this spell\" and \"When you cast this spell, return a card named Ominous Traveler you control to its owner's hand.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigDraft",
-        "TriggerDescription": "When CARDNAME enters, draft a card from CARDNAME's spellbook. That card perpetually gains \"You may spend mana as though it were mana of any color to cast this spell\" and \"When you cast this spell, return a card named Ominous Traveler you control to its owner's hand.\"",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

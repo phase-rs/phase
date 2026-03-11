@@ -1,31 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, you may search your library for up to two land cards, put them onto the battlefield tapped, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may search your library for up to two land cards, put them onto the battlefield tapped, then shuffle.",
-        "Destination": "Battlefield",
-        "Execute": "TrigChange",
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, you may search your library for up to two land cards, put them onto the battlefield tapped, then shuffle.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Secondary": "True",
-        "Execute": "TrigChange",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may search your library for up to two land cards, put them onto the battlefield tapped, then shuffle."
+      "optional": true,
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

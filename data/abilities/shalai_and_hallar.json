@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on a creature you control, CARDNAME deals that much damage to target opponent.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on a creature you control, CARDNAME deals that much damage to target opponent.",
-        "CounterType": "P1P1",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

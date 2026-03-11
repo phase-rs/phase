@@ -1,63 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "CounterNum": "3",
-              "CounterType": "P1P1",
-              "SpellDescription": "Whenever a creature you control attacks this turn, create a 1/1 green and white Citizen creature token that's tapped and attacking.",
-              "Triggers": "TriggerAttacks",
-              "AddSVar": "AE"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "CounterNum": "3",
-            "CounterType": "P1P1",
-            "SpellDescription": "Whenever a creature you control attacks this turn, create a 1/1 green and white Citizen creature token that's tapped and attacking.",
-            "Triggers": "TriggerAttacks",
-            "AddSVar": "AE"
-          }
+          "description": "Whenever a creature you control attacks this turn, create a 1/1 green and white Citizen creature token that's tapped and attacking.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a Treasure token for each creature you controlled that dealt combat damage to a player this turn.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "c_a_treasure_sac",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a Treasure token for each creature you controlled that dealt combat damage to a player this turn.",
-            "TokenAmount": "X"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

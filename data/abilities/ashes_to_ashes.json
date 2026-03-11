@@ -2,29 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonArtifact"
-        }
-      },
       "cost": null,
+      "description": "Exile two target nonartifact creatures. CARDNAME deals 5 damage to you.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "TgtPrompt": "Select 2 target nonartifact creatures",
-        "SpellDescription": "Exile two target nonartifact creatures. CARDNAME deals 5 damage to you.",
-        "TargetMin": "2",
-        "SubAbility": "DBDamage"
-      }
+      "target_prompt": "Select 2 target nonartifact creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,32 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigMonarch",
-        "SVarCompare": "EQ0",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "CheckSVar": "NoMonarch",
-        "ValidCard": "Creature.Legendary+YouCtrl",
-        "TriggerDescription": "When a legendary creature you control enters, if there is no monarch, you become the monarch."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+1 for each creature you control.",
-        "AddPower": "X",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each creature you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When a legendary creature you control enters, if there is no monarch, you become the monarch.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddHiddenKeyword": "CARDNAME can't attack alone.",
-        "Description": "NICKNAME can't attack alone unless he has a +1/+1 counter on him.",
-        "Affected": "Card.Self+counters_EQ0_P1P1"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "NICKNAME can't attack alone unless he has a +1/+1 counter on him.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

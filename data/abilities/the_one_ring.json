@@ -2,49 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "BURDEN",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "TheOneRing",
-        "Defined": "Self",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Put a burden counter on CARDNAME, then draw a card for each burden counter on CARDNAME."
-      }
+      "description": "Put a burden counter on CARDNAME, then draw a card for each burden counter on CARDNAME.",
+      "effect": {
+        "count": 1,
+        "counter_type": "BURDEN",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, you gain protection from everything until your next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.wasCastByYou+Self",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, you gain protection from everything until your next turn.",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your upkeep, you lose 1 life for each burden counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "At the beginning of your upkeep, you lose 1 life for each burden counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

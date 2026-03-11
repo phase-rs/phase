@@ -2,70 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "Create a token that's a copy of the exiled card. X is the mana value of that card.",
-          "AILogic": "AtEOT",
-          "Defined": "Imprinted.ExiledWithSource"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a token that's a copy of the exiled card. X is the mana value of that card.",
-        "AILogic": "AtEOT",
-        "Defined": "Imprinted.ExiledWithSource"
-      }
+      "description": "Create a token that's a copy of the exiled card. X is the mana value of that card.",
+      "effect": {
+        "description": "Create a token that's a copy of the exiled card. X is the mana value of that card.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile a creature card from your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile a creature card from your hand.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "ValidCard": "Card.IsImprinted+ExiledWithSource",
-        "Execute": "DBForget",
-        "Destination": "Any",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup",
-        "Origin": "Battlefield",
-        "Static": "True",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

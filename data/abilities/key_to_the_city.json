@@ -2,61 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "Up to one target creature can't be blocked this turn.",
-          "TargetMax": "1",
-          "ExileOnMoved": "Battlefield",
-          "RememberObjects": "Targeted",
-          "TgtPrompt": "Select up to one target creature",
-          "TargetMin": "0",
-          "AILogic": "Pump",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Up to one target creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "Up to one target creature can't be blocked this turn.",
-        "TargetMax": "1",
-        "ExileOnMoved": "Battlefield",
-        "RememberObjects": "Targeted",
-        "TgtPrompt": "Select up to one target creature",
-        "TargetMin": "0",
-        "AILogic": "Pump",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Creature"
-      }
+      "target_prompt": "Select up to one target creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes untapped, you may pay {2}. If you do, draw a card.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes untapped, you may pay {2}. If you do, draw a card.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

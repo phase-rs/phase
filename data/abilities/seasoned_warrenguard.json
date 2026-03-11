@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks while you control a token, CARDNAME gets +2/+0 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "NoResolvingCheck": "True",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Permanent.token+YouCtrl",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME attacks while you control a token, CARDNAME gets +2/+0 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

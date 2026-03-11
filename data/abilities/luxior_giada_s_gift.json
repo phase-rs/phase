@@ -1,27 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Equipped creature gets +1/+1 for each counter on it.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each counter on it.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
       "mode": "Continuous",
-      "params": {
-        "RemoveType": "Planeswalker",
-        "Affected": "Permanent.EquippedBy",
-        "Description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        },
+        {
+          "core_type": "Planeswalker",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

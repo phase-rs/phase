@@ -1,38 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you didn't cast it from your hand, you lose the game.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.!wasCastFromYourHandByYou+Self",
-        "TriggerDescription": "When CARDNAME enters, if you didn't cast it from your hand, you lose the game.",
-        "Execute": "TrigYouLose"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDestroy",
-        "ValidTarget": "Creature",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, that player loses the game.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, that player loses the game.",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigTheyLose"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,35 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create a 2/2 green Gorilla creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_2_2_gorilla",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 green Gorilla creature token."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a spell or ability an opponent controls causes you to discard CARDNAME, create two 2/2 green Gorilla creature tokens.",
       "mode": "Discarded",
-      "params": {
-        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard CARDNAME, create two 2/2 green Gorilla creature tokens.",
-        "ValidCause": "SpellAbility.OppCtrl",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDouble"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

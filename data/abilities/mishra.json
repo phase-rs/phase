@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DmgTwice",
-        "Description": "If a creature you control would deal damage, it deals double that damage instead.",
-        "ActiveZones": "Command",
-        "ValidSource": "Creature.YouCtrl"
-      }
+      "description": "If a creature you control would deal damage, it deals double that damage instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

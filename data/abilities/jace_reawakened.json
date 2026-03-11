@@ -2,84 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDiscard",
-        "SpellDescription": "Draw a card, then discard a card."
-      }
+      "description": "Draw a card, then discard a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "You may exile a nonland card with mana value 3 or less from your hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Exile",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBPlot",
-        "SpellDescription": "You may exile a nonland card with mana value 3 or less from your hand.",
-        "RememberChanged": "True",
-        "ChangeType": "Card.nonLand+cmcLE3",
-        "StackDescription": "SpellDescription"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "Triggers": "CastTrig",
-          "Planeswalker": "True",
-          "SpellDescription": "Until end of turn, whenever you cast a spell, copy it. You may choose new targets for the copy."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Triggers": "CastTrig",
-        "Planeswalker": "True",
-        "SpellDescription": "Until end of turn, whenever you cast a spell, copy it. You may choose new targets for the copy."
-      }
+      "description": "Until end of turn, whenever you cast a spell, copy it. You may choose new targets for the copy.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Player.Active",
-        "CheckSVar": "Count$YourTurns",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "You can't cast this spell during your first, second, or third turns of the game.",
-        "SVarCompare": "LE3"
-      }
+      "condition": {
+        "compare": "LE3",
+        "type": "CheckSVar",
+        "var": "Count$YourTurns"
+      },
+      "description": "You can't cast this spell during your first, second, or third turns of the game.",
+      "effect_zone": "Battlefield",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

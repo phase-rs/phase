@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo R G",
-        "params": {
-          "SpellDescription": "Add {R} or {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R} or {G}."
-      }
+      "description": "Add {R} or {G}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you expend 4, put a +1/+1 counter on CARDNAME. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
       "mode": "ManaExpend",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Amount": "4",
-        "Player": "You",
-        "TriggerDescription": "Whenever you expend 4, put a +1/+1 counter on CARDNAME. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

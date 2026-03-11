@@ -1,51 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player exiles a card from their hand face down.",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigExile",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Origin": "Exile",
-        "ValidCard": "Card.IsRemembered",
-        "Execute": "DBForget",
-        "Static": "True"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "You",
-        "Description": "You may look at cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
-        "MayPlay": "True",
-        "Affected": "Card.IsRemembered",
-        "AffectedZone": "Exile"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may look at cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, that player exiles a card from their hand face down.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

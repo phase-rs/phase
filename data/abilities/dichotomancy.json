@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SubAbility": "DBChangeZone",
-          "SpellDescription": "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent. Put those cards onto the battlefield under your control, then that player shuffles.",
-          "ValidTgts": "Opponent",
-          "Zone": "Battlefield",
-          "RepeatCards": "Permanent.nonLand+TargetedPlayerCtrl+tapped",
-          "RepeatSubAbility": "DBSearch",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent. Put those cards onto the battlefield under your control, then that player shuffles.",
-        "ValidTgts": "Opponent",
-        "Zone": "Battlefield",
-        "RepeatCards": "Permanent.nonLand+TargetedPlayerCtrl+tapped",
-        "RepeatSubAbility": "DBSearch",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent. Put those cards onto the battlefield under your control, then that player shuffles.",
+      "effect": {
+        "description": "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent. Put those cards onto the battlefield under your control, then that player shuffles.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

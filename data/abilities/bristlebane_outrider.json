@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "This creature can't be blocked by creatures with power 2 or less.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "Description": "This creature can't be blocked by creatures with power 2 or less.",
-        "ValidBlocker": "Creature.powerLE2"
       }
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as another creature entered the battlefield under your control this turn, this creature gets +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "Description": "As long as another creature entered the battlefield under your control this turn, this creature gets +2/+0.",
-        "Affected": "Card.Self",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

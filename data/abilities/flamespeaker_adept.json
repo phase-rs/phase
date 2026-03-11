@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you scry, CARDNAME gets +2/+0 and gains first strike until end of turn.",
       "mode": "Scry",
-      "params": {
-        "TriggerDescription": "Whenever you scry, CARDNAME gets +2/+0 and gains first strike until end of turn.",
-        "ValidPlayer": "You",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

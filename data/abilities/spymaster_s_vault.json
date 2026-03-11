@@ -2,68 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Connive",
-        "params": {
-          "TgtPrompt": "Select target creature you control",
-          "ValidTgts": "Creature.YouCtrl",
-          "ConniveNum": "X",
-          "SpellDescription": "Target creature you control connives X, where X is the number of creatures that died this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control connives X, where X is the number of creatures that died this turn.",
+      "effect": {
+        "description": "Target creature you control connives X, where X is the number of creatures that died this turn.",
+        "name": "Connive",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "ValidTgts": "Creature.YouCtrl",
-        "ConniveNum": "X",
-        "SpellDescription": "Target creature you control connives X, where X is the number of creatures that died this turn."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control a Swamp.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped unless you control a Swamp.",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "LandTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

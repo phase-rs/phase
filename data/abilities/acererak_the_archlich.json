@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you haven't completed Tomb of Annihilation, return CARDNAME to its owner's hand and venture into the dungeon.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "SVarCompare": "LT1",
-        "Execute": "TrigBounce",
-        "TriggerDescription": "When CARDNAME enters, if you haven't completed Tomb of Annihilation, return CARDNAME to its owner's hand and venture into the dungeon.",
-        "Origin": "Any",
-        "CheckSVar": "X",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks, for each opponent, you create a 2/2 black Zombie creature token unless that player sacrifices a creature.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigRepeat",
-        "TriggerDescription": "Whenever CARDNAME attacks, for each opponent, you create a 2/2 black Zombie creature token unless that player sacrifices a creature.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

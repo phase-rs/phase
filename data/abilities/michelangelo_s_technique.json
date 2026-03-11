@@ -2,26 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 8,
-        "destination": "Battlefield"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "WithTotalCMC": "6",
-        "RestRandomOrder": "True",
-        "ChangeNum": "2",
-        "ChangeValid": "Creature",
-        "SpellDescription": "Look at the top eight cards of your library. Put up to two creature cards with total mana value 6 or less from among them onto the battlefield and the rest on the bottom of your library in a random order.",
-        "Optional": "True"
-      }
+      "description": "Look at the top eight cards of your library. Put up to two creature cards with total mana value 6 or less from among them onto the battlefield and the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 8,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

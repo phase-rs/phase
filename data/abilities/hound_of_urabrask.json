@@ -1,38 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Oildying (When this creature dies, if it had no oil counters on it, return it to the battlefield under its owner's control with an oil counter on it.)",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self+counters_EQ0_OIL",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBReturn",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +1/+1 for each oil counter on it."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each oil counter on it.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME has an oil counter on it, it has double strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME has an oil counter on it, it has double strike.",
-        "Affected": "Card.Self+counters_GE1_OIL",
-        "AddKeyword": "Double Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Oildying (When this creature dies, if it had no oil counters on it, return it to the battlefield under its owner's control with an oil counter on it.)",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

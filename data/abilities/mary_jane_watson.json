@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Spider you control enters, draw a card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Spider.YouCtrl",
-        "ActivationLimit": "1",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a Spider you control enters, draw a card. This ability triggers only once each turn."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Spider",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

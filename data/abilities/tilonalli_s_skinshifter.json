@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it becomes a copy of another target nonlegendary attacking creature until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Mandatory": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "DBClone",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, it becomes a copy of another target nonlegendary attacking creature until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

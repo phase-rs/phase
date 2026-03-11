@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, create two 1/1 colorless Gnome artifact creature tokens.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, create two 1/1 colorless Gnome artifact creature tokens."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

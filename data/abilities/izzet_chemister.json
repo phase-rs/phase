@@ -2,81 +2,69 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant.YouCtrl,Sorcery.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile target instant or sorcery card from your graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl,Sorcery.YouCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target instant or sorcery card from your graveyard.",
-        "TgtPrompt": "Select target instant or sorcery card in your graveyard"
-      }
+      "target_prompt": "Select target instant or sorcery card in your graveyard"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Optional": "True",
-          "WithoutManaCost": "True",
-          "Controller": "You",
-          "SpellDescription": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
-          "Valid": "Instant.ExiledWithSource,Sorcery.ExiledWithSource",
-          "ValidZone": "Exile",
-          "Amount": "All"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 R"
+            "cost": "1 R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "WithoutManaCost": "True",
-        "Controller": "You",
-        "SpellDescription": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
-        "Valid": "Instant.ExiledWithSource,Sorcery.ExiledWithSource",
-        "ValidZone": "Exile",
-        "Amount": "All"
-      }
+      "description": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
+      "effect": {
+        "description": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

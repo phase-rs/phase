@@ -1,27 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you take the initiative.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you take the initiative.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigInitiative",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever equipped creature becomes blocked, it deals 2 damage to each creature blocking it.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidCard": "Creature.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature becomes blocked, it deals 2 damage to each creature blocking it.",
-        "Execute": "TrigDamage"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

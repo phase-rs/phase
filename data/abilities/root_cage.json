@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Mercenaries don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Mercenary",
-        "Description": "Mercenaries don't untap during their controllers' untap steps."
+      "valid_card": {
+        "card_type": "Mercenary",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

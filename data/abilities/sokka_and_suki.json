@@ -1,31 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Ally you control enters, attach up to one target Equipment you control to that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self,Creature.Other+Ally+YouCtrl",
-        "Execute": "TrigAttach",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, attach up to one target Equipment you control to that creature.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          },
+          {
+            "type": "Other",
+            "value": "Ally"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an Equipment you control enters, create a 1/1 white Ally creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever an Equipment you control enters, create a 1/1 white Ally creature token.",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Equipment.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Equipment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

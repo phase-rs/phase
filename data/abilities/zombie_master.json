@@ -1,25 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Zombie"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Zombie creatures have swampwalk. (They can't be blocked as long as defending player controls a Swamp.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:Swamp",
-        "Description": "Other Zombie creatures have swampwalk. (They can't be blocked as long as defending player controls a Swamp.)",
-        "Affected": "Creature.Zombie+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Swamp",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Zombie"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Zombies have \"{B}: Regenerate this permanent.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Zombie+Other",
-        "Description": "Other Zombies have \"{B}: Regenerate this permanent.\"",
-        "AddAbility": "Regenerate"
-      }
+      "modifications": [
+        {
+          "ability": "Regenerate",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

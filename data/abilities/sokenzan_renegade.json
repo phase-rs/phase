@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if a player has more cards in hand than each other player, the player who has the most cards in hand gains control of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigGainControl",
-        "APlayerHasMostCardsInHand": "True",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if a player has more cards in hand than each other player, the player who has the most cards in hand gains control of CARDNAME.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

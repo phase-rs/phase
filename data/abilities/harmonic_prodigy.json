@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCard": "Shaman.YouCtrl,Wizard.Other+YouCtrl",
-        "Description": "If an ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time."
-      }
+      "description": "If an ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

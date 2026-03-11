@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has defender and loses flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has defender and loses flying.",
-        "RemoveKeyword": "Flying",
-        "AddKeyword": "Defender"
-      }
+      "modifications": [
+        {
+          "keyword": "Defender",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Flying",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

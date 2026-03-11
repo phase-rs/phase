@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if a creature died this turn, CARDNAME perpetually gets +X/+X where X is the number of creatures that died this turn. This ability also triggers if NICKNAME is in your graveyard.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield,Graveyard",
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if a creature died this turn, CARDNAME perpetually gets +X/+X where X is the number of creatures that died this turn. This ability also triggers if NICKNAME is in your graveyard."
-      }
+      "trigger_zones": [
+        "Battlefield",
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

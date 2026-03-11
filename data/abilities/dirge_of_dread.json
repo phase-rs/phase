@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "SpellDescription": "All creatures gain fear until end of turn.",
-        "KW": "Fear"
-      }
+      "description": "All creatures gain fear until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, you may have target creature gain fear until end of turn.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Execute": "TrigPump",
-        "TriggerDescription": "When you cycle CARDNAME, you may have target creature gain fear until end of turn."
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, put it on top of its owner's library at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, put it on top of its owner's library at end of combat.",
-        "Execute": "DelTrig"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, put it on top of its owner's library at end of combat.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DelTrig",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, put it on top of its owner's library at end of combat."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

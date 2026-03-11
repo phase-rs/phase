@@ -1,27 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control becomes blocked, you may exile it. You may play that card from exile this turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "OptionalDecider": "You",
-        "Execute": "TrigExile"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature you control becomes blocked, you may exile it. You may play that card from exile this turn.",
+      "mode": "AttackerBlocked",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

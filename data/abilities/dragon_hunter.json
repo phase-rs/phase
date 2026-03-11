@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can block Dragons as though it had reach.",
       "mode": {
         "Other": "CanBlockIfReach"
-      },
-      "params": {
-        "ValidBlocker": "Card.Self",
-        "ValidAttacker": "Dragon",
-        "Description": "CARDNAME can block Dragons as though it had reach."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

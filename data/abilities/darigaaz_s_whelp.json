@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a Dragon card, it perpetually gets +1/+1.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "DBPump",
-        "ValidCard": "Card.YouOwn+Dragon",
-        "TriggerDescription": "Whenever you draw a Dragon card, it perpetually gets +1/+1.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          },
+          {
+            "type": "Other",
+            "value": "Dragon"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When this creature enters, if it was kicked, seek a Dragon card. CARDNAME and that Dragon card each perpetually get +1/+1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self+kicked",
-        "Execute": "TrigSeek",
-        "TriggerDescription": "When this creature enters, if it was kicked, seek a Dragon card. CARDNAME and that Dragon card each perpetually get +1/+1."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

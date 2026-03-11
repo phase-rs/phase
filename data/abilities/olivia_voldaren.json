@@ -2,51 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to another target creature. That creature becomes a Vampire in addition to its other types. Put a +1/+1 counter on CARDNAME.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "Animate",
-        "SpellDescription": "CARDNAME deals 1 damage to another target creature. That creature becomes a Vampire in addition to its other types. Put a +1/+1 counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Vampire"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 B B"
+        "cost": "3 B B",
+        "type": "Mana"
       },
+      "description": "Gain control of target vampire for as long as you control CARDNAME.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Vampire"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "LoseControl": "LeavesPlay,LoseControl",
-        "TgtPrompt": "Select target Vampire",
-        "SpellDescription": "Gain control of target vampire for as long as you control CARDNAME."
-      }
+      "target_prompt": "Select target Vampire"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

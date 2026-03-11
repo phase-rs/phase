@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, put two +1/+1 counters on target creature.",
       "mode": "CrankContraption",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCrank",
-        "TriggerDescription": "Whenever you crank CARDNAME, put two +1/+1 counters on target creature."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

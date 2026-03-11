@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, create a 1/1 colorless Sand creature token for each land you control.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a 1/1 colorless Sand creature token for each land you control.",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

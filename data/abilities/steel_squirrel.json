@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "AILogic": "Combat",
-          "SpellDescription": "Roll a six-sided die."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "6"
+        "cost": "6",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Combat",
-        "SpellDescription": "Roll a six-sided die."
-      }
+      "description": "Roll a six-sided die.",
+      "effect": {
+        "description": "Roll a six-sided die.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you roll a 5 or higher on a die, CARDNAME gets +X/+X until end of turn, where X is the result.",
       "mode": "RolledDie",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you roll a 5 or higher on a die, CARDNAME gets +X/+X until end of turn, where X is the result.",
-        "Execute": "TrigPump",
-        "ValidResult": "GE5"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

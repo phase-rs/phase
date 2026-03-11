@@ -2,32 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Choose a creature you control. It becomes a copy of target creature except for its name.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.YouCtrl"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "ActivationZone": "Command",
-        "AILogic": "Clone",
-        "SubAbility": "DBClone",
-        "SpellDescription": "Choose a creature you control. It becomes a copy of target creature except for its name."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

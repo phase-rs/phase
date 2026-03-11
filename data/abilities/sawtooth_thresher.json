@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<2/P1P1>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +4/+4 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 4,
-        "toughness": 4,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 4,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<2/P1P1>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +4/+4 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,77 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this enchantment enters, destroy up to one target creature.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDestroy",
-            "TriggerDescription": "When this enchantment enters, destroy up to one target creature.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your end step, if a creature died under an opponent's control this turn, create a Treasure token. Then if you control three or more Treasures, transform this enchantment.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigToken",
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "CheckSVar": "DiedThisTurn",
-            "TriggerDescription": "At the beginning of your end step, if a creature died under an opponent's control this turn, create a Treasure token. Then if you control three or more Treasures, transform this enchantment."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 B"
+                "cost": "1 B",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "KW": "Indestructible",
-            "SubAbility": "DBTap",
-            "SpellDescription": "NICKNAME gains indestructible until end of turn. Tap it. (Damage and effects that say \"destroy\" don't destroy it.)"
-          }
+          "description": "NICKNAME gains indestructible until end of turn. Tap it. (Damage and effects that say \"destroy\" don't destroy it.)",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

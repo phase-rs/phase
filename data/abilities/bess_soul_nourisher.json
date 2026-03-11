@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more other creatures you control with base power and toughness 1/1 enter, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever one or more other creatures you control with base power and toughness 1/1 enter, put a +1/+1 counter on CARDNAME.",
-        "ValidCards": "Creature.basePowerEQ1+baseToughnessEQ1+Other+YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever NICKNAME attacks, each other creature you control with base power and toughness 1/1 gets +X/+X until end of turn, where X is the number of +1/+1 counters on NICKNAME.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME attacks, each other creature you control with base power and toughness 1/1 gets +X/+X until end of turn, where X is the number of +1/+1 counters on NICKNAME.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpAll"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

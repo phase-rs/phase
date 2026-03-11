@@ -1,42 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, any opponent may sacrifice a creature. If no one does, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your upkeep, any opponent may sacrifice a creature. If no one does, transform CARDNAME.",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "Execute": "TrigTransform"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "type": "SelfRef"
+          },
+          "condition": {
+            "filter": {
+              "card_type": "Human",
+              "controller": "Opponent",
+              "type": "Typed"
+            },
+            "type": "IsPresent"
+          },
+          "description": "CARDNAME gets +2/+0 as long as an opponent controls a Human.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "2",
-            "Affected": "Card.Self",
-            "IsPresent": "Human.OppCtrl",
-            "Description": "CARDNAME gets +2/+0 as long as an opponent controls a Human."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

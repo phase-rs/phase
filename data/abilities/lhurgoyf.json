@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power is equal to the number of creature cards in all graveyards and its toughness is equal to that number plus 1.",
-        "SetPower": "X",
-        "SetToughness": "Y"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of creature cards in all graveyards and its toughness is equal to that number plus 1.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an Aura or Equipment you control enters, create a 2/2 red Spirit creature token with menace.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Aura.YouCtrl,Equipment.YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever an Aura or Equipment you control enters, create a 2/2 red Spirit creature token with menace.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Aura",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Equipment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, put a +1/+1 counter on each modified creature you control. (Equipment, Auras you control, and counters are modifications.)",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounters",
-        "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on each modified creature you control. (Equipment, Auras you control, and counters are modifications.)",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target opponent. Destroy target land that player controls. CARDNAME deals 3 damage to that player and 1 damage to each creature they control.",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBDestroy"
-      }
+      "description": "Choose target opponent. Destroy target land that player controls. CARDNAME deals 3 damage to that player and 1 damage to each creature they control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Player"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

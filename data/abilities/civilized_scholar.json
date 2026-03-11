@@ -1,49 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDiscard",
-            "SpellDescription": "Draw a card, then discard a card. If a creature card is discarded this way, untap CARDNAME, then transform it."
-          }
+          "description": "Draw a card, then discard a card. If a creature card is discarded this way, untap CARDNAME, then transform it.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if CARDNAME didn't attack this turn, tap CARDNAME, then transform it.",
           "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTap",
-            "IsPresent": "Card.!attackedThisTurn+Self",
-            "TriggerDescription": "At the beginning of your end step, if CARDNAME didn't attack this turn, tap CARDNAME, then transform it.",
-            "ValidPlayer": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

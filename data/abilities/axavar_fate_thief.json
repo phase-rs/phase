@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Void — At the beginning of your end step, if a nonland permanent left the battlefield this turn or a spell was warped this turn, discard a card, then heist target opponent's library.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "Execute": "TrigDiscard",
-        "Phase": "End of Turn",
-        "TriggerDescription": "Void — At the beginning of your end step, if a nonland permanent left the battlefield this turn or a spell was warped this turn, discard a card, then heist target opponent's library.",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

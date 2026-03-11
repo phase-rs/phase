@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may distribute a number of +1/+1 counters equal to the number of +1/+1 counters on CARDNAME among any number of creatures you control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigCounterDist",
-        "TriggerDescription": "When CARDNAME dies, you may distribute a number of +1/+1 counters equal to the number of +1/+1 counters on CARDNAME among any number of creatures you control.",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "TriggeredCardController"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

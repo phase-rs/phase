@@ -1,69 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
+          "description": "Return target creature card from a graveyard and target creature on the battlefield to their owners' hands.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBChangeZone",
-            "TgtPrompt": "Select target creature in a graveyard",
-            "SpellDescription": "Return target creature card from a graveyard and target creature on the battlefield to their owners' hands."
-          }
+          "target_prompt": "Select target creature in a graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "Reveal",
-            "params": {
-              "ValidTgts": "Player",
-              "SpellDescription": "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
-              "NumCards": "2",
-              "IsCurse": "True",
-              "RememberRevealed": "True",
-              "SubAbility": "DBDiscard",
-              "Random": "True"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidTgts": "Player",
-            "SpellDescription": "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
-            "NumCards": "2",
-            "IsCurse": "True",
-            "RememberRevealed": "True",
-            "SubAbility": "DBDiscard",
-            "Random": "True"
-          }
+          "description": "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
+          "effect": {
+            "description": "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
+            "name": "Reveal",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, CARDNAME gets +1/+1 and gains first strike until end of turn.",
       "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw your second card each turn, CARDNAME gets +1/+1 and gains first strike until end of turn.",
-        "ValidCard": "Card.YouCtrl",
-        "Number": "2",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

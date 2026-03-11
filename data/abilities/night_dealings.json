@@ -2,51 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B B"
+            "cost": "2 B B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<X/THEFT>"
+            "cost": "SubCounter<X/THEFT>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Shuffle": "True",
-        "ChangeType": "Card.nonLand+YouCtrl+cmcEQX",
-        "Reveal": "True",
-        "SpellDescription": "Search your library for a nonland card with mana value X, reveal it, put it into your hand, then shuffle.",
-        "ChangeNum": "1"
-      }
+      "description": "Search your library for a nonland card with mana value X, reveal it, put it into your hand, then shuffle.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source you control deals damage to another player, put that many theft counters on CARDNAME.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player.Other",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a source you control deals damage to another player, put that many theft counters on CARDNAME.",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Emblem.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "filters": [
+          {
+            "card_type": "Player",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

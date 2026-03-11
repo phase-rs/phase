@@ -1,16 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCard": "Ally.YouCtrl",
-        "Description": "If a triggered ability of an Ally you control triggers, that ability triggers an additional time."
-      }
+      "description": "If a triggered ability of an Ally you control triggers, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

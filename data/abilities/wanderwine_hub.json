@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W U",
-        "params": {
-          "SpellDescription": "Add {W} or {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {U}."
-      }
+      "description": "Add {W} or {U}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may reveal a Merfolk card from your hand. If you don't, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "DBTap",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "As CARDNAME enters, you may reveal a Merfolk card from your hand. If you don't, CARDNAME enters tapped.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,47 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 G G",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsMonstrous"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is monstrous, it has reach.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Reach",
+          "type": "AddKeyword"
         }
-      },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 G G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "2"
-      }
+      ]
     }
   ],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever you're dealt combat damage, sacrifice CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "You",
-        "TriggerDescription": "Whenever you're dealt combat damage, sacrifice CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Reach",
-        "Affected": "Card.Self+IsMonstrous",
-        "Description": "As long as CARDNAME is monstrous, it has reach."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

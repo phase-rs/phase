@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature attacks, destroy target permanent.",
-        "Execute": "TrigDestroy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +6/+6.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +6/+6.",
-        "AddPower": "6",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "6",
-        "AddSVar": "AE"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 6
+        },
+        {
+          "type": "AddToughness",
+          "value": 6
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature attacks, destroy target permanent.",
+      "mode": "Attacks",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

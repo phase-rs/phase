@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant,Sorcery"
-        }
-      },
       "cost": null,
+      "description": "Counter target instant or sorcery spell unless its controller pays {1}.",
+      "effect": {
+        "target": {
+          "card_type": "Instant,Sorcery",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "UnlessCost": "1",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target instant or sorcery spell",
-        "SpellDescription": "Counter target instant or sorcery spell unless its controller pays {1}."
-      }
+      "target_prompt": "Select target instant or sorcery spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

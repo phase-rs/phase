@@ -1,25 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, search your library for a land card, put it onto the battlefield, then shuffle.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, search your library for a land card, put it onto the battlefield, then shuffle.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you cast this spell, if it was kicked, exile target land.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, if it was kicked, exile target land.",
-        "ValidCard": "Card.Self+kicked",
-        "Execute": "TrigExile"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

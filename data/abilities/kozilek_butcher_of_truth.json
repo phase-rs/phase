@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you cast this spell, draw four cards.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, draw four cards."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

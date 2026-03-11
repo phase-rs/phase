@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+1 for each +1/+1 counter on other creatures you control. Enchanted creature has vigilance and \"{W}, {T}: Bolster 1.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "AddKeyword": "Vigilance",
-        "Description": "Enchanted creature gets +1/+1 for each +1/+1 counter on other creatures you control. Enchanted creature has vigilance and \"{W}, {T}: Bolster 1.\"",
-        "Affected": "Creature.EnchantedBy",
-        "AddAbility": "ABBolster",
-        "AddPower": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "ABBolster",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

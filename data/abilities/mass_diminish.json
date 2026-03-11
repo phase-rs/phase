@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Until your next turn, creatures target player controls have base power and toughness 1/1.",
-          "Toughness": "1",
-          "Power": "1",
-          "IsCurse": "True",
-          "ValidCards": "Creature",
-          "Duration": "UntilYourNextTurn",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until your next turn, creatures target player controls have base power and toughness 1/1.",
-        "Toughness": "1",
-        "Power": "1",
-        "IsCurse": "True",
-        "ValidCards": "Creature",
-        "Duration": "UntilYourNextTurn",
-        "ValidTgts": "Player"
-      }
+      "description": "Until your next turn, creatures target player controls have base power and toughness 1/1.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "description": "Until your next turn, creatures target player controls have base power and toughness 1/1.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

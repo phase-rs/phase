@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't block creatures with power 3 or greater unless you pay {1}.",
       "mode": {
         "Other": "CantBlockUnless"
-      },
-      "params": {
-        "Cost": "1",
-        "Description": "CARDNAME can't block creatures with power 3 or greater unless you pay {1}.",
-        "Attacker": "Creature.powerGE3",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

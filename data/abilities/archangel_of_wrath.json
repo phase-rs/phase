@@ -1,31 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if it was kicked, it deals 2 damage to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, if it was kicked, it deals 2 damage to any target.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self+kicked",
-        "Execute": "TrigDamage",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME enters, if it was kicked twice, it deals 2 damage to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "CheckSVar": "X",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self+kicked",
-        "TriggerDescription": "When CARDNAME enters, if it was kicked twice, it deals 2 damage to any target.",
-        "SVarCompare": "EQ2",
-        "Execute": "TrigDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

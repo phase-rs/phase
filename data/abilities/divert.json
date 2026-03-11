@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "ValidTgts": "Card",
-          "SpellDescription": "Change the target of target spell with a single target unless that spell's controller pays {2}.",
-          "UnlessCost": "2",
-          "TargetType": "Spell.singleTarget",
-          "TgtPrompt": "Select target spell with a single target"
-        }
-      },
       "cost": null,
+      "description": "Change the target of target spell with a single target unless that spell's controller pays {2}.",
+      "effect": {
+        "description": "Change the target of target spell with a single target unless that spell's controller pays {2}.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Card",
-        "SpellDescription": "Change the target of target spell with a single target unless that spell's controller pays {2}.",
-        "UnlessCost": "2",
-        "TargetType": "Spell.singleTarget",
-        "TgtPrompt": "Select target spell with a single target"
-      }
+      "target_prompt": "Select target spell with a single target"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

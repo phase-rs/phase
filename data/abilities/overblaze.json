@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Permanent",
-          "ReplacementEffects": "OverblazeEvent",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Each time target permanent would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Permanent",
-        "ReplacementEffects": "OverblazeEvent",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Each time target permanent would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead."
-      }
+      "description": "Each time target permanent would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,39 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked.",
+      "mode": {
+        "Other": "CantBlockBy"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.nonCreature",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may remove two oil counters from it. If you do, when you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigDelayTrig",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may remove two oil counters from it. If you do, when you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
-      }
-    }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
+      "valid_source": {
+        "type": "SelfRef"
       },
-      "params": {
-        "Description": "CARDNAME can't be blocked.",
-        "ValidAttacker": "Creature.Self"
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

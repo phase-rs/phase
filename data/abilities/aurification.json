@@ -1,39 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "Each creature with a gold counter on it is a Wall in addition to its other creature types and has defender. (Those creatures can't attack.)",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Defender",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Wall",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a creature deals damage to you, put a gold counter on it.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.inZoneBattlefield",
-        "TriggerDescription": "Whenever a creature deals damage to you, put a gold counter on it."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, remove all gold counters from all creatures.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, remove all gold counters from all creatures.",
-        "Origin": "Battlefield",
-        "Execute": "TrigRemove",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddType": "Wall",
-        "Affected": "Creature.counters_GE1_GOLD",
-        "Description": "Each creature with a gold counter on it is a Wall in addition to its other creature types and has defender. (Those creatures can't attack.)",
-        "AddKeyword": "Defender"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

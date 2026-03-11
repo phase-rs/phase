@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your first main phase, ABILITY",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your first main phase, ABILITY",
-        "Execute": "TrigCharm",
-        "ValidPlayer": "You"
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

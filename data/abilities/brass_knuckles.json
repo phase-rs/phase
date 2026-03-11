@@ -1,36 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "When you cast this spell, copy it. (The copy becomes a token.)"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Equipment",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature.EquippedBy"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Equipped creature has double strike as long as two or more Equipment are attached to it.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Double Strike",
-        "Affected": "Creature.EquippedBy",
-        "IsPresent": "Equipment.AttachedTo Creature.EquippedBy",
-        "Description": "Equipped creature has double strike as long as two or more Equipment are attached to it.",
-        "PresentCompare": "GE2"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "EqMe",
-        "Secondary": "True",
-        "Affected": "Creature.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you cast this spell, copy it. (The copy becomes a token.)",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

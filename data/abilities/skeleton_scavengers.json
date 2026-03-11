@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "CostDesc": "Pay {1} for each +1/+1 counter on CARDNAME:",
-          "RegenerationAbility": "DBImmediateTrigger",
-          "SpellDescription": "Regenerate CARDNAME. When it regenerates this way, put a +1/+1 counter on it."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Mana<1\\NumTimes>"
+        "cost": "Mana<1\\NumTimes>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "CostDesc": "Pay {1} for each +1/+1 counter on CARDNAME:",
-        "RegenerationAbility": "DBImmediateTrigger",
-        "SpellDescription": "Regenerate CARDNAME. When it regenerates this way, put a +1/+1 counter on it."
-      }
+      "description": "Regenerate CARDNAME. When it regenerates this way, put a +1/+1 counter on it.",
+      "effect": {
+        "description": "Regenerate CARDNAME. When it regenerates this way, put a +1/+1 counter on it.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control a blue creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "IsPresent": "Creature.Blue+YouCtrl",
-        "Description": "CARDNAME has flying as long as you control a blue creature.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has persist as long as you control a black creature.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has persist as long as you control a black creature.",
-        "Affected": "Card.Self",
-        "IsPresent": "Creature.Black+YouCtrl",
-        "AddKeyword": "Persist"
-      }
+      "modifications": [
+        {
+          "keyword": "Persist",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

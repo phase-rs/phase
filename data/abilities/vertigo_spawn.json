@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks a creature, tap that creature. That creature doesn't untap during its controller's next untap step.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks a creature, tap that creature. That creature doesn't untap during its controller's next untap step.",
-        "ValidCard": "Creature",
-        "ValidBlocker": "Card.Self",
-        "Execute": "TrigTap"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

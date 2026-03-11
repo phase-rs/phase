@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigChoose",
-        "TriggerDescription": "When CARDNAME enters the battlefield, choose one of Thoughtseize, Lightning Bolt, or Abrupt Decay. Cast a copy of the chosen card without paying its mana cost.",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "Y",
-        "Description": "CARDNAME's power is equal to the number of card types among all cards in all graveyards, and its toughness is equal to that number plus 1.",
-        "CharacteristicDefining": "True",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of card types among all cards in all graveyards, and its toughness is equal to that number plus 1.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters the battlefield, choose one of Thoughtseize, Lightning Bolt, or Abrupt Decay. Cast a copy of the chosen card without paying its mana cost.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

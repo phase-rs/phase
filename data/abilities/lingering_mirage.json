@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land is an Island.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Island",
-        "Affected": "Card.EnchantedBy",
-        "RemoveLandTypes": "True",
-        "Description": "Enchanted land is an Island."
-      }
+      "modifications": [
+        {
+          "core_type": "Island",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

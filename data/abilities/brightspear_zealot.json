@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This creature gets +2/+0 as long as you've cast two or more spells this turn.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "SVarCompare": "GE2",
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "Description": "This creature gets +2/+0 as long as you've cast two or more spells this turn."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

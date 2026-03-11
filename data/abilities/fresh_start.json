@@ -1,18 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets -5/-0 and loses all abilities.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "RemoveAllAbilities": "True",
-        "Description": "Enchanted creature gets -5/-0 and loses all abilities.",
-        "AddPower": "-5"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -5
+        },
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

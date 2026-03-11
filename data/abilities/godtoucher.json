@@ -2,43 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature.powerGE5",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Prevent all damage that would be dealt to target creature with power 5 or greater this turn.",
-          "ReplacementEffects": "RPrevent",
-          "TgtPrompt": "Select target creature with power 5 or greater",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 W"
+            "cost": "1 W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Prevent all damage that would be dealt to target creature with power 5 or greater this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.powerGE5",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Prevent all damage that would be dealt to target creature with power 5 or greater this turn.",
-        "ReplacementEffects": "RPrevent",
-        "TgtPrompt": "Select target creature with power 5 or greater",
-        "ExileOnMoved": "Battlefield"
-      }
+      "target_prompt": "Select target creature with power 5 or greater"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

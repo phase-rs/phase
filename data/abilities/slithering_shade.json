@@ -2,39 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+1 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Hellbent — CARDNAME can attack as though it didn't have defender as long as you have no cards in hand.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Condition": "Hellbent",
-        "ValidCard": "Card.Self",
-        "Description": "Hellbent — CARDNAME can attack as though it didn't have defender as long as you have no cards in hand."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

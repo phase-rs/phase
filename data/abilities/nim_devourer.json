@@ -2,40 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B B",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield, then sacrifice a creature. Activate only during your upkeep.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "SubAbility": "DBSac",
-        "ActivationZone": "Graveyard",
-        "PlayerTurn": "True",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield, then sacrifice a creature. Activate only during your upkeep."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+0 for each artifact you control.",
-        "AddPower": "X",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+0 for each artifact you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

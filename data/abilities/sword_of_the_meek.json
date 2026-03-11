@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Graveyard",
-        "TriggerDescription": "Whenever a 1/1 creature you control enters, you may return CARDNAME from your graveyard to the battlefield, then attach it to that creature.",
-        "ValidCard": "Creature.powerEQ1+toughnessEQ1+YouCtrl",
-        "Execute": "TrigReturn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +1/+2.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a 1/1 creature you control enters, you may return CARDNAME from your graveyard to the battlefield, then attach it to that creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

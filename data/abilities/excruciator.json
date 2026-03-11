@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Damage that would be dealt by CARDNAME can't be prevented.",
       "mode": {
         "Other": "CantPreventDamage"
-      },
-      "params": {
-        "ValidSource": "Card.Self",
-        "Description": "Damage that would be dealt by CARDNAME can't be prevented."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn.",
-          "Amount": "1",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "ExileFromTop<1/Card>"
+        "cost": "ExileFromTop<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn.",
-        "Amount": "1",
-        "Defined": "You"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to you this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to you this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a player doesn't pay CARDNAME's cumulative upkeep, that player exiles all cards from their library.",
       "mode": "PayCumulativeUpkeep",
-      "params": {
-        "Paid": "False",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When a player doesn't pay CARDNAME's cumulative upkeep, that player exiles all cards from their library.",
-        "Execute": "TrigExileAll"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

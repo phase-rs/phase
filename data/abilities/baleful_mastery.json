@@ -2,41 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Exile {c:Targeted}.",
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SubAbility": "DBBranch",
-        "SpellDescription": "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {1}{B} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "StackDescription": "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker.",
-        "ValidSA": "Spell.Self",
-        "Cost": "1 B",
-        "Description": "You may pay {1}{B} rather than pay this spell's mana cost.",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

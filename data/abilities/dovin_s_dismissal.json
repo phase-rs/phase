@@ -2,30 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.tapped"
-        }
-      },
       "cost": null,
+      "description": "Put up to one target tapped creature on top of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select up to one target tapped creature",
-        "LibraryPosition": "0",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "SubAbility": "DBSearch",
-        "SpellDescription": "Put up to one target tapped creature on top of its owner's library."
-      }
+      "target_prompt": "Select up to one target tapped creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

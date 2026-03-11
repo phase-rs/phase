@@ -1,30 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "X",
-        "Description": "Enchanted creature gets +2/+2 for each Aura and Equipment attached to it.",
-        "AddPower": "X",
-        "Affected": "Creature.EnchantedBy",
-        "AddSVar": "EqMe & EnMe"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DmgEnchanted",
-        "DamageTarget": "Enchanted",
-        "ValidTarget": "You",
-        "Description": "All damage that would be dealt to you is dealt to enchanted creature instead.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "All damage that would be dealt to you is dealt to enchanted creature instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 for each Aura and Equipment attached to it.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

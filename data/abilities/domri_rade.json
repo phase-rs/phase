@@ -2,98 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SubAbility": "DBChangeZone",
-          "Planeswalker": "True",
-          "RevealOptional": "True",
-          "SpellDescription": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
-          "RememberRevealed": "True",
-          "AILogic": "Main2",
-          "PeekAmount": "1",
-          "RevealValid": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "Planeswalker": "True",
-        "RevealOptional": "True",
-        "SpellDescription": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
-        "RememberRevealed": "True",
-        "AILogic": "Main2",
-        "PeekAmount": "1",
-        "RevealValid": "Creature"
-      }
+      "description": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
+      "effect": {
+        "description": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Target creature you control fights another target creature.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "AILogic": "Fight",
-        "Planeswalker": "True",
-        "SpellDescription": "Target creature you control fights another target creature.",
-        "TgtPrompt": "Choose target creature you control",
-        "SubAbility": "DomriFight"
-      }
+      "target_prompt": "Choose target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "AILogic": "Always",
-          "Duration": "Permanent",
-          "StaticAbilities": "STDomri",
-          "Planeswalker": "True",
-          "Stackable": "False",
-          "Name": "Emblem — Domri Rade",
-          "Image": "emblem_domri_rade",
-          "SpellDescription": "You get an emblem with \"Creatures you control have double strike, trample, hexproof and haste.\""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "AILogic": "Always",
-        "Duration": "Permanent",
-        "StaticAbilities": "STDomri",
-        "Planeswalker": "True",
-        "Stackable": "False",
-        "Name": "Emblem — Domri Rade",
-        "Image": "emblem_domri_rade",
-        "SpellDescription": "You get an emblem with \"Creatures you control have double strike, trample, hexproof and haste.\""
-      }
+      "description": "You get an emblem with \"Creatures you control have double strike, trample, hexproof and haste.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

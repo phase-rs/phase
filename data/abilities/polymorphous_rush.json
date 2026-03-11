@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose a creature on the battlefield. Any number of target creatures you control each become a copy of that creature until end of turn.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "Amount": "1",
-        "AILogic": "Clone",
-        "Mandatory": "True",
-        "SpellDescription": "Choose a creature on the battlefield. Any number of target creatures you control each become a copy of that creature until end of turn.",
-        "SubAbility": "Pump4Tgt"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

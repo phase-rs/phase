@@ -2,43 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Triggers": "Trig",
-          "ValidCards": "Creature.YouCtrl+!token+faceUp",
-          "SpellDescription": "Until end of turn, face-up, nontoken creatures you control gain \"When this creature dies, manifest the top card of your library.\""
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "Trig",
-        "ValidCards": "Creature.YouCtrl+!token+faceUp",
-        "SpellDescription": "Until end of turn, face-up, nontoken creatures you control gain \"When this creature dies, manifest the top card of your library.\""
-      }
+      "description": "Until end of turn, face-up, nontoken creatures you control gain \"When this creature dies, manifest the top card of your library.\"",
+      "effect": {
+        "description": "Until end of turn, face-up, nontoken creatures you control gain \"When this creature dies, manifest the top card of your library.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigManifest",
-        "TriggerDescription": "At the beginning of your end step, manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

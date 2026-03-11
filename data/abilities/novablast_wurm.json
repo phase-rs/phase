@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, destroy all other creatures.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDestroyAll",
-        "TriggerDescription": "Whenever CARDNAME attacks, destroy all other creatures.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Amount": "1",
-        "ValidCard": "Equipment",
-        "Activator": "You",
-        "Description": "Equipment spells you cast cost {1} less to cast."
-      }
+      "description": "Equipment spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card",
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Equip abilities you activate cost {1} less to activate.",
-        "ValidSpell": "Activated.Equip"
-      }
+      "description": "Equip abilities you activate cost {1} less to activate.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

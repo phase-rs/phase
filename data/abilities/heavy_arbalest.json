@@ -1,30 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has \"{T}: This creature deals 2 damage to any target.\"",
-        "AddAbility": "Damage"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Equipped creature doesn't untap during its controller's untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "Description": "Equipped creature doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{T}: This creature deals 2 damage to any target.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

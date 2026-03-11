@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell, you lose 1 life.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever a player casts a spell, you lose 1 life.",
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

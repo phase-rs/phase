@@ -1,43 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "8",
+            "type": "Mana"
+          },
+          "description": "Create a 4/4 red Dragon creature token with flying and firebending 4.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "r_4_4_dragon_flying_firebending_4",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "8"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create a 4/4 red Dragon creature token with flying and firebending 4."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and has \"When CARDNAME dies, you lose 4 life.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddTrigger": "Dies",
-        "Condition": "Threshold",
-        "AddPower": "2",
-        "Affected": "Card.Self",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and has \"When CARDNAME dies, you lose 4 life.\""
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

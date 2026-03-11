@@ -1,39 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.CastSa Spell.MayPlaySource",
-        "Execute": "TrigEffect",
-        "Static": "True",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "CastSa Spell.MayPlaySource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Tools — Whenever NICKNAME attacks, it gets +X/+0 until end of turn, where X is the greatest mana value among artifacts you control.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Tools — Whenever NICKNAME attacks, it gets +X/+0 until end of turn, where X is the greatest mana value among artifacts you control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "EffectZone": "Battlefield",
-        "MayPlayLimit": "1",
-        "MayPlay": "True",
-        "Affected": "Artifact.nonLand+YouOwn",
-        "AffectedZone": "Graveyard",
-        "Description": "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

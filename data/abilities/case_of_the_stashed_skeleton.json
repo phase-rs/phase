@@ -2,69 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NoReveal": "True",
-        "SpellDescription": "Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
-        "Mandatory": "True",
-        "ChangeType": "Card",
-        "Activation": "Solved",
-        "ChangeNum": "1",
-        "SorcerySpeed": "True",
-        "PrecostDesc": "Solved —"
-      }
+      "description": "Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this Case enters, create a 2/1 black Skeleton creature token and suspect it. (It has menace and can't block.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When this Case enters, create a 2/1 black Skeleton creature token and suspect it. (It has menace and can't block.)",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "To solve — You control no suspected Skeletons. (If unsolved, solve at the beginning of your end step.)",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigSolve",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Skeleton.YouCtrl+IsSuspected",
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "To solve — You control no suspected Skeletons. (If unsolved, solve at the beginning of your end step.)",
-        "Phase": "End of Turn",
-        "IsPresent2": "Card.Self+!IsSolved"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

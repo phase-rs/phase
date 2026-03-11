@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsRenowned"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is renowned, it has menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+IsRenowned",
-        "AddKeyword": "Menace",
-        "Description": "As long as CARDNAME is renowned, it has menace."
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

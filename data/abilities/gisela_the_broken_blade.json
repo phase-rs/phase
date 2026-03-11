@@ -1,43 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, if you both own and control CARDNAME and a creature named Bruna, the Fading Light, exile them, then meld them into Brisela, Voice of Nightmares.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "IsPresent": "Card.Self+YouCtrl+YouOwn",
-            "TriggerDescription": "At the beginning of your end step, if you both own and control CARDNAME and a creature named Bruna, the Fading Light, exile them, then meld them into Brisela, Voice of Nightmares.",
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "IsPresent2": "Creature.YouCtrl+YouOwn+namedBruna; the Fading Light",
-            "Execute": "Meld"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBeCast",
-          "params": {
-            "ValidCard": "Card.cmcLE3",
-            "Caster": "Opponent",
-            "Description": "Your opponents can't cast spells with mana value 3 or less."
-          }
+          "description": "Your opponents can't cast spells with mana value 3 or less.",
+          "mode": "CantBeCast"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

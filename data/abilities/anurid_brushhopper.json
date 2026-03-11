@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<2/Card>",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<2/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-        "Defined": "Self",
-        "RememberChanged": "True",
-        "SubAbility": "DelTrig"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

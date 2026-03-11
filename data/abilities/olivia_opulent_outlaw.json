@@ -2,59 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "SorcerySpeed": "True",
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "Put two +1/+1 counters on each creature you control. Activate only as a sorcery.",
-          "ValidCardsDesc": "creature you control",
-          "CounterNum": "2",
-          "CounterType": "P1P1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Put two +1/+1 counters on each creature you control. Activate only as a sorcery.",
-        "ValidCardsDesc": "creature you control",
-        "CounterNum": "2",
-        "CounterType": "P1P1"
-      }
+      "description": "Put two +1/+1 counters on each creature you control. Activate only as a sorcery.",
+      "effect": {
+        "description": "Put two +1/+1 counters on each creature you control. Activate only as a sorcery.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more outlaws you control deal combat damage to a player, create a Treasure token. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws.)",
       "mode": "DamageDoneOnce",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigTreasure",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more outlaws you control deal combat damage to a player, create a Treasure token. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws.)",
-        "ValidSource": "Card.Outlaw+YouCtrl",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Outlaw"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

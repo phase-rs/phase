@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, a random nonland card in your hand perpetually gains \"When you cast this spell, you lose 3 life.\"",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigRandom",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, a random nonland card in your hand perpetually gains \"When you cast this spell, you lose 3 life.\""
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

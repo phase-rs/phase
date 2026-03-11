@@ -1,20 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more other nontoken creatures you control deal combat damage to a player, choose one of those creatures. Conjure a duplicate of the chosen creature into your hand.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Whenever one or more other nontoken creatures you control deal combat damage to a player, choose one of those creatures. Conjure a duplicate of the chosen creature into your hand.",
-        "ValidSource": "Creature.YouCtrl+!token+Other",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChoose"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent draws a card, that player may pay {2}. If the player doesn't, you create a Treasure token.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever an opponent draws a card, that player may pay {2}. If the player doesn't, you create a Treasure token.",
-        "ValidCard": "Card.OppOwn",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

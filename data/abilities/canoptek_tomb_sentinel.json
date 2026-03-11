@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Exile Cannon — When CARDNAME enters from a graveyard, exile up to one target nonland permanent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Graveyard",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Exile Cannon — When CARDNAME enters from a graveyard, exile up to one target nonland permanent.",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBChangeZone"
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

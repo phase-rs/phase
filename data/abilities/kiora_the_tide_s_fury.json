@@ -2,80 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "Name": "Kraken Hatchling",
-          "Zone": "Hand",
-          "SpellDescription": "Conjure a Kraken Hatchling card into your hand.",
-          "Conjure": "True",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Kraken Hatchling",
-        "Zone": "Hand",
-        "SpellDescription": "Conjure a Kraken Hatchling card into your hand.",
-        "Conjure": "True",
-        "Planeswalker": "True"
-      }
+      "description": "Conjure a Kraken Hatchling card into your hand.",
+      "effect": {
+        "description": "Conjure a Kraken Hatchling card into your hand.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Untap target creature or land. Prevent all damage that would be dealt to and dealt by that permanent until your next turn.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Land"
-        }
+          "card_type": "Creature,Land",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBPump",
-        "StackDescription": "Untap {c:Targeted}. Prevent all damage that would be dealt to and dealt by that permanent until your next turn.",
-        "TgtPrompt": "Select target creature or land",
-        "SpellDescription": "Untap target creature or land. Prevent all damage that would be dealt to and dealt by that permanent until your next turn."
-      }
+      "target_prompt": "Select target creature or land"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "You may sacrifice a Kraken. If you do, create an 8/8 blue Kraken creature token.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Kraken",
-        "SubAbility": "DBToken",
-        "Planeswalker": "True",
-        "Optional": "True",
-        "RememberSacrificed": "True",
-        "StackDescription": "SpellDescription",
-        "Amount": "1",
-        "SpellDescription": "You may sacrifice a Kraken. If you do, create an 8/8 blue Kraken creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME can block an additional creature each combat.",
-        "CanBlockAmount": "1"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME can block an additional creature each combat.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

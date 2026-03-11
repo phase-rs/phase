@@ -1,69 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If tapped for mana, Plains produce R.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "ValidCard": "Plains",
-        "Description": "If tapped for mana, Plains produce R.",
-        "Secondary": "True",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ProduceR"
+      "valid_card": {
+        "card_type": "Plains",
+        "type": "Typed"
       }
     },
     {
+      "description": "If tapped for mana, Islands produce G.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Island",
-        "ReplaceWith": "ProduceG",
-        "Description": "If tapped for mana, Islands produce G.",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "card_type": "Island",
+        "type": "Typed"
       }
     },
     {
+      "description": "If tapped for mana, Swamps produce W.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "Secondary": "True",
-        "ReplaceWith": "ProduceW",
-        "Description": "If tapped for mana, Swamps produce W.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Swamp"
+      "valid_card": {
+        "card_type": "Swamp",
+        "type": "Typed"
       }
     },
     {
+      "description": "If tapped for mana, Mountains produce U.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Mountain",
-        "ReplaceWith": "ProduceU",
-        "Secondary": "True",
-        "Description": "If tapped for mana, Mountains produce U."
+      "valid_card": {
+        "card_type": "Mountain",
+        "type": "Typed"
       }
     },
     {
+      "description": "If tapped for mana, Forests produce B.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Forest",
-        "Secondary": "True",
-        "Description": "If tapped for mana, Forests produce B.",
-        "ReplaceWith": "ProduceB"
+      "valid_card": {
+        "card_type": "Forest",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

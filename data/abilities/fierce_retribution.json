@@ -2,45 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
-      },
       "cost": null,
+      "description": "Destroy target [attacking] creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking creature",
-        "SpellDescription": "Destroy target [attacking] creature."
-      }
+      "target_prompt": "Select target attacking creature"
     },
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 W"
+        "cost": "5 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Cleave",
-        "CostDesc": "{5}{W}",
-        "NonBasicSpell": "True",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
-      }
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

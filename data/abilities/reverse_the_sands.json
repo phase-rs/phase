@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "ChoiceAmount": "Any",
-          "PlayerChoices": "Player",
-          "Redistribute": "True",
-          "SpellDescription": "Redistribute any number of players' life totals. (Each of those players gets one life total back.)",
-          "ChoicePrompt": "Choose any number of players"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChoiceAmount": "Any",
-        "PlayerChoices": "Player",
-        "Redistribute": "True",
-        "SpellDescription": "Redistribute any number of players' life totals. (Each of those players gets one life total back.)",
-        "ChoicePrompt": "Choose any number of players"
-      }
+      "description": "Redistribute any number of players' life totals. (Each of those players gets one life total back.)",
+      "effect": {
+        "description": "Redistribute any number of players' life totals. (Each of those players gets one life total back.)",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

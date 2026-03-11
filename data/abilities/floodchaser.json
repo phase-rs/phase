@@ -2,50 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Island"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/P1P1>"
+            "cost": "SubCounter<1/P1P1>",
+            "type": "Mana"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target land becomes an Island until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Island"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveLandTypes": "True",
-        "SpellDescription": "Target land becomes an Island until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless defending player controls an Island.",
-        "ValidCard": "Card.Self",
-        "UnlessDefender": "controlsIsland"
-      }
+      "description": "CARDNAME can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

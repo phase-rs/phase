@@ -1,39 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Spirit",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Spirits you control get +X/+0, where X is NICKNAME's intensity.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create a 1/1 white and black Spirit creature token with flying. NICKNAME intensifies by 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When NICKNAME enters, create a 1/1 white and black Spirit creature token with flying. NICKNAME intensifies by 1.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, you may exile NICKNAME. If you do, at the beginning of your next upkeep, return NICKNAME to the battlefield under its owner's control and it gains haste.",
       "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigExile",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, you may exile NICKNAME. If you do, at the beginning of your next upkeep, return NICKNAME to the battlefield under its owner's control and it gains haste.",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Spirits you control get +X/+0, where X is NICKNAME's intensity.",
-        "AddPower": "X",
-        "Affected": "Spirit.YouCtrl"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, if it had no time counters on it, you may search your library for an enchantment card, put it onto the battlefield, then shuffle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBReturn",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, if it had no time counters on it, you may search your library for an enchantment card, put it onto the battlefield, then shuffle.",
-        "ValidCard": "Card.Self+counters_EQ0_TIME",
-        "OptionalDecider": "TriggeredCardController",
-        "Origin": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

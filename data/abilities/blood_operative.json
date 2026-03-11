@@ -1,32 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may exile target card from a graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you may exile target card from a graveyard.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeZone",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you surveil, if CARDNAME is in your graveyard, you may pay 3 life. If you do, return CARDNAME to your hand.",
       "mode": "Surveil",
-      "params": {
-        "TriggerDescription": "Whenever you surveil, if CARDNAME is in your graveyard, you may pay 3 life. If you do, return CARDNAME to your hand.",
-        "PresentPlayer": "You",
-        "Execute": "TrigReturn",
-        "ValidPlayer": "You",
-        "PresentZone": "Graveyard",
-        "TriggerZones": "Graveyard",
-        "IsPresent": "Card.StrictlySelf"
-      }
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

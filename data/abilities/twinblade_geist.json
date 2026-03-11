@@ -1,40 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.EnchantedBy",
-            "AddKeyword": "Double Strike",
-            "Description": "Enchanted creature has double strike."
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "ReplaceWith": "Exile"
-          }
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature has double strike.",
+          "mode": "Continuous",
+          "modifications": [
+            {
+              "keyword": "Double",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Strike",
+              "type": "AddKeyword"
+            }
+          ]
         }
-      ]
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

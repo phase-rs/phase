@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Sweep — Return any number of Mountains you control to their owner's hand. CARDNAME deals damage to target creature equal to twice the number of Mountains returned this way.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "ChangeType": "Mountain.YouCtrl",
-        "SubAbility": "DBDamage",
-        "SpellDescription": "Sweep — Return any number of Mountains you control to their owner's hand. CARDNAME deals damage to target creature equal to twice the number of Mountains returned this way.",
-        "ChangeNum": "X",
-        "Hidden": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

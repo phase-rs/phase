@@ -1,24 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.ControlledBy Opponent.castSpellThisTurn",
-        "Description": "Each opponent who cast a spell this turn can't attack with creatures."
-      }
+      "description": "Each opponent who cast a spell this turn can't attack with creatures.",
+      "mode": "CantAttack"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Each opponent who attacked with a creature this turn can't cast spells.",
-        "ValidCard": "Card",
-        "Caster": "Opponent.attackedWithCreaturesThisTurn"
-      }
+      "description": "Each opponent who attacked with a creature this turn can't cast spells.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

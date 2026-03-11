@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Ninja",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Unblocked attacking Ninjas you control have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Ninja.attacking+unblocked+YouCtrl",
-        "AddKeyword": "Lifelink",
-        "Description": "Unblocked attacking Ninjas you control have lifelink."
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,21 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell, if it's the first instant spell, the first sorcery spell, or the first Otter spell other than NICKNAME you've cast this turn, you may have target opponent draw a card. If you do, copy that spell. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "OptionalDecider": "You",
-        "ActivatorThisTurnCastEach": "EQ1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell, if it's the first instant spell, the first sorcery spell, or the first Otter spell other than NICKNAME you've cast this turn, you may have target opponent draw a card. If you do, copy that spell. You may choose new targets for the copy.",
-        "ValidCard": "Instant,Sorcery,Otter.!CastSaSource",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery,Otter",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

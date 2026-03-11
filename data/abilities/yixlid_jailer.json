@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Cards in graveyards lose all abilities.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card",
-        "RemoveAllAbilities": "True",
-        "Description": "Cards in graveyards lose all abilities.",
-        "AffectedZone": "Graveyard"
-      }
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

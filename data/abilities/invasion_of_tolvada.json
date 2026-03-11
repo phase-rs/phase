@@ -1,53 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, return target nonbattle permanent card from your graveyard to the battlefield.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, return target nonbattle permanent card from your graveyard to the battlefield.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigChangeZone",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "Phase": "End of Turn",
-            "TriggerDescription": "At the beginning of your end step, create a 1/1 white and black Spirit creature token with flying.",
-            "ValidPlayer": "You"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Token"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Creature tokens you control get +1/+0 and have lifelink.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.token+YouCtrl",
-            "AddPower": "1",
-            "AddKeyword": "Lifelink",
-            "Description": "Creature tokens you control get +1/+0 and have lifelink."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "keyword": "Lifelink",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, create a 1/1 white and black Spirit creature token with flying.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

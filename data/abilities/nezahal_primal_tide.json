@@ -2,61 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<3/Card>",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME. Return it to the battlefield tapped under its owner's control at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<3/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Exile CARDNAME. Return it to the battlefield tapped under its owner's control at the beginning of the next end step.",
-        "RememberChanged": "True",
-        "Defined": "Self",
-        "SubAbility": "DelTrig"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.nonCreature",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent casts a noncreature spell, draw a card.",
-        "Execute": "TrigDraw"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "SetMaxHandSize": "Unlimited",
-        "Description": "You have no maximum hand size."
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You have no maximum hand size.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell",
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "Description": "This spell can't be countered."
+      "description": "Whenever an opponent casts a noncreature spell, draw a card.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

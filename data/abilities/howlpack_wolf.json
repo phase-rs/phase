@@ -1,18 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME can't block unless you control another Wolf or Werewolf.",
-        "IsPresent": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Wolf",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Werewolf.Other"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't block unless you control another Wolf or Werewolf.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

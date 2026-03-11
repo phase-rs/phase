@@ -1,28 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When equipped creature deals damage to a creature, exile that creature.",
-        "ValidTarget": "Creature",
-        "ValidSource": "Card.EquippedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +5/+5.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "5",
-        "Description": "Equipped creature gets +5/+5.",
-        "AddToughness": "5",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 5
+        },
+        {
+          "type": "AddToughness",
+          "value": 5
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When equipped creature deals damage to a creature, exile that creature.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

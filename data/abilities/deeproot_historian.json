@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Merfolk",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn,Druid.YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Merfolk and Druid cards in your graveyard have retrace. (You may cast cards with retrace from your graveyard by discarding a land card in addition to paying their other costs.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Merfolk and Druid cards in your graveyard have retrace. (You may cast cards with retrace from your graveyard by discarding a land card in addition to paying their other costs.)",
-        "AffectedZone": "Graveyard",
-        "Affected": "Merfolk.YouOwn,Druid.YouOwn",
-        "AddKeyword": "Retrace"
-      }
+      "modifications": [
+        {
+          "keyword": "Retrace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

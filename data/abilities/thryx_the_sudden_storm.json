@@ -1,31 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Spells you cast with mana value 5 or greater cost {1} less to cast and can't be countered.",
-        "Activator": "You",
-        "Amount": "1",
-        "Type": "Spell",
-        "ValidCard": "Card.cmcGE5"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Spells you cast with mana value 5 or greater cost {1} less to cast and can't be countered.",
       "event": "Counter",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen",
-        "ValidCard": "Card.cmcGE5+wasCastByYou",
-        "ValidSA": "Spell",
-        "Secondary": "True",
-        "Description": "Spells you cast with mana value 5 or greater cost {1} less to cast and can't be countered."
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Spells you cast with mana value 5 or greater cost {1} less to cast and can't be countered.",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

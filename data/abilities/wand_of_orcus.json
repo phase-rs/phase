@@ -1,39 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks or blocks, it and Zombies you control gain deathtouch until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, it and Zombies you control gain deathtouch until end of turn.",
-        "Execute": "TrigPumpA",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever enchanted creature attacks or blocks, it and Zombies you control gain deathtouch until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.EquippedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPumpB",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, it and Zombies you control gain deathtouch until end of turn."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, create that many 2/2 black Zombie creature tokens.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.EquippedBy",
-        "Execute": "TrigToken",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, create that many 2/2 black Zombie creature tokens.",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

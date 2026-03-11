@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+3 and has \"{R}: CARDNAME gets +1/+0 until end of turn.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Pump",
-        "AddToughness": "3",
-        "Condition": "Threshold",
-        "Affected": "Card.Self",
-        "AddPower": "3",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+3 and has \"{R}: CARDNAME gets +1/+0 until end of turn.\""
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "ability": "Pump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control exactly two legendary permanents named Syr Joshua and Syr Saxon, the \"legend rule\" doesn't apply to them.",
       "mode": {
         "Other": "IgnoreLegendRule"
-      },
-      "params": {
-        "ValidCard": "Permanent.YouCtrl+Legendary+namedSyr Joshua and Syr Saxon",
-        "IsPresent": "Permanent.Legendary+YouCtrl+namedSyr Joshua and Syr Saxon",
-        "PresentCompare": "EQ2",
-        "Description": "If you control exactly two legendary permanents named Syr Joshua and Syr Saxon, the \"legend rule\" doesn't apply to them."
       }
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other creature you control named Syr Joshua and Syr Saxon has battle cry.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+Other+namedSyr Joshua and Syr Saxon",
-        "Description": "Each other creature you control named Syr Joshua and Syr Saxon has battle cry.",
-        "AddKeyword": "Battle Cry"
-      }
+      "modifications": [
+        {
+          "keyword": "Battle",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Cry",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

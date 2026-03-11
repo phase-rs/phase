@@ -1,27 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ControlledBy Player.NotedForWar"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Creatures controlled by players who chose war get +3/+0.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Battlefield",
-        "Description": "Creatures controlled by players who chose war get +3/+0.",
-        "AddPower": "3",
-        "Affected": "Creature.ControlledBy Player.NotedForWar"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ControlledBy Player.NotedForPeace"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Creatures controlled by players who chose peace get +0/+3.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures controlled by players who chose peace get +0/+3.",
-        "AddToughness": "3",
-        "Affected": "Creature.ControlledBy Player.NotedForPeace",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

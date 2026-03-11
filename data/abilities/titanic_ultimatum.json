@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": 5,
-        "toughness": 5,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "First Strike & Trample & Lifelink",
-        "SpellDescription": "Until end of turn, creatures you control get +5/+5 and gain first strike, trample, and lifelink.",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Until end of turn, creatures you control get +5/+5 and gain first strike, trample, and lifelink.",
+      "effect": {
+        "power": 5,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 5,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,59 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target legendary creature",
-          "ExileOnMoved": "Battlefield",
-          "AILogic": "Pump",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "SpellDescription": "Target legendary creature can't be blocked this turn.",
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "Unblockable",
-          "ValidTgts": "Creature.Legendary",
-          "PrecostDesc": "Affirmative —"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target legendary creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target legendary creature",
-        "ExileOnMoved": "Battlefield",
-        "AILogic": "Pump",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "SpellDescription": "Target legendary creature can't be blocked this turn.",
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "Unblockable",
-        "ValidTgts": "Creature.Legendary",
-        "PrecostDesc": "Affirmative —"
-      }
+      "target_prompt": "Select target legendary creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Negative — As long as CARDNAME is untapped, other legendary creatures you control have ward {1}.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Ward:1",
-        "IsPresent": "Card.Self+untapped",
-        "Affected": "Creature.Other+Legendary+YouCtrl",
-        "Description": "Negative — As long as CARDNAME is untapped, other legendary creatures you control have ward {1}."
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

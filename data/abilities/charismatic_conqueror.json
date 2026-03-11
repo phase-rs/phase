@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact or creature enters untapped and under an opponent's control, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "ValidCard": "Creature.OppCtrl+untapped,Artifact.OppCtrl+untapped",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever an artifact or creature enters untapped and under an opponent's control, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

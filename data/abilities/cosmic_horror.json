@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, destroy CARDNAME unless you pay {3}{B}{B}{B}. If CARDNAME is destroyed this way, it deals 7 damage to you.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, destroy CARDNAME unless you pay {3}{B}{B}{B}. If CARDNAME is destroyed this way, it deals 7 damage to you.",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,50 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters the battlefield, create a Huntsman Role token attached to another target creature you control. (Enchanted creature gets +1/+1 and has \"{T}: Add {G}.\")",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken",
-            "TriggerDescription": "When CARDNAME enters the battlefield, create a Huntsman Role token attached to another target creature you control. (Enchanted creature gets +1/+1 and has \"{T}: Add {G}.\")"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Mill the top four cards of your library. Return a creature or planeswalker card milled this way to your hand.",
           "effect": {
-            "type": "Mill",
             "count": 4,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBChangeZone",
-            "SpellDescription": "Mill the top four cards of your library. Return a creature or planeswalker card milled this way to your hand.",
-            "RememberMilled": "True"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

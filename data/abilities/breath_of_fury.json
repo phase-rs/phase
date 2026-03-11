@@ -1,20 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "When enchanted creature deals combat damage to a player, sacrifice it and attach CARDNAME to a creature you control. If you do, untap all creatures you control and after this phase, there is an additional combat phase.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigSacrifice",
-        "CombatDamage": "True",
-        "TriggerDescription": "When enchanted creature deals combat damage to a player, sacrifice it and attach CARDNAME to a creature you control. If you do, untap all creatures you control and after this phase, there is an additional combat phase.",
-        "ValidSource": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

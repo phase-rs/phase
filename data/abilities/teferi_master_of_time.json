@@ -2,85 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card, then discard a card.",
-        "Planeswalker": "True",
-        "SubAbility": "DBDiscard"
-      }
+      "description": "Draw a card, then discard a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "Planeswalker": "True",
-          "TgtPrompt": "Select target creature you don't control",
-          "ValidTgts": "Creature.YouDontCtrl",
-          "IsCurse": "True",
-          "SpellDescription": "Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controllers's next turn.)"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
+      "description": "Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controllers's next turn.)",
+      "effect": {
+        "description": "Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controllers's next turn.)",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creature you don't control",
-        "ValidTgts": "Creature.YouDontCtrl",
-        "IsCurse": "True",
-        "SpellDescription": "Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controllers's next turn.)"
-      }
+      "target_prompt": "Select target creature you don't control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AddTurn",
-        "params": {
-          "NumTurns": "2",
-          "SpellDescription": "Take two extra turns after this one.",
-          "Ultimate": "True",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NumTurns": "2",
-        "SpellDescription": "Take two extra turns after this one.",
-        "Ultimate": "True",
-        "Planeswalker": "True"
-      }
+      "description": "Take two extra turns after this one.",
+      "effect": {
+        "description": "Take two extra turns after this one.",
+        "name": "AddTurn",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Activated.Loyalty",
-        "Description": "You may activate loyalty abilities of CARDNAME on any player's turn any time you could cast an instant.",
-        "Caster": "You",
-        "ValidCard": "Card.Self"
-      }
+      "description": "You may activate loyalty abilities of CARDNAME on any player's turn any time you could cast an instant.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

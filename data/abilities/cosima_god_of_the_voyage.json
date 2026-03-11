@@ -1,45 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, you may exile NICKNAME. If you do, it gains \"Whenever a land you control enters, if NICKNAME is exiled, you may put a voyage counter on it. If you don't, return NICKNAME to the battlefield with X +1/+1 counters on it and draw X cards, where X is the number of voyage counters on it.\"",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your upkeep, you may exile NICKNAME. If you do, it gains \"Whenever a land you control enters, if NICKNAME is exiled, you may put a voyage counter on it. If you don't, return NICKNAME to the battlefield with X +1/+1 counters on it and draw X cards, where X is the number of voyage counters on it.\"",
-            "OptionalDecider": "You",
-            "ValidPlayer": "You",
-            "Phase": "Upkeep",
-            "Execute": "TrigExile",
-            "TriggerZones": "Battlefield"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever a Vehicle you control deals combat damage to a player, that player exiles that many cards from the top of their library. You may play lands from among those cards for as long as they remain exiled.",
           "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Vehicle.YouCtrl",
-            "CombatDamage": "True",
-            "TriggerZones": "Battlefield",
-            "ValidTarget": "Player",
-            "Execute": "TrigExile",
-            "TriggerDescription": "Whenever a Vehicle you control deals combat damage to a player, that player exiles that many cards from the top of their library. You may play lands from among those cards for as long as they remain exiled."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Vehicle",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

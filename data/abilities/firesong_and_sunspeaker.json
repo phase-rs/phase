@@ -1,30 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "LifeGained",
-      "params": {
-        "Spell": "True",
-        "ValidPlayer": "You",
-        "Execute": "TrigDealDamage",
-        "ValidSource": "Instant.White,Sorcery.White",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a white instant or sorcery spell causes you to gain life, CARDNAME deals 3 damage to target creature or player."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.Red"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Red instant and sorcery spells you control have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Red instant and sorcery spells you control have lifelink.",
-        "AffectedZone": "Stack",
-        "Affected": "Instant.Red+YouCtrl,Sorcery.Red+YouCtrl",
-        "AddKeyword": "Lifelink"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a white instant or sorcery spell causes you to gain life, CARDNAME deals 3 damage to target creature or player.",
+      "mode": "LifeGained",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White,Sorcery.White"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

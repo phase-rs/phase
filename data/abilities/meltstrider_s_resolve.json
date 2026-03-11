@@ -1,39 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigFight",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this Aura enters, enchanted creature fights up to one target creature an opponent controls. (Each deals damage equal to its power to the other.)",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +0/+2 and can't be blocked by more than one creature.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +0/+2 and can't be blocked by more than one creature."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "description": "Enchanted creature gets +0/+2 and can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Description": "Enchanted creature gets +0/+2 and can't be blocked by more than one creature.",
-        "ValidCard": "Creature.EnchantedBy",
-        "Max": "1",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Aura enters, enchanted creature fights up to one target creature an opponent controls. (Each deals damage equal to its power to the other.)",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

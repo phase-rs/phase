@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
-      },
       "cost": null,
+      "description": "Target artifact or creature becomes a copy of another target artifact or creature.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBClone",
-        "StackDescription": "{c:ThisTargetedCard}",
-        "SpellDescription": "Target artifact or creature becomes a copy of another target artifact or creature.",
-        "TgtPrompt": "Select target artifact or creature to polymorph"
-      }
+      "target_prompt": "Select target artifact or creature to polymorph"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

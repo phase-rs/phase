@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCause": "Creature",
-        "Origin": "Battlefield",
-        "ValidCard": "Permanent.YouCtrl",
-        "Destination": "Graveyard",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "Description": "If a creature dying causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."
-      }
+      "description": "If a creature dying causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creature tokens you control have vigilance and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creature tokens you control have vigilance and lifelink.",
-        "AddKeyword": "Vigilance & Lifelink",
-        "Affected": "Creature.token+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

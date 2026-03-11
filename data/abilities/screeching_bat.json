@@ -1,45 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigTransform",
-            "TriggerDescription": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "ValidPlayer": "You",
-            "OptionalDecider": "You"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "ValidPlayer": "You",
-            "OptionalDecider": "You",
-            "TriggerDescription": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
-            "Execute": "TrigTransform"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,40 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Ward:1",
-            "Description": "Each creature you control has ward {1}.",
-            "Affected": "Creature.YouCtrl"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self"
-          }
+          "affected": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "description": "Each creature you control has ward {1}.",
+          "mode": "Continuous",
+          "modifications": [
+            {
+              "keyword": "Ward:1",
+              "type": "AddKeyword"
+            }
+          ]
         }
-      ]
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

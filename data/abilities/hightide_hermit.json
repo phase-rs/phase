@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-          "StaticAbilities": "CanAttack",
-          "Duration": "UntilHostLeavesPlayOrEOT"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<2>"
+        "cost": "PayEnergy<2>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-        "StaticAbilities": "CanAttack",
-        "Duration": "UntilHostLeavesPlayOrEOT"
-      }
+      "description": "CARDNAME can attack this turn as though it didn't have defender.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get {E}{E}{E}{E} (four energy counters).",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E}{E} (four energy counters).",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigEnergy",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Vehicle",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Vehicles you control have flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Vehicle.YouCtrl",
-        "Description": "Vehicles you control have flying.",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

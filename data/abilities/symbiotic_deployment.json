@@ -2,46 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<2/Creature>"
+            "cost": "tapXType<2/Creature>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card.",
-        "Defined": "You"
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Skip your draw step.",
       "event": {
         "Other": "BeginPhase"
-      },
-      "params": {
-        "Description": "Skip your draw step.",
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "Phase": "Draw"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

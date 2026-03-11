@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, exile up to one target nonland permanent and up to one target nonland permanent card from a graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMarkBattlefield",
-        "TriggerDescription": "When NICKNAME enters, exile up to one target nonland permanent and up to one target nonland permanent card from a graveyard."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When NICKNAME dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands.",
-        "Execute": "TrigChangeZone",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,46 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap another target permanent.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target permanent",
-        "SpellDescription": "Untap another target permanent."
-      }
+      "target_prompt": "Select another target permanent"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Legendary+Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Untap two other target legendary creatures.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Legendary"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select two other legendary creatures",
-        "SpellDescription": "Untap two other target legendary creatures.",
-        "TargetMin": "2",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select two other legendary creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
-        "ValidSA": "Spell",
-        "ValidPlayer": "You",
-        "Cost": "0",
-        "ValidCard": "Creature.Zombie"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

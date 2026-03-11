@@ -2,37 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player sacrifices half the permanents they control, rounded down.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "CurseX",
-        "SacValid": "Permanent",
-        "SpellDescription": "Target player sacrifices half the permanents they control, rounded down."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, if CARDNAME is suspended, that player may sacrifice a permanent. If the player does, put two time counters on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigCursePayUP",
-        "Phase": "Upkeep",
-        "IsPresent": "Card.suspended+Self",
-        "PresentZone": "Exile",
-        "TriggerDescription": "At the beginning of each player's upkeep, if CARDNAME is suspended, that player may sacrifice a permanent. If the player does, put two time counters on CARDNAME.",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Exile"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Exile"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

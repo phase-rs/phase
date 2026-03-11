@@ -2,45 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "SorcerySpeed": "True",
-          "SpellDescription": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
-          "Conjure": "True",
-          "Name": "Verdant Dread",
-          "Zone": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 G G"
+        "cost": "3 G G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
-        "Conjure": "True",
-        "Name": "Verdant Dread",
-        "Zone": "Battlefield"
-      }
+      "description": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "description": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another card named Verdant Dread enters, manifest dread.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another card named Verdant Dread enters, manifest dread.",
-        "Execute": "TrigManifestDread",
-        "ValidCard": "Card.Self,Card.namedVerdant Dread"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Card.namedVerdant Dread"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

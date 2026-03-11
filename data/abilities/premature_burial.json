@@ -2,24 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack+EnteredSinceYourLastTurn"
-        }
-      },
       "cost": null,
+      "description": "Destroy target nonblack creature that entered since your last turn ended.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "EnteredSinceYourLastTurn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target nonblack creature that entered since your last turn ended.",
-        "TgtPrompt": "Select target nonblack creature that entered since your last turn ended"
-      }
+      "target_prompt": "Select target nonblack creature that entered since your last turn ended"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

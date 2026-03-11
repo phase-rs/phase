@@ -1,69 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PumpAll",
-            "power": 2,
-            "toughness": 2,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Creatures you control get +2/+2 until end of turn.",
-            "ValidCards": "Creature.YouCtrl"
-          }
+          "description": "Creatures you control get +2/+2 until end of turn.",
+          "effect": {
+            "power": 2,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 2,
+            "type": "PumpAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "W",
-            "params": {
-              "SpellDescription": "Add {W}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {W}."
+          "description": "Add {W}.",
+          "effect": {
+            "produced": [
+              "White"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Description": "CARDNAME enters tapped.",
-            "ReplaceWith": "ETBTapped",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "ReplacementResult": "Updated"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

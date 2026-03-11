@@ -2,34 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a Werewolf. Put two +1/+1 counters on it and you draw a card. Activate only once.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [
-          "Werewolf"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Werewolf"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCounter",
-        "Duration": "Permanent",
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "CARDNAME becomes a Werewolf. Put two +1/+1 counters on it and you draw a card. Activate only once.",
-        "GameActivationLimit": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

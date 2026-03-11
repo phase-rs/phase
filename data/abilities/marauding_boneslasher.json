@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "IsPresent": "Zombie.Other+YouCtrl",
-        "Description": "CARDNAME can't block unless you control another Zombie.",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "EQ0"
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Zombie",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't block unless you control another Zombie.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

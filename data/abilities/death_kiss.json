@@ -2,47 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X X R",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X X R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Monstrosity": "X"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature an opponent controls attacks one of your opponents, double its power until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature an opponent controls attacks one of your opponents, double its power until end of turn.",
-        "Execute": "TrigPump",
-        "Attacked": "Opponent",
-        "ValidCard": "Creature.OppCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME becomes monstrous, goad up to X target creatures your opponents control.",
       "mode": "BecomeMonstrous",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigGoad",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME becomes monstrous, goad up to X target creatures your opponents control."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

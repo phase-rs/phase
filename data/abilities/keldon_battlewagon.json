@@ -2,44 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Creature>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +X/+0 until end of turn, where X is the power of the creature tapped this way.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +X/+0 until end of turn, where X is the power of the creature tapped this way."
-      }
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME attacks, sacrifice it at end of combat.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DelTrig",
-        "TriggerDescription": "When CARDNAME attacks, sacrifice it at end of combat."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "CARDNAME can't block.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

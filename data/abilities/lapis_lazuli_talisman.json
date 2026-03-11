@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a blue spell, you may pay {3}. If you do, untap target permanent.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever a player casts a blue spell, you may pay {3}. If you do, untap target permanent.",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Blue",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

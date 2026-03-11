@@ -2,35 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each opponent sacrifices a creature or planeswalker, then discards a card. You return a creature or planeswalker card from your graveyard to your hand, then draw a card.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Creature,Planeswalker",
-        "SpellDescription": "Each opponent sacrifices a creature or planeswalker, then discards a card. You return a creature or planeswalker card from your graveyard to your hand, then draw a card.",
-        "Defined": "Player.Opponent",
-        "SubAbility": "DBDiscard"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast a Bolas planeswalker spell, exile CARDNAME from your graveyard. That planeswalker enters with an additional loyalty counter on it.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "ValidCard": "Planeswalker.Bolas",
-        "Execute": "DBExileSelf",
-        "TriggerDescription": "When you cast a Bolas planeswalker spell, exile CARDNAME from your graveyard. That planeswalker enters with an additional loyalty counter on it."
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Planeswalker",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Bolas"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

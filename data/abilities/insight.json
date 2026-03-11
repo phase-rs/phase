@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a green spell, you draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever an opponent casts a green spell, you draw a card.",
-        "ValidCard": "Card.Green",
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

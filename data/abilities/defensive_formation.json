@@ -1,17 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "Rather than the attacking player, you assign the combat damage of each creature attacking you. You can divide that creature's combat damage as you choose among any of the creatures blocking it.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "You",
-        "AddKeyword": "You assign combat damage of each creature attacking you.",
-        "Description": "Rather than the attacking player, you assign the combat damage of each creature attacking you. You can divide that creature's combat damage as you choose among any of the creatures blocking it."
-      }
+      "modifications": [
+        {
+          "keyword": "You",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "assign",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "combat",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "damage",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "each",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "creature",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "attacking",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "you.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

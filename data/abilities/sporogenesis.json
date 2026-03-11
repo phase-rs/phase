@@ -1,41 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a fungus counter on target nontoken creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a fungus counter on target nontoken creature.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever a creature with a fungus counter on it dies, create a 1/1 green Saproling creature token for each fungus counter on that creature.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, remove all fungus counters from all creatures.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.counters_GE1_FUNGUS",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a creature with a fungus counter on it dies, create a 1/1 green Saproling creature token for each fungus counter on that creature.",
-        "Origin": "Battlefield"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigRemove",
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, remove all fungus counters from all creatures.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

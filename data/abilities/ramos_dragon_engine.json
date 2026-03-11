@@ -2,38 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W W U U B B R R G G",
-        "params": {
-          "ActivationLimit": "1",
-          "SpellDescription": "Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Activate only once each turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<5/P1P1/NICKNAME>"
+        "cost": "SubCounter<5/P1P1/NICKNAME>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Activate only once each turn."
-      }
+      "description": "Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Activate only once each turn.",
+      "effect": {
+        "produced": [
+          "White",
+          "White",
+          "Blue",
+          "Blue",
+          "Black",
+          "Black",
+          "Red",
+          "Red",
+          "Green",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell, put a +1/+1 counter on CARDNAME for each of that spell's colors.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a spell, put a +1/+1 counter on CARDNAME for each of that spell's colors."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

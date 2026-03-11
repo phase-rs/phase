@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"Pay 2 life, Return this permanent to its owner's hand.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver",
-        "Description": "All Slivers have \"Pay 2 life, Return this permanent to its owner's hand.\"",
-        "AddAbility": "Bounce"
-      }
+      "modifications": [
+        {
+          "ability": "Bounce",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

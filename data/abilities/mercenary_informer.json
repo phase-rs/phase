@@ -2,42 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Mercenary"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
+      "description": "Put target Mercenary on the bottom of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Mercenary",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "-1",
-        "SpellDescription": "Put target Mercenary on the bottom of its owner's library.",
-        "TgtPrompt": "Select target Mercenary",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target Mercenary"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of black spells or abilities from black sources.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Description": "CARDNAME can't be the target of black spells or abilities from black sources.",
-        "ValidSource": "Card.Black"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

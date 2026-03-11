@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. CARDNAME becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDigUntil",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. CARDNAME becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. CARDNAME becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. CARDNAME becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDigUntil",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 R",
+        "type": "Mana"
+      },
+      "description": "You may put an artifact card from your hand onto the battlefield. The artifact gains haste. Sacrifice it at the beginning of the next end step.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ForgetOtherRemembered": "True",
-        "RememberChanged": "True",
-        "AILogic": "BeforeCombat",
-        "SpellDescription": "You may put an artifact card from your hand onto the battlefield. The artifact gains haste. Sacrifice it at the beginning of the next end step.",
-        "ChangeType": "Artifact.YouCtrl",
-        "SubAbility": "DBPump"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

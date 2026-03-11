@@ -2,45 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add one mana of any color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of any color."
-      }
+      "description": "Add one mana of any color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ForgetOnCast": "Card.ChosenType+YouCtrl",
-          "SpellDescription": "The next spell of the chosen type you cast this turn can be cast as though it had flash.",
-          "StaticAbilities": "QuickenStA"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ForgetOnCast": "Card.ChosenType+YouCtrl",
-        "SpellDescription": "The next spell of the chosen type you cast this turn can be cast as though it had flash.",
-        "StaticAbilities": "QuickenStA"
-      }
+      "description": "The next spell of the chosen type you cast this turn can be cast as though it had flash.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,53 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "G",
+        "type": "Mana"
+      },
+      "description": "Target land becomes a 1/1 creature until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 1,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
         "toughness": 1,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target land becomes a 1/1 creature until end of turn. It's still a land."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 3,
-        "toughness": 3,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G G G"
+        "cost": "2 G G G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures you control get +3/+3 and gain trample until end of turn.",
-        "KW": "Trample",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Creatures you control get +3/+3 and gain trample until end of turn.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 3,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

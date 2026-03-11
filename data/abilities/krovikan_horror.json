@@ -2,55 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "1",
+            "type": "Mana"
+          },
+          {
+            "target": {
+              "type": "None"
+            },
+            "type": "Sacrifice"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "CARDNAME deals 1 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "1"
-          },
-          {
-            "type": "Sacrifice",
-            "target": {
-              "type": "None"
-            }
-          }
-        ]
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 1 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step, if CARDNAME is in your graveyard with a creature card directly above it, you may return CARDNAME to your hand.",
       "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Graveyard",
-        "PresentCompare": "EQ1",
-        "PresentZone": "Graveyard",
-        "TriggerDescription": "At the beginning of the end step, if CARDNAME is in your graveyard with a creature card directly above it, you may return CARDNAME to your hand.",
-        "ValidPlayer": "Player",
-        "Execute": "TrigReturn",
-        "IsPresent": "Creature.YouOwn+DirectlyAbove",
-        "Phase": "End of Turn"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

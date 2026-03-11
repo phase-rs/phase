@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you tap a permanent for mana, it produces twice as much of that mana instead.",
       "event": {
         "Other": "ProduceMana"
       },
-      "params": {
-        "Description": "If you tap a permanent for mana, it produces twice as much of that mana instead.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Permanent",
-        "ReplaceWith": "ProduceTwice",
-        "ValidActivator": "You"
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

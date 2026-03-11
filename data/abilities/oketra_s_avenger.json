@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, prevent all combat damage that would be dealt to it this turn. (An exerted creature won't untap during your next untap step.)",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "Description": "You may exert CARDNAME as it attacks. When you do, prevent all combat damage that would be dealt to it this turn. (An exerted creature won't untap during your next untap step.)",
-        "ValidCard": "Card.Self",
-        "Trigger": "TrigPump",
-        "Cost": "Exert<1/CARDNAME>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,33 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Cast this spell only during combat after blockers are declared. Create a 1/1 green Saproling creature token that's blocking target creature attacking you. Draw a card.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_saproling",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Declare Blockers->EndCombat",
-        "TokenOwner": "You",
-        "ActivationAfterBlockers": "True",
-        "SubAbility": "DBDraw",
-        "StackDescription": "SpellDescription",
-        "TgtPrompt": "Select target creature attacking you",
-        "ValidTgts": "Creature.attackingYou",
-        "TokenBlocking": "Targeted",
-        "SpellDescription": "Cast this spell only during combat after blockers are declared. Create a 1/1 green Saproling creature token that's blocking target creature attacking you. Draw a card."
-      }
+      "target_prompt": "Select target creature attacking you"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

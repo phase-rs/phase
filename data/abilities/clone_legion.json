@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "AILogic": "DuplicatePerms",
-          "ValidTgts": "Player",
-          "Defined": "Valid Creature.TargetedPlayerCtrl",
-          "SpellDescription": "For each creature target player controls, create a token that's a copy of that creature.",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "DuplicatePerms",
-        "ValidTgts": "Player",
-        "Defined": "Valid Creature.TargetedPlayerCtrl",
-        "SpellDescription": "For each creature target player controls, create a token that's a copy of that creature.",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "For each creature target player controls, create a token that's a copy of that creature.",
+      "effect": {
+        "description": "For each creature target player controls, create a token that's a copy of that creature.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

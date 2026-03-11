@@ -2,38 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "DIVINITY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.ChosenType+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
+      "description": "Put a divinity counter on target creature you control of the chosen type.",
+      "effect": {
+        "count": 1,
+        "counter_type": "DIVINITY",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "ChosenType"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a divinity counter on target creature you control of the chosen type.",
-        "TgtPrompt": "Select target creature you control of the chosen type"
-      }
+      "target_prompt": "Select target creature you control of the chosen type"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control with a divinity counter on it has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control with a divinity counter on it has indestructible.",
-        "Affected": "Creature.YouCtrl+counters_GE1_DIVINITY",
-        "AddKeyword": "Indestructible"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

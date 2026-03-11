@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player discards two cards. Ninjas and Rogues you control gain menace until end of turn.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select a player",
-        "SpellDescription": "Target player discards two cards. Ninjas and Rogues you control gain menace until end of turn.",
-        "Mode": "TgtChoose",
-        "StackDescription": "{p:Targeted} discards two cards.",
-        "SubAbility": "DBPumpAll"
-      }
+      "target_prompt": "Select a player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

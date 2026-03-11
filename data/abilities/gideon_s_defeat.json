@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.White+attacking,Creature.White+blocking"
-        }
-      },
       "cost": null,
+      "description": "Exile target white creature that's attacking or blocking. If it was a Gideon planeswalker, you gain 5 life.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target white creature that's attacking or blocking",
-        "SpellDescription": "Exile target white creature that's attacking or blocking. If it was a Gideon planeswalker, you gain 5 life.",
-        "SubAbility": "DBGainLife"
-      }
+      "target_prompt": "Select target white creature that's attacking or blocking"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

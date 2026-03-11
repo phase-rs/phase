@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you cast a spell, if CARDNAME is in your graveyard, put a flame counter on CARDNAME for each {R} in that spell's mana cost. If CARDNAME has five or more flame counters on it, return it to the battlefield and it perpetually gets +1/+1.",
-        "NoResolvingCheck": "True",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Graveyard",
-        "ValidCard": "Card"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a spell, if CARDNAME is in your graveyard, put a flame counter on CARDNAME for each {R} in that spell's mana cost. If CARDNAME has five or more flame counters on it, return it to the battlefield and it perpetually gets +1/+1.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

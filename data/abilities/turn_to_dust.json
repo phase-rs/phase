@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Equipment"
-        }
-      },
       "cost": null,
+      "description": "Destroy target Equipment. Add {G}.",
+      "effect": {
+        "target": {
+          "card_type": "Equipment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target Equipment. Add {G}.",
-        "SubAbility": "DBMana",
-        "TgtPrompt": "Select target Equipment"
-      }
+      "target_prompt": "Select target Equipment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

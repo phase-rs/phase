@@ -1,41 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Colorless creatures you control get +2/+2.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you tap a permanent for {C}, add an additional {C}.",
       "mode": "TapsForMana",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigMana",
-        "Static": "True",
-        "TriggerDescription": "Whenever you tap a permanent for {C}, add an additional {C}.",
-        "Activator": "You",
-        "ValidCard": "Permanent",
-        "Produced": "C"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a colorless spell, you gain 2 life.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Colorless",
-        "TriggerDescription": "Whenever you cast a colorless spell, you gain 2 life.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Colorless creatures you control get +2/+2.",
-        "Affected": "Creature.Colorless+YouCtrl",
-        "AddToughness": "2",
-        "AddPower": "2"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

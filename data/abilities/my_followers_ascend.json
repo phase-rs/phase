@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, put five +1/+1 counters on a creature you control and it gains flying and vigilance until end of turn. If you control no creatures, instead create a 4/4 colorless Scarecrow artifact creature token with vigilance.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigBranch",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, put five +1/+1 counters on a creature you control and it gains flying and vigilance until end of turn. If you control no creatures, instead create a 4/4 colorless Scarecrow artifact creature token with vigilance."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

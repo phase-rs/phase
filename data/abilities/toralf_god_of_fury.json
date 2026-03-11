@@ -1,49 +1,82 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a creature or planeswalker an opponent controls is dealt excess noncombat damage, NICKNAME deals damage equal to the excess to any target other than that permanent.",
           "mode": "ExcessDamage",
-          "params": {
-            "TriggerDescription": "Whenever a creature or planeswalker an opponent controls is dealt excess noncombat damage, NICKNAME deals damage equal to the excess to any target other than that permanent.",
-            "ValidTarget": "Creature.OppCtrl,Planeswalker.OppCtrl",
-            "CombatDamage": "False",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDamage"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_target": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "OppCtrl,Planeswalker.OppCtrl"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature has \"{1}{R}, {T}, Unattach CARDNAME: It deals 3 damage to any target. Return CARDNAME to it owner's hand.\"",
           "mode": "Continuous",
-          "params": {
-            "AddAbility": "HammerDamage",
-            "Description": "Equipped creature has \"{1}{R}, {T}, Unattach CARDNAME: It deals 3 damage to any target. Return CARDNAME to it owner's hand.\"",
-            "Affected": "Creature.EquippedBy"
-          }
+          "modifications": [
+            {
+              "ability": "HammerDamage",
+              "type": "AddAbility"
+            }
+          ]
         },
         {
+          "affected": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              },
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +3/+0 as long as it's legendary.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Card.EquippedBy+Legendary",
-            "AddPower": "3",
-            "Description": "Equipped creature gets +3/+0 as long as it's legendary."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 3
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

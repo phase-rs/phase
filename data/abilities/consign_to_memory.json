@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": null,
+      "description": "Counter target triggered ability or colorless spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.Colorless,Triggered",
-        "SpellDescription": "Counter target triggered ability or colorless spell.",
-        "TgtPrompt": "Select target triggered ability or colorless spell"
-      }
+      "target_prompt": "Select target triggered ability or colorless spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

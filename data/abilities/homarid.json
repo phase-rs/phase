@@ -1,47 +1,73 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, put a tide counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter"
-      }
-    },
-    {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+counters_GE4_TIDE",
-        "Execute": "TrigRemove",
-        "TriggerDescription": "Whenever there are four or more tide counters on CARDNAME, remove all tide counters from it."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as there is exactly one tide counter on CARDNAME, it gets -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as there is exactly one tide counter on CARDNAME, it gets -1/-1.",
-        "AddToughness": "-1",
-        "Affected": "Card.Self+counters_EQ1_TIDE",
-        "AddPower": "-1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as there are exactly three tide counters on CARDNAME, it gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "As long as there are exactly three tide counters on CARDNAME, it gets +1/+1.",
-        "Affected": "Card.Self+counters_EQ3_TIDE"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, put a tide counter on CARDNAME.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever there are four or more tide counters on CARDNAME, remove all tide counters from it.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

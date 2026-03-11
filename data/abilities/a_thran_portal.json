@@ -1,28 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen type in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddType": "ChosenType",
-        "Description": "CARDNAME is the chosen type in addition to its other types."
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     },
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Cost": "PayLife<1>",
-        "Description": "Mana abilities of CARDNAME cost an additional 1 life to activate.",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Type": "Ability",
-        "ValidSpell": "Activated.ManaAbility"
-      }
+      "description": "Mana abilities of CARDNAME cost an additional 1 life to activate.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

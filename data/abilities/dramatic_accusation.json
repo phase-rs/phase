@@ -2,53 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U U",
+        "type": "Mana"
+      },
+      "description": "Shuffle enchanted creature into its owner's library.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Library",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Shuffle": "True",
-        "Defined": "Enchanted",
-        "SpellDescription": "Shuffle enchanted creature into its owner's library."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "Origin": "Any",
-        "Execute": "TrigTap",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidStepTurnToController": "You"
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LE10",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +2/+1 as long as an opponent has 10 or less life.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LE10",
-        "CheckSVar": "X",
-        "AddToughness": "1",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +2/+1 as long as an opponent has 10 or less life.",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

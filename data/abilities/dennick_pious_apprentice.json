@@ -1,54 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected_zone": "Graveyard",
+          "description": "Cards in graveyards can't be the targets of spells or abilities.",
           "mode": {
             "Other": "CantTarget"
-          },
-          "params": {
-            "Description": "Cards in graveyards can't be the targets of spells or abilities.",
-            "AffectedZone": "Graveyard"
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZoneAll",
-          "params": {
-            "Origin": "Any",
-            "Destination": "Graveyard",
-            "TriggerDescription": "Whenever one or more creature cards are put into graveyards from anywhere, investigate. This ability triggers only once each turn. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
-            "Execute": "TrigInvestigate",
-            "ActivationLimit": "1",
-            "TriggerZones": "Battlefield",
-            "ValidCards": "Creature.!token"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard",
-            "ReplaceWith": "Exile",
-            "ValidCard": "Card.Self"
-          }
+          "description": "Whenever one or more creature cards are put into graveyards from anywhere, investigate. This ability triggers only once each turn. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+          "destination": "Graveyard",
+          "mode": "ChangesZoneAll",
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

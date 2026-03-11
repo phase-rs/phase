@@ -2,49 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "ValidTgts": "Creature.HasCounters",
-          "Duration": "UntilYourNextTurn",
-          "GainThisAbility": "True",
-          "SpellDescription": "Until your next turn, CARDNAME becomes a copy of target creature with a counter on it, except it's 7/5 and it has this ability.",
-          "SetToughness": "5",
-          "TgtPrompt": "Select target creature with a counter on it",
-          "SetPower": "7"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Until your next turn, CARDNAME becomes a copy of target creature with a counter on it, except it's 7/5 and it has this ability.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "description": "Until your next turn, CARDNAME becomes a copy of target creature with a counter on it, except it's 7/5 and it has this ability.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.HasCounters",
-        "Duration": "UntilYourNextTurn",
-        "GainThisAbility": "True",
-        "SpellDescription": "Until your next turn, CARDNAME becomes a copy of target creature with a counter on it, except it's 7/5 and it has this ability.",
-        "SetToughness": "5",
-        "TgtPrompt": "Select target creature with a counter on it",
-        "SetPower": "7"
-      }
+      "target_prompt": "Select target creature with a counter on it"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, put a -1/-1 counter on up to one target creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of combat on your turn, put a -1/-1 counter on up to one target creature."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

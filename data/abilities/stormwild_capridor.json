@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "IsCombat": "False",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "Description": "If noncombat damage would be dealt to CARDNAME, prevent that damage. Put a +1/+1 counter on CARDNAME for each 1 damage prevented this way.",
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True"
-      }
+      "description": "If noncombat damage would be dealt to CARDNAME, prevent that damage. Put a +1/+1 counter on CARDNAME for each 1 damage prevented this way.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

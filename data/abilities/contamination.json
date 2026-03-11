@@ -1,31 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a creature.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUpkeep"
+      "description": "If a land is tapped for mana, it produces {B} instead of any other type and amount.",
+      "event": {
+        "Other": "ProduceMana"
+      },
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "ProduceMana"
-      },
-      "params": {
-        "ReplaceWith": "ProduceB",
-        "ValidCard": "Land",
-        "Description": "If a land is tapped for mana, it produces {B} instead of any other type and amount.",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

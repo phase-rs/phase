@@ -2,51 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 W W",
+        "type": "Mana"
+      },
+      "description": "Create a 2/2 white Cat creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_2_2_cat",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 W W"
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 2/2 white Cat creature token.",
-        "TokenOwner": "You"
-      }
+      "description": "Equipped creatures you control get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Cat you control enters, attach up to one target Equipment you control to that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME or another Cat you control enters, attach up to one target Equipment you control to that creature.",
-        "Execute": "TrigAttach",
-        "ValidCard": "Card.Self,Creature.Other+Cat+YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          },
+          {
+            "type": "Other",
+            "value": "Cat"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+equipped",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Equipped creatures you control get +1/+1."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

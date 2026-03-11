@@ -2,60 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Fixed",
-          "value": 1
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player or planeswalker",
-        "SpellDescription": "CARDNAME deals 1 damage to target player or planeswalker."
-      }
-    },
-    {
-      "kind": "Activated",
+      "description": "CARDNAME deals 1 damage to target player or planeswalker.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
+      "kind": "Activated",
+      "sub_ability": null,
+      "target_prompt": "Select target player or planeswalker"
+    },
+    {
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exert<1/CARDNAME>"
+            "cost": "Exert<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "It deals 1 damage to target creature. (An exerted creature won't untap during your next untap step.)"
-      }
+      "description": "It deals 1 damage to target creature. (An exerted creature won't untap during your next untap step.)",
+      "effect": {
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,50 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Green,Card.Red"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Counter target red or green spell. Any player may activate this ability.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green,Card.Red"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Activator": "Player",
-        "SpellDescription": "Counter target red or green spell. Any player may activate this ability.",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target red or green spell"
-      }
+      "target_prompt": "Select target red or green spell"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Green,Card.Red"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PayLife<2>"
+        "cost": "PayLife<2>",
+        "type": "Mana"
       },
+      "description": "Counter target red or green spell. Any player may activate this ability.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Green,Card.Red"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target red or green spell. Any player may activate this ability.",
-        "TgtPrompt": "Select target red of green spell",
-        "Activator": "Player",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target red of green spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

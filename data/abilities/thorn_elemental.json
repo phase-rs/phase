@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may have CARDNAME assign its combat damage as though it weren't blocked.",
       "mode": {
         "Other": "AssignCombatDamageAsUnblocked"
-      },
-      "params": {
-        "Optional": "True",
-        "Description": "You may have CARDNAME assign its combat damage as though it weren't blocked.",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

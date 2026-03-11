@@ -2,51 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Add three mana of any one color.",
-          "Amount": "3"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add three mana of any one color.",
-        "Amount": "3"
-      }
+      "description": "Add three mana of any one color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "OptionalDecider": "You",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.MultiColor",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand."
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,94 +2,83 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U U"
+            "cost": "U U",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "PlayerTurn": "True",
-        "SpellDescription": "Untap this creature. Activate only during your upkeep."
-      }
+      "description": "Untap this creature. Activate only during your upkeep.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U U",
+        "type": "Mana"
+      },
+      "description": "This creature gets -1/-0 until end of turn and deals 1 damage to target attacking creature without flying.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking+withoutFlying"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U U"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target attacking creature without flying",
-        "SpellDescription": "This creature gets -1/-0 until end of turn and deals 1 damage to target attacking creature without flying.",
-        "SubAbility": "DBPump"
-      }
+      "target_prompt": "Select target attacking creature without flying"
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When you control no Islands, sacrifice this creature.",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Island.YouCtrl"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "controlsIsland",
-        "Description": "This creature can't attack unless defending player controls an Island.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This creature can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "ValidStepTurnToController": "You",
-        "Description": "This creature doesn't untap during your untap step."
-      }
+      "description": "When you control no Islands, sacrifice this creature.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

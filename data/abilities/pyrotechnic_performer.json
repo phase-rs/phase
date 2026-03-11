@@ -1,18 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature you control is turned face up, that creature deals damage equal to its power to each opponent.",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME or another creature you control is turned face up, that creature deals damage equal to its power to each opponent.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-        "Execute": "TrigDealDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

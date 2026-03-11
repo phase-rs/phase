@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you roll a die, remove all +1/+1 counters from CARDNAME, then put a number of +1/+1 counters on it equal to the result.",
       "mode": "RolledDie",
-      "params": {
-        "Execute": "TrigRemove",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you roll a die, remove all +1/+1 counters from CARDNAME, then put a number of +1/+1 counters on it equal to the result."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

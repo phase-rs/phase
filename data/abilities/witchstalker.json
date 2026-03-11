@@ -1,20 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a blue or black spell during your turn, put a +1/+1 counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "Player.Opponent",
-        "PlayerTurn": "True",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.Blue,Card.Black",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an opponent casts a blue or black spell during your turn, put a +1/+1 counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Blue,Card.Black"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

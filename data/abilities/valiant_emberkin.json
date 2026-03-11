@@ -1,38 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, target creature you control perpetually gets +1/+0.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, target creature you control perpetually gets +1/+0.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, target creature you control perpetually gets +1/+0.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, target creature you control perpetually gets +1/+0.",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Panharmonicon",
-      "params": {
-        "Description": "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidMode": "BecomesTarget,BecomesTargetOnce",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidTarget": "Creature.YouCtrl"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Lieutenant — As long as you control your commander, other creatures you control have melee.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "AddKeyword": "Melee",
-        "Description": "Lieutenant — As long as you control your commander, other creatures you control have melee.",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Melee",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "SaccThisTurn"
+      },
+      "description": "CARDNAME gets +2/+0 and has menace as long as you sacrificed a permanent this turn.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "2",
-        "AddKeyword": "Menace",
-        "CheckSVar": "SaccThisTurn",
-        "Description": "CARDNAME gets +2/+0 and has menace as long as you sacrificed a permanent this turn."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

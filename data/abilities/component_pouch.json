@@ -2,57 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo AnyDifferent",
-        "params": {
-          "SpellDescription": "Add two mana of different colors.",
-          "Amount": "2"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/COMPONENT>"
+            "cost": "SubCounter<1/COMPONENT>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add two mana of different colors.",
-        "Amount": "2"
-      }
+      "description": "Add two mana of different colors.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "ResultSubAbilities": "1-9:PutOne,10-20:PutTwo",
-          "SpellDescription": "Roll a d20.",
-          "Sides": "20"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ResultSubAbilities": "1-9:PutOne,10-20:PutTwo",
-        "SpellDescription": "Roll a d20.",
-        "Sides": "20"
-      }
+      "description": "Roll a d20.",
+      "effect": {
+        "description": "Roll a d20.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

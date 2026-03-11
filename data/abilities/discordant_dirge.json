@@ -2,52 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Discard",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "LookYouChoose",
-        "Optional": "True",
-        "SpellDescription": "Look at target opponent's hand and choose up to X cards from it, where X is the number of verse counters on CARDNAME. That player discards those cards."
-      }
+      "description": "Look at target opponent's hand and choose up to X cards from it, where X is the number of verse counters on CARDNAME. That player discards those cards.",
+      "effect": {
+        "count": 1,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Discard"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
-        "OptionalDecider": "You",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

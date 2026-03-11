@@ -1,25 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, attacking creatures with flying get +2/+0 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPumpAtt",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, attacking creatures with flying get +2/+0 until end of turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME blocks, blocking creatures with flying get +0/+2 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME blocks, blocking creatures with flying get +0/+2 until end of turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPumpBlo"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

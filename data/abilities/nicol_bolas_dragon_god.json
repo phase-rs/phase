@@ -2,80 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You draw a card. Each opponent exiles a card from their hand or a permanent they control.",
-        "SubAbility": "DBChangeZone",
-        "Planeswalker": "True"
-      }
+      "description": "You draw a card. Each opponent exiles a card from their hand or a permanent they control.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Destroy target creature or planeswalker.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "Destroy target creature or planeswalker.",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Select target creature or planeswalker"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "LosesGame",
-        "params": {
-          "Planeswalker": "True",
-          "Defined": "Player.Opponent+controlsLegendary.Creature_EQ0+controlsPlaneswalker_LE0",
-          "Ultimate": "True",
-          "SpellDescription": "Each opponent who doesn't control a legendary creature or planeswalker loses the game."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Defined": "Player.Opponent+controlsLegendary.Creature_EQ0+controlsPlaneswalker_LE0",
-        "Ultimate": "True",
-        "SpellDescription": "Each opponent who doesn't control a legendary creature or planeswalker loses the game."
-      }
+      "description": "Each opponent who doesn't control a legendary creature or planeswalker loses the game.",
+      "effect": {
+        "description": "Each opponent who doesn't control a legendary creature or planeswalker loses the game.",
+        "name": "LosesGame",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOf": "Planeswalker.Other",
-        "EffectZone": "Battlefield",
-        "Affected": "Card.Self",
-        "GainsValidAbilities": "Activated.Loyalty",
-        "Description": "CARDNAME has all loyalty abilities of all other planeswalkers on the battlefield."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all loyalty abilities of all other planeswalkers on the battlefield.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

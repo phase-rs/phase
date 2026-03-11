@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Vote",
-        "params": {
-          "StoreVoteNum": "True",
-          "Defined": "Player",
-          "Choices": "DBDraw,DBChoose",
-          "Secretly": "True",
-          "SpellDescription": "Secret council — Each player secretly votes for truth or consequences, then those votes are revealed. You draw cards equal to the number of truth votes. Then choose an opponent at random. CARDNAME deals 3 damage to that player for each consequences vote."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StoreVoteNum": "True",
-        "Defined": "Player",
-        "Choices": "DBDraw,DBChoose",
-        "Secretly": "True",
-        "SpellDescription": "Secret council — Each player secretly votes for truth or consequences, then those votes are revealed. You draw cards equal to the number of truth votes. Then choose an opponent at random. CARDNAME deals 3 damage to that player for each consequences vote."
-      }
+      "description": "Secret council — Each player secretly votes for truth or consequences, then those votes are revealed. You draw cards equal to the number of truth votes. Then choose an opponent at random. CARDNAME deals 3 damage to that player for each consequences vote.",
+      "effect": {
+        "description": "Secret council — Each player secretly votes for truth or consequences, then those votes are revealed. You draw cards equal to the number of truth votes. Then choose an opponent at random. CARDNAME deals 3 damage to that player for each consequences vote.",
+        "name": "Vote",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

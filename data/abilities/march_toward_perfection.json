@@ -2,30 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You get a boon with \"When you cast your next Phyrexian creature spell, that creature enters with an additional +1/+1 counter and deathtouch counter on it.\"",
-          "SubAbility": "DBDraft",
-          "Boon": "True",
-          "Duration": "Permanent",
-          "Triggers": "SpellCast"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You get a boon with \"When you cast your next Phyrexian creature spell, that creature enters with an additional +1/+1 counter and deathtouch counter on it.\"",
-        "SubAbility": "DBDraft",
-        "Boon": "True",
-        "Duration": "Permanent",
-        "Triggers": "SpellCast"
-      }
+      "description": "You get a boon with \"When you cast your next Phyrexian creature spell, that creature enters with an additional +1/+1 counter and deathtouch counter on it.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

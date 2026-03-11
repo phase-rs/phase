@@ -2,40 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": ""
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "ForceRevealToController": "True",
-        "Planeswalker": "True",
-        "ChangeValid": "Card.nonCreature+nonLand",
-        "ChangeValidDesc": "noncreature, nonland",
-        "RestRandomOrder": "True",
-        "SpellDescription": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "ChangeNum": "1"
-      }
+      "description": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 4,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantDraw",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "Description": "Each opponent can't draw more than one card each turn.",
-        "DrawLimit": "1"
-      }
+      "description": "Each opponent can't draw more than one card each turn.",
+      "mode": "CantDraw"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

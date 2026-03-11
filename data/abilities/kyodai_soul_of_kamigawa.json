@@ -2,38 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W U B R G",
+        "type": "Mana"
+      },
+      "description": "NICKNAME gets +5/+5 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 5,
-        "toughness": 5,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 5,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "NICKNAME gets +5/+5 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, another target permanent gains indestructible for as long as you control NICKNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, another target permanent gains indestructible for as long as you control NICKNAME."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

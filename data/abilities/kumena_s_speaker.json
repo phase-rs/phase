@@ -1,19 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Island",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Creature.Merfolk"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control another Merfolk or an Island.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "IsPresent": "Island.YouCtrl,Creature.Merfolk+Other+YouCtrl",
-        "Description": "CARDNAME gets +1/+1 as long as you control another Merfolk or an Island.",
-        "AddPower": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

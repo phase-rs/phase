@@ -1,39 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigUpkeep",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land."
-      }
-    },
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "ValidCards": "Land.YouOwn+!token",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever one or more land cards are put into your graveyard from anywhere, draw a card.",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may play an additional land on each of your turns.",
-        "AdjustLandPlays": "1",
-        "Affected": "You"
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you sacrifice a land.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever one or more land cards are put into your graveyard from anywhere, draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZoneAll",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

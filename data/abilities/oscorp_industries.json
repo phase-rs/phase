@@ -2,48 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U B R",
-        "params": {
-          "SpellDescription": "Add {U}, {B}, or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}, {B}, or {R}."
-      }
+      "description": "Add {U}, {B}, or {R}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "When this land enters from a graveyard, you lose 2 life.",
-        "Destination": "Battlefield",
-        "Origin": "Graveyard"
+      "description": "This land enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "ValidCard": "Card.Self",
-        "Description": "This land enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated"
+      "description": "When this land enters from a graveyard, you lose 2 life.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

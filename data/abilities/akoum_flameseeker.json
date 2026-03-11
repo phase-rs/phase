@@ -2,39 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Discard",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<1/Ally>"
+            "cost": "tapXType<1/Ally>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Cohort —",
-        "RememberDiscarded": "True",
-        "Defined": "You",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Discard a card. If you do, draw a card.",
-        "Mode": "TgtChoose"
-      }
+      "description": "Discard a card. If you do, draw a card.",
+      "effect": {
+        "count": 1,
+        "target": {
+          "type": "Any"
+        },
+        "type": "Discard"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

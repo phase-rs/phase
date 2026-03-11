@@ -1,96 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever NICKNAME deals combat damage to a player, reveal that many cards from the top of your library. You may put a creature card and/or a land card from among them onto the battlefield. Put the rest on the bottom in a random order.",
           "mode": "DamageDone",
-          "params": {
-            "Execute": "TrigDig",
-            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, reveal that many cards from the top of your library. You may put a creature card and/or a land card from among them onto the battlefield. Put the rest on the bottom in a random order.",
-            "ValidSource": "Card.Self",
-            "CombatDamage": "True",
-            "ValidTarget": "Player"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         },
         {
+          "description": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control.",
-            "Destination": "Graveyard",
-            "Origin": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G}."
-          }
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "PresentCompare": "GE10",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only if you control ten or more permanents and only as a sorcery.",
-              "Mode": "Transform",
-              "IsPresent": "Permanent.YouCtrl",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 G"
+                "cost": "2 G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "PresentCompare": "GE10",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only if you control ten or more permanents and only as a sorcery.",
-            "Mode": "Transform",
-            "IsPresent": "Permanent.YouCtrl",
-            "Defined": "Self"
-          }
+          "description": "Transform CARDNAME. Activate only if you control ten or more permanents and only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if you control ten or more permanents and only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

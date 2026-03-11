@@ -2,36 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayLife<4>",
+        "type": "Mana"
+      },
+      "description": "Destroy CARDNAME. It can't be regenerated. Any player may activate this ability.",
       "effect": {
-        "type": "Destroy",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayLife<4>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "NoRegen": "True",
-        "Activator": "Player",
-        "SpellDescription": "Destroy CARDNAME. It can't be regenerated. Any player may activate this ability.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Creature",
-        "Description": "Creature spells can't be cast."
-      }
+      "description": "Creature spells can't be cast.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

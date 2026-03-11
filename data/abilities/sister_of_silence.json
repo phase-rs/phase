@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Psychic Abomination — When CARDNAME enters, counter target instant spell, sorcery spell, activated ability, or triggered ability.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigCounter",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Psychic Abomination — When CARDNAME enters, counter target instant spell, sorcery spell, activated ability, or triggered ability.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

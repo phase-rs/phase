@@ -1,17 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has protection from each mana value of the chosen quality.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has protection from each mana value of the chosen quality.",
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Card.cmcChosenEvenOdd,Emblem.cmcChosenEvenOdd:each mana value of chosenEvenOdd."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.cmcChosenEvenOdd,Emblem.cmcChosenEvenOdd:each",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "mana",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "value",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "of",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "chosenEvenOdd.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Other Spirits you control have melee.",
-        "Affected": "Spirit.Other+YouCtrl",
-        "AddKeyword": "Melee"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "IsCombat": "False",
-        "Description": "Prevent all noncombat damage that would be dealt to Spirits you control.",
-        "ValidTarget": "Spirit.YouCtrl",
-        "Prevent": "True"
-      }
+      "description": "Prevent all noncombat damage that would be dealt to Spirits you control.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Spirit",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Spirits you control have melee.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Melee",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

@@ -1,20 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "For each kind of counter on CARDNAME, each other Dinosaur you control enters with a counter of that kind on it.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplaceWith": "EnterWithCounters",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Dinosaur.YouCtrl+Other",
-        "Description": "For each kind of counter on CARDNAME, each other Dinosaur you control enters with a counter of that kind on it.",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Dinosaur",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

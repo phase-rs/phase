@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks, if you control a creature with a counter on it, each opponent loses 1 life.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Creature.YouCtrl+HasCounters",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever this creature attacks, if you control a creature with a counter on it, each opponent loses 1 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

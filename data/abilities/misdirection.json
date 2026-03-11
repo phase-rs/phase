@@ -2,41 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell.singleTarget",
-          "TgtPrompt": "Select target spell with a single target",
-          "SpellDescription": "Change the target of target spell with a single target.",
-          "ValidTgts": "Card"
-        }
-      },
       "cost": null,
+      "description": "Change the target of target spell with a single target.",
+      "effect": {
+        "description": "Change the target of target spell with a single target.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.singleTarget",
-        "TgtPrompt": "Select target spell with a single target",
-        "SpellDescription": "Change the target of target spell with a single target.",
-        "ValidTgts": "Card"
-      }
+      "target_prompt": "Select target spell with a single target"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile a blue card from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "EffectZone": "All",
-        "Cost": "ExileFromHand<1/Card.Blue+Other>",
-        "Description": "You may exile a blue card from your hand rather than pay this spell's mana cost."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

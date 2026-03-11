@@ -1,39 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Each creature you control with a counter on it can't be blocked by more than one creature.",
+      "mode": {
+        "Other": "MinMaxBlocker"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever NICKNAME enters or attacks, create a Mutagen token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, create a Mutagen token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.\")",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, create a Mutagen token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.\")",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, create a Mutagen token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.\")",
-        "Execute": "TrigToken"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Description": "Each creature you control with a counter on it can't be blocked by more than one creature.",
-        "Max": "1",
-        "ValidCard": "Creature.YouCtrl+HasCounters"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

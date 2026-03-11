@@ -1,27 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Library,Command,Stack",
+      "description": "Creature cards you own that aren't on the battlefield have flash.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creature cards you own that aren't on the battlefield have flash.",
-        "Affected": "Creature.YouOwn+!token",
-        "AffectedZone": "Hand,Graveyard,Exile,Library,Command,Stack",
-        "AddKeyword": "Flash"
-      }
+      "modifications": [
+        {
+          "keyword": "Flash",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "Opponent",
-        "ValidCard": "Card",
-        "OnlySorcerySpeed": "True",
-        "Description": "Each opponent can cast spells only any time they could cast a sorcery."
-      }
+      "description": "Each opponent can cast spells only any time they could cast a sorcery.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice another permanent, you may pay {2}. If you do, CARDNAME deals 2 damage to any target.",
       "mode": "Sacrificed",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you sacrifice another permanent, you may pay {2}. If you do, CARDNAME deals 2 damage to any target.",
-        "ValidPlayer": "You",
-        "ValidCard": "Permanent.Other"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

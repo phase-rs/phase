@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "Gains": "Choice",
-          "Choices": "AnyColor",
-          "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Clash with an opponent. If you win, return CARDNAME to its owner's hand.",
-          "SubAbility": "DBClash"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "Gains": "Choice",
-        "Choices": "AnyColor",
-        "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Clash with an opponent. If you win, return CARDNAME to its owner's hand.",
-        "SubAbility": "DBClash"
-      }
+      "description": "Target creature you control gains protection from the color of your choice until end of turn. Clash with an opponent. If you win, return CARDNAME to its owner's hand.",
+      "effect": {
+        "description": "Target creature you control gains protection from the color of your choice until end of turn. Clash with an opponent. If you win, return CARDNAME to its owner's hand.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

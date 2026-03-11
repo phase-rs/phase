@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Put the top card of your graveyard on the bottom of your library.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Library",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put the top card of your graveyard on the bottom of your library.",
-        "StackDescription": "Put the top card of your graveyard on the bottom of your library.",
-        "Hidden": "True",
-        "ChangeType": "Card.TopGraveyard+YouOwn",
-        "Mandatory": "True",
-        "LibraryPosition": "-1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power is equal to the highest mana value among creatures you control."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the highest mana value among creatures you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

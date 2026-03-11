@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Lieutenant — At the beginning of combat on your turn, if you control your commander, each opponent loses 3 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "Lieutenant — At the beginning of combat on your turn, if you control your commander, each opponent loses 3 life.",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

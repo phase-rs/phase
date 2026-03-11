@@ -2,81 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Reveal the top card of your library. If it's a creature card, put it into your hand. Otherwise, put it on the bottom of your library.",
       "effect": {
-        "type": "Dig",
         "count": 1,
-        "destination": "Hand"
+        "destination": "Hand",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition2": "-1",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Reveal the top card of your library. If it's a creature card, put it into your hand. Otherwise, put it on the bottom of your library.",
-        "Reveal": "True",
-        "ChangeNum": "All",
-        "DestinationZone2": "Library",
-        "ChangeValid": "Creature",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Target creature you control deals damage equal to its power to another target creature.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDamage",
-        "AILogic": "PowerDmg",
-        "TgtPrompt": "Select target creature you control",
-        "SpellDescription": "Target creature you control deals damage equal to its power to another target creature."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Ultimate": "True",
-          "ValidCards": "Creature.YouCtrl",
-          "staticAbilities": "Static",
-          "SpellDescription": "Until end of turn, creatures you control gain \"You may have this creature assign its combat damage as though it weren't blocked.\"",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "ValidCards": "Creature.YouCtrl",
-        "staticAbilities": "Static",
-        "SpellDescription": "Until end of turn, creatures you control gain \"You may have this creature assign its combat damage as though it weren't blocked.\"",
-        "Planeswalker": "True"
-      }
+      "description": "Until end of turn, creatures you control gain \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+      "effect": {
+        "description": "Until end of turn, creatures you control gain \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

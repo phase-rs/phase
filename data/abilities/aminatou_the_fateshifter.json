@@ -2,75 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBTop",
-        "SpellDescription": "Draw a card, then put a card from your hand on top of your library."
-      }
+      "description": "Draw a card, then put a card from your hand on top of your library.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Exile another target permanent you own, then return it to the battlefield under your control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent.Other+YouOwn"
-        }
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouOwn"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBReturn",
-        "SpellDescription": "Exile another target permanent you own, then return it to the battlefield under your control.",
-        "Planeswalker": "True",
-        "RememberTargets": "True",
-        "TgtPrompt": "Select another target permanent you own"
-      }
+      "target_prompt": "Select another target permanent you own"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseDirection",
-        "params": {
-          "Ultimate": "True",
-          "SubAbility": "DBControl",
-          "AILogic": "Aminatou",
-          "SpellDescription": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SubAbility": "DBControl",
-        "AILogic": "Aminatou",
-        "SpellDescription": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
-        "Planeswalker": "True"
-      }
+      "description": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
+      "effect": {
+        "description": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
+        "name": "ChooseDirection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

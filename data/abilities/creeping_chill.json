@@ -2,42 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to each opponent and you gain 3 life.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidPlayers": "Player.Opponent",
-        "SpellDescription": "CARDNAME deals 3 damage to each opponent and you gain 3 life.",
-        "SubAbility": "DBGainLife",
-        "StackDescription": "CARDNAME deals 3 damage to each opponent and"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is put into your graveyard from your library, you may exile it. If you do, CARDNAME deals 3 damage to each opponent and you gain 3 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Library",
-        "Destination": "Graveyard",
-        "Execute": "TrigExile",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME is put into your graveyard from your library, you may exile it. If you do, CARDNAME deals 3 damage to each opponent and you gain 3 life."
+      "optional": true,
+      "origin": "Library",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

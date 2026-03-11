@@ -2,75 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "ExtraETBCounter",
-          "SpellDescription": "This turn, each creature you control enters with an additional +1/+1 counter on it."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "ExtraETBCounter",
-        "SpellDescription": "This turn, each creature you control enters with an additional +1/+1 counter on it."
-      }
+      "description": "This turn, each creature you control enters with an additional +1/+1 counter on it.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "TargetMin": "2",
-          "TargetMax": "2",
-          "ValidTgts": "Creature.YouCtrl",
-          "SpellDescription": "Move a +1/+1 counter from target creature you control onto another target creature you control.",
-          "TgtPrompt": "Select target creatures to move +1/+1 counter",
-          "CounterNum": "1",
-          "StackDescription": "SpellDescription",
-          "CounterType": "P1P1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Move a +1/+1 counter from target creature you control onto another target creature you control.",
+      "effect": {
+        "description": "Move a +1/+1 counter from target creature you control onto another target creature you control.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TargetMax": "2",
-        "ValidTgts": "Creature.YouCtrl",
-        "SpellDescription": "Move a +1/+1 counter from target creature you control onto another target creature you control.",
-        "TgtPrompt": "Select target creatures to move +1/+1 counter",
-        "CounterNum": "1",
-        "StackDescription": "SpellDescription",
-        "CounterType": "P1P1"
-      }
+      "target_prompt": "Select target creatures to move +1/+1 counter"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

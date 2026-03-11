@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Each player may play lands and cast spells from among cards they exiled with CARDNAME this turn.",
-        "Affected": "Card.ExiledWithSource+ThisTurnEntered",
-        "AffectedZone": "Exile",
-        "MayPlay": "True",
-        "MayPlayPlayer": "CardOwner"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ValidPlayer": "Player",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "ExileTop",
-        "Description": "If a player would draw a card, that player exiles that card face up instead."
-      }
+      "description": "If a player would draw a card, that player exiles that card face up instead.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          },
+          {
+            "type": "Other",
+            "value": "ThisTurnEntered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "Each player may play lands and cast spells from among cards they exiled with CARDNAME this turn.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

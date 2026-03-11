@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted player casts a spell, put a spite counter on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever enchanted player casts a spell, put a spite counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card",
-        "ValidActivatingPlayer": "Player.EnchantedBy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
-      "mode": "LosesGame",
-      "params": {
-        "TriggerDescription": "When enchanted player loses the game, you gain X life and draw X cards, where X is the number of spite counters on CARDNAME.",
-        "Execute": "TrigGainLife",
-        "ValidPlayer": "Player.EnchantedBy"
-      }
+      "description": "When enchanted player loses the game, you gain X life and draw X cards, where X is the number of spite counters on CARDNAME.",
+      "mode": "LosesGame"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.EnchantedBy",
-        "Description": "Prevent all damage that would be dealt by enchanted creature.",
-        "ActiveZones": "Battlefield",
-        "Prevent": "True"
-      }
+      "description": "Prevent all damage that would be dealt by enchanted creature.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

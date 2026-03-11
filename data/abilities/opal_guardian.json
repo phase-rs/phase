@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 3/4 Gargoyle creature with flying and protection from red.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "Opponent",
-        "IsPresent": "Card.Self+Enchantment",
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 3/4 Gargoyle creature with flying and protection from red."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

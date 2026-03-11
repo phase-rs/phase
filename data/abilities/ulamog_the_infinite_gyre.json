@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you cast this spell, destroy target permanent.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, destroy target permanent.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

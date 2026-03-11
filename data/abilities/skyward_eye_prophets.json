@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Battlefield"
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeValid": "Land",
-        "Reveal": "True",
-        "ChangeNum": "All",
-        "SpellDescription": "Reveal the top card of your library. If it's a land card, put it onto the battlefield. Otherwise, put it into your hand.",
-        "DestinationZone2": "Hand"
-      }
+      "description": "Reveal the top card of your library. If it's a land card, put it onto the battlefield. Otherwise, put it into your hand.",
+      "effect": {
+        "count": 1,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

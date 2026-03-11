@@ -2,84 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Search your library for a Swamp card, reveal it, put it into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeType": "Swamp",
-        "SpellDescription": "Search your library for a Swamp card, reveal it, put it into your hand, then shuffle.",
-        "Planeswalker": "True",
-        "NumCards": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Target creature gets +X/+X or -X/-X until end of turn, where X is the number of Swamps you control.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Target creature gets +X/+X or -X/-X until end of turn, where X is the number of Swamps you control.",
-        "SubAbility": "ABChoice",
-        "Planeswalker": "True",
-        "SpellDescription": "Target creature gets +X/+X or -X/-X until end of turn, where X is the number of Swamps you control."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "Stackable": "False",
-          "SpellDescription": "You get an emblem with \"Swamps you control have '{T}: Add {B}{B}{B}{B}.'\"",
-          "StaticAbilities": "SwampBoost",
-          "Planeswalker": "True",
-          "Name": "Emblem — Liliana Of The Dark Realms",
-          "Image": "emblem_liliana_of_the_dark_realms",
-          "Duration": "Permanent"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Stackable": "False",
-        "SpellDescription": "You get an emblem with \"Swamps you control have '{T}: Add {B}{B}{B}{B}.'\"",
-        "StaticAbilities": "SwampBoost",
-        "Planeswalker": "True",
-        "Name": "Emblem — Liliana Of The Dark Realms",
-        "Image": "emblem_liliana_of_the_dark_realms",
-        "Duration": "Permanent"
-      }
+      "description": "You get an emblem with \"Swamps you control have '{T}: Add {B}{B}{B}{B}.'\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

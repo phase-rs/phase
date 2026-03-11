@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.cmcLE1"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell with mana value 1 or less.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell with mana value 1 or less",
-        "SpellDescription": "Counter target spell with mana value 1 or less.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target spell with mana value 1 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

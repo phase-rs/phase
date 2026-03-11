@@ -2,37 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target spell."
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidTarget": "Spell.Creature",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Description": "This spell costs {2} less to cast if it targets a creature spell.",
-        "Amount": "2",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {2} less to cast if it targets a creature spell.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

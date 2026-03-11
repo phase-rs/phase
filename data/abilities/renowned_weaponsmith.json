@@ -2,59 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield",
-          "Amount": "2",
-          "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield",
-        "Amount": "2",
-        "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts."
-      }
+      "description": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "SpellDescription": "Search your library for a card named Heart-Piercer Bow or Vial of Dragonfire, put it into your hand, then shuffle.",
-        "StackDescription": "SpellDescription",
-        "ChangeType": "Card.namedHeart-Piercer Bow,Card.namedVial of Dragonfire"
-      }
+      "description": "Search your library for a card named Heart-Piercer Bow or Vial of Dragonfire, put it into your hand, then shuffle.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

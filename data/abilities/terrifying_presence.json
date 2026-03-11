@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "RPrevent",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Prevent all damage that would be dealt this turn by creatures other than target creature."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "RPrevent",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Prevent all damage that would be dealt this turn by creatures other than target creature."
-      }
+      "description": "Prevent all damage that would be dealt this turn by creatures other than target creature.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

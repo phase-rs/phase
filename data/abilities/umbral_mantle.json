@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{3}, {Q}: This creature gets +2/+2 until end of turn.\".",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "UmbralPump",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has \"{3}, {Q}: This creature gets +2/+2 until end of turn.\"."
-      }
+      "modifications": [
+        {
+          "ability": "UmbralPump",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

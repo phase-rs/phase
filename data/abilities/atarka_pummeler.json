@@ -2,33 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 R R"
+        "cost": "3 R R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SVarCompare": "GE8",
-        "CheckSVar": "FormidableTest",
-        "KW": "Menace",
-        "SpellDescription": "Creatures you control gain menace until end of turn. Activate only if creatures you control have total power 8 or greater.",
-        "PrecostDesc": "Formidable —",
-        "ValidCards": "Creature.YouCtrl"
-      }
+      "description": "Creatures you control gain menace until end of turn. Activate only if creatures you control have total power 8 or greater.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

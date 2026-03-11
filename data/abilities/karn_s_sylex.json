@@ -2,63 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy each nonland permanent with mana value X or less. Activate only as a sorcery.",
-        "ValidCards": "Permanent.nonLand+cmcLEX",
-        "SorcerySpeed": "True"
-      }
+      "description": "Destroy each nonland permanent with mana value X or less. Activate only as a sorcery.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantPayLife"
-      },
-      "params": {
-        "ForCost": "True",
-        "ValidCause": "Spell,Activated.!ManaAbility",
-        "Description": "Players can't pay life to cast spells or activate abilities that aren't mana abilities.",
-        "ValidPlayer": "Player"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Players can't pay life to cast spells or activate abilities that aren't mana abilities.",
+      "mode": {
+        "Other": "CantPayLife"
+      }
+    }
+  ],
+  "triggers": []
 }

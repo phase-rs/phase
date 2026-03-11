@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, CARDNAME deals 1 damage to any target.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
+      "description": "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Command",
-        "ValidTarget": "Permanent,Player",
-        "ReplaceWith": "DmgTwice",
-        "ValidSource": "Card,Emblem",
-        "Description": "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead."
-      }
+      "description": "Whenever chaos ensues, CARDNAME deals 1 damage to any target.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

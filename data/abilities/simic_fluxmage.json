@@ -2,42 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature.",
-          "Source": "Self",
-          "CounterNum": "1",
-          "CounterType": "P1P1",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature.",
-        "Source": "Self",
-        "CounterNum": "1",
-        "CounterType": "P1P1",
-        "ValidTgts": "Creature"
-      }
+      "description": "Move a +1/+1 counter from CARDNAME onto target creature.",
+      "effect": {
+        "description": "Move a +1/+1 counter from CARDNAME onto target creature.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

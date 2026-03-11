@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts a spell with the chosen name, they lose 3 life and you draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever an opponent casts a spell with the chosen name, they lose 3 life and you draw a card.",
-        "ValidActivatingPlayer": "Opponent",
-        "ValidCard": "Card.NamedCard",
-        "Execute": "TrigDrain"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NamedCard"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

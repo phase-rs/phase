@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": -4,
-        "toughness": -4,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "ValidCards": "Creature",
-        "SpellDescription": "All creatures get -4/-4 until end of turn."
-      }
+      "description": "All creatures get -4/-4 until end of turn.",
+      "effect": {
+        "power": -4,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": -4,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

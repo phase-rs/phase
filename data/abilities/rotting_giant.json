@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigSac",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
       "mode": "Blocks",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSac",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard."
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

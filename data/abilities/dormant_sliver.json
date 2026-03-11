@@ -1,25 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All Sliver creatures have defender.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Sliver",
-        "AddKeyword": "Defender",
-        "Description": "All Sliver creatures have defender."
-      }
+      "modifications": [
+        {
+          "keyword": "Defender",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "TrigEnter",
-        "Description": "All Slivers have \"When this permanent enters, draw a card.\"",
-        "Affected": "Permanent.Sliver"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"When this permanent enters, draw a card.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

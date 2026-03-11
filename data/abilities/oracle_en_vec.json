@@ -2,38 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "Target opponent chooses any number of creatures they control. During that player's next turn, the chosen creatures attack if able, and other creatures can't attack. At the beginning of that turn's end step, destroy each of the chosen creatures that didn't attack this turn. Activate only during your turn.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature"
         ],
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetControls": "True",
-        "SpellDescription": "Target opponent chooses any number of creatures they control. During that player's next turn, the chosen creatures attack if able, and other creatures can't attack. At the beginning of that turn's end step, destroy each of the chosen creatures that didn't attack this turn. Activate only during your turn.",
-        "RevealTitle": "Creatures chosen by opponent.",
-        "StackDescription": "REP Target opponent_{p:Targeted} & that player's_{p:Targeted}'s & . Activate only during your turn._.",
-        "Amount": "X",
-        "ChoiceTitle": "Choose any number of creatures you control",
-        "PlayerTurn": "True",
-        "AILogic": "NextTurnAttacker",
-        "MinAmount": "0",
-        "Reveal": "True",
-        "SubAbility": "DBOracleEffect"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

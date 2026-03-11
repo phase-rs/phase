@@ -1,45 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you gain life, you may convert NICKNAME. When you do, return target artifact card with mana value less than or equal to the amount of life you gained this turn from your graveyard to the battlefield tapped.",
           "mode": "LifeGained",
-          "params": {
-            "OptionalDecider": "You",
-            "TriggerDescription": "Whenever you gain life, you may convert NICKNAME. When you do, return target artifact card with mana value less than or equal to the amount of life you gained this turn from your graveyard to the battlefield tapped.",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "Execute": "TrigConvert"
-          }
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever one or more nontoken artifacts you control are put into a graveyard from the battlefield, convert NICKNAME. This ability triggers only once each turn.",
+          "destination": "Graveyard",
           "mode": "ChangesZoneAll",
-          "params": {
-            "TriggerDescription": "Whenever one or more nontoken artifacts you control are put into a graveyard from the battlefield, convert NICKNAME. This ability triggers only once each turn.",
-            "Destination": "Graveyard",
-            "TriggerZones": "Battlefield",
-            "ActivationLimit": "1",
-            "Execute": "TrigConvert",
-            "Origin": "Battlefield",
-            "ValidCards": "Artifact.YouCtrl+!token"
-          }
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

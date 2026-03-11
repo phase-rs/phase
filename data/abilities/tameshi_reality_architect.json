@@ -2,51 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.cmcLEX+YouOwn,Enchantment.cmcLEX+YouOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X W"
+            "cost": "X W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/Land/land>"
+            "cost": "Return<1/Land/land>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target artifact or enchantment card with mana value X or less from your graveyard to the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Enchantment.cmcLEX"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target artifact or enchantment card with mana value X or less from your graveyard to the battlefield. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Select target artifact or enchantment card with mana value X or less"
-      }
+      "target_prompt": "Select target artifact or enchantment card with mana value X or less"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more noncreature permanents are returned to hand, draw a card. This ability triggers only once each turn.",
+      "destination": "Hand",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Permanent.nonCreature",
-        "ActivationLimit": "1",
-        "TriggerDescription": "Whenever one or more noncreature permanents are returned to hand, draw a card. This ability triggers only once each turn.",
-        "Execute": "TrigDraw",
-        "Origin": "Battlefield",
-        "Destination": "Hand"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

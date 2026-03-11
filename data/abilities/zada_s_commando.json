@@ -2,40 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DealDamage",
-        "amount": {
-          "type": "Fixed",
-          "value": 1
-        },
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent,Planeswalker"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "tapXType<1/Ally>"
+            "cost": "tapXType<1/Ally>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "CARDNAME deals 1 damage to target opponent or planeswalker.",
+      "effect": {
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "card_type": "Opponent,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target opponent or planeswalker",
-        "PrecostDesc": "Cohort —",
-        "SpellDescription": "CARDNAME deals 1 damage to target opponent or planeswalker."
-      }
+      "target_prompt": "Select target opponent or planeswalker"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

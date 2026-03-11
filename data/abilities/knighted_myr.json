@@ -2,37 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 W",
+        "type": "Mana"
+      },
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Adapt": "1"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more +1/+1 counters are put on CARDNAME, it gains double strike until end of turn.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "ValidCard": "Card.Self",
-        "CounterType": "P1P1",
-        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, it gains double strike until end of turn.",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

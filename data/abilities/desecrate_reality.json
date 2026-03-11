@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.OppCtrl+cmcEven"
-        }
-      },
       "cost": null,
+      "description": "For each opponent, exile up to one target permanent that player controls with an even mana value. (Zero is even.)",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "TgtPrompt": "Select up to one target permanent with an even mana value each opponent controls",
-        "SubAbility": "DBReturn",
-        "SpellDescription": "For each opponent, exile up to one target permanent that player controls with an even mana value. (Zero is even.)",
-        "TargetMax": "OneEach",
-        "TargetsForEachPlayer": "True"
-      }
+      "target_prompt": "Select up to one target permanent with an even mana value each opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

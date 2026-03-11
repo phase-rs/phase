@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, if another creature entered the battlefield under your control this turn, CARDNAME gains flying until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, if another creature entered the battlefield under your control this turn, CARDNAME gains flying until end of turn.",
-        "CheckSVar": "X",
-        "ValidCard": "Creature.Self",
-        "Execute": "TrigPump"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

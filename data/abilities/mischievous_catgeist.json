@@ -1,52 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, draw a card.",
           "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Card.Self",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDraw",
-            "CombatDamage": "True",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
-            "ValidTarget": "Player"
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\"",
-            "Affected": "Creature.EnchantedBy",
-            "AddTrigger": "TrigDamageDone"
-          }
-        }
-      ],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Destination": "Graveyard",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ReplaceWith": "Exile",
-            "ValidCard": "Card.Self"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\"",
+          "mode": "Continuous"
+        }
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

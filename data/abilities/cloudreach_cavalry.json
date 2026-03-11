@@ -1,20 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Bird",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Bird, CARDNAME gets +2/+2 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as you control a Bird, CARDNAME gets +2/+2 and has flying.",
-        "Affected": "Card.Self",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "AddKeyword": "Flying",
-        "IsPresent": "Bird.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

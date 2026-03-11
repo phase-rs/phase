@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Spells you cast have affinity for artifacts. (They cost {1} less to cast for each artifact you control.)",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Stack",
-        "AddKeyword": "Affinity:Artifact",
-        "Affected": "Card.wasCastByYou",
-        "Description": "Spells you cast have affinity for artifacts. (They cost {1} less to cast for each artifact you control.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Affinity:Artifact",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

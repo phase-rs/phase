@@ -2,29 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "KWPump",
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "SpellDescription": "CARDNAME can't be blocked this turn except by creatures with haste."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "KWPump",
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "SpellDescription": "CARDNAME can't be blocked this turn except by creatures with haste."
-      }
+      "description": "CARDNAME can't be blocked this turn except by creatures with haste.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

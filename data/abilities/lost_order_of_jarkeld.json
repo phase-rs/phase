@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "SetToughness": "X",
-        "Description": "CARDNAME's power and toughness are each equal to 1 plus the number of creatures the chosen player controls.",
-        "EffectZone": "Battlefield"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to 1 plus the number of creatures the chosen player controls.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

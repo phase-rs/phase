@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/+1 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidLKI": "Card.Creature+OppCtrl",
-        "ActiveZones": "Battlefield",
-        "Origin": "Battlefield",
-        "ReplaceWith": "Exile",
-        "Description": "If a creature an opponent controls would die, exile it instead.",
-        "Destination": "Graveyard"
-      }
+      "description": "If a creature an opponent controls would die, exile it instead.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

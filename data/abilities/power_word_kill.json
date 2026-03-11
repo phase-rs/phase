@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonAngel+nonDemon+nonDevil+nonDragon"
-        }
-      },
       "cost": null,
+      "description": "Destroy target non-Angel, non-Demon, non-Devil, non-Dragon creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target non-Angel, non-Demon, non-Devil, non-Dragon creature",
-        "SpellDescription": "Destroy target non-Angel, non-Demon, non-Devil, non-Dragon creature."
-      }
+      "target_prompt": "Select target non-Angel, non-Demon, non-Devil, non-Dragon creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

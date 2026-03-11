@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked except by three or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked except by three or more creatures.",
-        "ValidCard": "Creature.Self",
-        "Min": "3"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

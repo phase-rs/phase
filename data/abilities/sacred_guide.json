@@ -2,45 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "Valid": "Card.White",
-          "FoundDestination": "Hand",
-          "RevealedDestination": "Exile",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a white card. Put that card into your hand and exile all other cards revealed this way.",
-          "ValidDescription": "white"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 W"
+            "cost": "1 W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Card.White",
-        "FoundDestination": "Hand",
-        "RevealedDestination": "Exile",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a white card. Put that card into your hand and exile all other cards revealed this way.",
-        "ValidDescription": "white"
-      }
+      "description": "Reveal cards from the top of your library until you reveal a white card. Put that card into your hand and exile all other cards revealed this way.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a white card. Put that card into your hand and exile all other cards revealed this way.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

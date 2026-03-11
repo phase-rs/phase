@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or blocks, any player may exile three cards from their graveyard. If a player does, CARDNAME assigns no combat damage this turn.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DBNoCombatDamage",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, any player may exile three cards from their graveyard. If a player does, CARDNAME assigns no combat damage this turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or blocks, any player may exile three cards from their graveyard. If a player does, CARDNAME assigns no combat damage this turn.",
       "mode": "Blocks",
-      "params": {
-        "Execute": "DBNoCombatDamage",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME attacks or blocks, any player may exile three cards from their graveyard. If a player does, CARDNAME assigns no combat damage this turn.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

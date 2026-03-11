@@ -2,26 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerLEX"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Gain control of target creature with power less than or equal to the number of creatures you control.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target creature with power less than or equal to the number of creatures you control.",
-        "TgtPrompt": "Select target creature with power less than or equal to the number of creatures you control"
-      }
+      "target_prompt": "Select target creature with power less than or equal to the number of creatures you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

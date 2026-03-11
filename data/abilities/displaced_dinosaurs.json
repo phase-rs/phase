@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As a historic permanent you control enters, it becomes a 7/7 Dinosaur creature in addition to its other types. (Artifacts, legendaries, and Sagas are historic.)",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "BecomeDino",
-        "ValidCard": "Permanent.Historic+YouCtrl",
-        "Destination": "Battlefield",
-        "Layer": "Copy",
-        "ReplacementResult": "Updated",
-        "Description": "As a historic permanent you control enters, it becomes a 7/7 Dinosaur creature in addition to its other types. (Artifacts, legendaries, and Sagas are historic.)"
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

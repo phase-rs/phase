@@ -1,19 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Wolf",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Werewolf.Other"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control another Wolf or Werewolf, CARDNAME gets +1/+0 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "IsPresent": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
-        "Description": "As long as you control another Wolf or Werewolf, CARDNAME gets +1/+0 and has trample.",
-        "AddPower": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

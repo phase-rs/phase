@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, it becomes the creature type of your choice. (This effect lasts indefinitely.)",
       "mode": "TurnFaceUp",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME is turned face up, it becomes the creature type of your choice. (This effect lasts indefinitely.)",
-        "Execute": "TrigChoose",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

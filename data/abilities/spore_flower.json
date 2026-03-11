@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Fog",
-        "params": {
-          "SpellDescription": "Prevent all combat damage that would be dealt this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/SPORE>"
+        "cost": "SubCounter<3/SPORE>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all combat damage that would be dealt this turn."
-      }
+      "description": "Prevent all combat damage that would be dealt this turn.",
+      "effect": {
+        "description": "Prevent all combat damage that would be dealt this turn.",
+        "name": "Fog",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a spore counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a spore counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

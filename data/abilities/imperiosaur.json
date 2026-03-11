@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PermanentCreature",
-        "params": {
-          "ManaRestriction": "Land.Basic"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G G"
+        "cost": "2 G G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ManaRestriction": "Land.Basic"
-      }
+      "effect": {
+        "name": "PermanentCreature",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

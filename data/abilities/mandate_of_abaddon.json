@@ -2,26 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose target creature you control. Destroy all creatures with power less than that creature's power.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [],
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target creature you control. Destroy all creatures with power less than that creature's power.",
-        "SubAbility": "DBDestroyAll",
-        "TgtPrompt": "Choose target creature you control"
-      }
+      "target_prompt": "Choose target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

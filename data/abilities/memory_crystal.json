@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "Player",
-        "Description": "Buyback costs cost {2} less.",
-        "Amount": "2",
-        "ValidSpell": "Spell.Buyback",
-        "ValidCard": "Card"
-      }
+      "description": "Buyback costs cost {2} less.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

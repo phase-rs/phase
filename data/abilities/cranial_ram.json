@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +X/+1, where X is the number of artifacts you control.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "AddPower": "X",
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +X/+1, where X is the number of artifacts you control."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

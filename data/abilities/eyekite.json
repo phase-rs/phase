@@ -1,19 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +2/+0 as long as you've drawn two or more cards this turn.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +2/+0 as long as you've drawn two or more cards this turn.",
-        "AddPower": "2",
-        "CheckSVar": "X",
-        "SVarCompare": "GE2",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

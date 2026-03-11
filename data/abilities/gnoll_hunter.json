@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Pack tactics — Whenever CARDNAME attacks, if you attacked with creatures with total power 6 or greater this combat, put a +1/+1 counter on CARDNAME.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "SVarCompare": "GE6",
-        "TriggerDescription": "Pack tactics — Whenever CARDNAME attacks, if you attacked with creatures with total power 6 or greater this combat, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "PackTactics",
-        "NoResolvingCheck": "True",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

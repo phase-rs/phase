@@ -1,32 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "PlayerTurn": "True",
-        "ValidCard": "Card.Self+wasCast",
-        "TriggerDescription": "Addendum — When CARDNAME enters, if you cast it during your main phase, enchanted creature gains lifelink until end of turn.",
-        "Origin": "Any",
-        "Execute": "TrigPump",
-        "Destination": "Battlefield",
-        "Phase": "Main1,Main2"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+2 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Vigilance",
-        "Description": "Enchanted creature gets +1/+2 and has vigilance.",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "2",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Addendum — When CARDNAME enters, if you cast it during your main phase, enchanted creature gains lifelink until end of turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

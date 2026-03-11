@@ -1,39 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME is the chosen type in addition to its other types.",
-        "AddType": "ChosenType"
-      }
-    },
-    {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Ability",
-        "Cost": "PayLife<1>",
-        "EffectZone": "All",
-        "Description": "Mana abilities of CARDNAME cost an additional 1 life to activate.",
-        "ValidSpell": "Activated.ManaAbility",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control two or fewer other lands.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped unless you control two or fewer other lands.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "LandTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen type in addition to its other types.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
+    },
+    {
+      "description": "Mana abilities of CARDNAME cost an additional 1 life to activate.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
+    }
+  ],
+  "triggers": []
 }

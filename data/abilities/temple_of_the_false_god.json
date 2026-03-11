@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}{C}. Activate only if you control five or more lands.",
-          "Amount": "2",
-          "IsPresent": "Land.YouCtrl",
-          "PresentCompare": "GE5"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}{C}. Activate only if you control five or more lands.",
-        "Amount": "2",
-        "IsPresent": "Land.YouCtrl",
-        "PresentCompare": "GE5"
-      }
+      "description": "Add {C}{C}. Activate only if you control five or more lands.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

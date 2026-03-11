@@ -1,29 +1,100 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature has lifelink.",
-        "AddKeyword": "Lifelink"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "GE30",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have 30 or more life, equipped creature gets +5/+5 and has indestructible and \"Prevent all damage that would be dealt to this creature.\"",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE30",
-        "Description": "As long as you have 30 or more life, equipped creature gets +5/+5 and has indestructible and \"Prevent all damage that would be dealt to this creature.\"",
-        "CheckSVar": "X",
-        "AddKeyword": "Indestructible & Prevent all damage that would be dealt to CARDNAME.",
-        "AddToughness": "5",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "5"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 5
+        },
+        {
+          "type": "AddToughness",
+          "value": 5
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Prevent",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "all",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "damage",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "that",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "would",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "be",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "dealt",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "to",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "CARDNAME.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

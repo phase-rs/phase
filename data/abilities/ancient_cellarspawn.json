@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card",
-        "ValidSAonCard": "Spell.ManaSpent LTX",
-        "Execute": "TrigLoseLife",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a spell, if the amount of mana spent to cast it was less than its mana value, target opponent loses life equal to the difference.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Each spell you cast that's a Demon, Horror, or Nightmare costs {1} less to cast.",
-        "ValidCard": "Demon,Horror,Nightmare"
-      }
+      "description": "Each spell you cast that's a Demon, Horror, or Nightmare costs {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a spell, if the amount of mana spent to cast it was less than its mana value, target opponent loses life equal to the difference.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

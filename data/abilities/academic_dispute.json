@@ -2,34 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "MustBlock",
-          "ValidTgts": "Creature",
-          "ExileOnMoved": "Battlefield",
-          "RememberObjects": "Targeted",
-          "SubAbility": "DBPump",
-          "StackDescription": "{c:Targeted} blocks this turn if able.",
-          "SpellDescription": "Target creature blocks this turn if able."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "MustBlock",
-        "ValidTgts": "Creature",
-        "ExileOnMoved": "Battlefield",
-        "RememberObjects": "Targeted",
-        "SubAbility": "DBPump",
-        "StackDescription": "{c:Targeted} blocks this turn if able.",
-        "SpellDescription": "Target creature blocks this turn if able."
-      }
+      "description": "Target creature blocks this turn if able.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,61 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Battlefield",
-            "destination": "Hand",
-            "target": {
-              "type": "All",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberTargets": "True",
-            "SubAbility": "DBCleanup",
-            "ChangeType": "Creature.blockingRemembered,Creature.isBlockedByRemembered",
-            "SpellDescription": "Return all creatures blocking or blocked by target creature to their owner's hand.",
-            "UseAllOriginZones": "True"
-          }
+          "description": "Return all creatures blocking or blocked by target creature to their owner's hand.",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZoneAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card.MultiColor"
-            }
-          },
           "cost": null,
+          "description": "Counter target multicolored spell.",
+          "effect": {
+            "target": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "MultiColor"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetType": "Spell",
-            "SpellDescription": "Counter target multicolored spell.",
-            "TgtPrompt": "Select target multicolored spell"
-          }
+          "target_prompt": "Select target multicolored spell"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

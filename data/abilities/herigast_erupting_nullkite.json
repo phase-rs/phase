@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When you cast this spell, you may exile your hand. If you do, draw three cards."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each creature spell you cast has emerge. The emerge cost is equal to its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Emerge:CardManaCost",
-        "AffectedZone": "Stack",
-        "EffectZone": "Battlefield",
-        "Affected": "Creature.YouCtrl+wasCast",
-        "Description": "Each creature spell you cast has emerge. The emerge cost is equal to its mana cost."
-      }
+      "modifications": [
+        {
+          "keyword": "Emerge:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you cast this spell, you may exile your hand. If you do, draw three cards.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,23 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Mana",
-        "produced": "W U B R G",
-        "params": {
-          "SpellDescription": "Add {W}{U}{B}{R}{G}."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W}{U}{B}{R}{G}."
-      }
+      "description": "Add {W}{U}{B}{R}{G}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue",
+          "Black",
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

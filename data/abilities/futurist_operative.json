@@ -2,46 +2,76 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 U",
+        "type": "Mana"
+      },
+      "description": "Untap CARDNAME.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Tapped"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is tapped, it is a Human Citizen with base power and toughness 1/1 and it can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "1",
-        "Affected": "Card.Self+tapped",
-        "RemoveCreatureTypes": "True",
-        "Description": "As long as CARDNAME is tapped, it is a Human Citizen with base power and toughness 1/1 and it can't be blocked.",
-        "AddType": "Human & Citizen",
-        "SetToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Human & Citizen",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Card.Self",
-        "IsPresent": "Card.Self+tapped"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

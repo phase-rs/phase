@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidCards": "Card.YouOwn",
-        "TriggerDescription": "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.",
-        "Destination": "Any"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

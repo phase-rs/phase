@@ -1,31 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "Description": "This spell costs {1} less to cast for each creature card in your graveyard.",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {1} less to cast for each creature card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "During each of your turns, you may cast a creature spell from your graveyard.",
-        "Affected": "Creature.nonLand+YouCtrl",
-        "MayPlayLimit": "1",
-        "Condition": "PlayerTurn",
-        "AffectedZone": "Graveyard",
-        "EffectZone": "Battlefield",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During each of your turns, you may cast a creature spell from your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

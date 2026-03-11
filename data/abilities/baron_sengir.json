@@ -2,41 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate another target Vampire.",
-          "TgtPrompt": "Select another target Vampire",
-          "ValidTgts": "Creature.Vampire+Other"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Regenerate another target Vampire.",
+      "effect": {
+        "description": "Regenerate another target Vampire.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate another target Vampire.",
-        "TgtPrompt": "Select another target Vampire",
-        "ValidTgts": "Creature.Vampire+Other"
-      }
+      "target_prompt": "Select another target Vampire"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +2/+2 counter on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.DamagedBy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +2/+2 counter on CARDNAME.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "DamagedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

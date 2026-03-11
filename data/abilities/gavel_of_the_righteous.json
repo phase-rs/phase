@@ -1,39 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, put a charge counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "X",
-        "Description": "Equipped creature gets +1/+1 for each counter on CARDNAME.",
-        "AddPower": "X"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each counter on CARDNAME.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "GE4",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as CARDNAME has four or more counters on it, equipped creature has double strike.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "AddKeyword": "Double Strike",
-        "Description": "As long as CARDNAME has four or more counters on it, equipped creature has double strike.",
-        "Affected": "Creature.EquippedBy",
-        "SVarCompare": "GE4"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, put a charge counter on CARDNAME.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -2,48 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or planeswalker.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "Destroy target creature or planeswalker."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast if you control an artifact and {1} less to cast if you control an enchantment.",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "Amount": "1",
-        "IsPresent": "Artifact.YouCtrl"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control an artifact and {1} less to cast if you control an enchantment.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast if you control an artifact and {1} less to cast if you control an enchantment.",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Enchantment.YouCtrl",
-        "Amount": "1",
-        "Secondary": "True"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Enchantment",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control an artifact and {1} less to cast if you control an enchantment.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

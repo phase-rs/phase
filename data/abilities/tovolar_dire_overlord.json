@@ -1,80 +1,99 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.",
           "mode": "DamageDone",
-          "params": {
-            "ValidTarget": "Player",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDrawD",
-            "TriggerDescription": "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.",
-            "ValidSource": "Wolf.YouCtrl,Werewolf.YouCtrl",
-            "CombatDamage": "True"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Wolf",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Werewolf.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         },
         {
+          "description": "At the beginning of your upkeep, if you control three or more Wolves and/or Werewolves, it becomes night. Then transform any number of Human Werewolves you control.",
           "mode": "Phase",
-          "params": {
-            "SVarCompare": "GE3",
-            "Execute": "TrigNight",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your upkeep, if you control three or more Wolves and/or Werewolves, it becomes night. Then transform any number of Human Werewolves you control.",
-            "CheckSVar": "X",
-            "Phase": "Upkeep"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Wolf.YouCtrl,Werewolf.YouCtrl"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "X R G"
+            "cost": "X R G",
+            "type": "Mana"
           },
+          "description": "Target Wolf or Werewolf you control gets +X/+0 and gains trample until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Wolf",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Werewolf.YouCtrl"
+                }
+              ],
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target Wolf or Werewolf you control",
-            "KW": "Trample",
-            "SpellDescription": "Target Wolf or Werewolf you control gets +X/+0 and gains trample until end of turn."
-          }
+          "target_prompt": "Select target Wolf or Werewolf you control"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.",
           "mode": "DamageDone",
-          "params": {
-            "ValidTarget": "Player",
-            "TriggerDescription": "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDrawN",
-            "ValidSource": "Wolf.YouCtrl,Werewolf.YouCtrl",
-            "CombatDamage": "True"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Wolf",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Werewolf.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

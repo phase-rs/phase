@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever you attack with three or more creatures, creatures you control get +1/+1 until end of turn.",
-        "AttackingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidAttackersAmount": "GE3",
-        "ValidAttackers": "Creature"
+      "description": "Permanents your opponents control can't be turned face up during your turn.",
+      "event": "TurnFaceUp",
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "TurnFaceUp",
-      "params": {
-        "ValidCard": "Permanent.OppCtrl",
-        "PlayerTurn": "True",
-        "Description": "Permanents your opponents control can't be turned face up during your turn.",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen"
-      }
+      "description": "Whenever you attack with three or more creatures, creatures you control get +1/+1 until end of turn.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

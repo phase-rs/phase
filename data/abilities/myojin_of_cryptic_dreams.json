@@ -2,34 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TargetType": "Spell",
-          "Amount": "3",
-          "TgtPrompt": "Select target permanent spell you control",
-          "SpellDescription": "Copy target permanent spell you control three times. (The copies become tokens.)",
-          "ValidTgts": "Permanent.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/Indestructible>"
+        "cost": "SubCounter<1/Indestructible>",
+        "type": "Mana"
       },
+      "description": "Copy target permanent spell you control three times. (The copies become tokens.)",
+      "effect": {
+        "description": "Copy target permanent spell you control three times. (The copies become tokens.)",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "Amount": "3",
-        "TgtPrompt": "Select target permanent spell you control",
-        "SpellDescription": "Copy target permanent spell you control three times. (The copies become tokens.)",
-        "ValidTgts": "Permanent.YouCtrl"
-      }
+      "target_prompt": "Select target permanent spell you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

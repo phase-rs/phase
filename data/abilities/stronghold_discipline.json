@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBLoseLife",
-          "RepeatPlayers": "Player",
-          "SpellDescription": "Each player loses 1 life for each creature they control.",
-          "AILogic": "AllPlayerLoseLife"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBLoseLife",
-        "RepeatPlayers": "Player",
-        "SpellDescription": "Each player loses 1 life for each creature they control.",
-        "AILogic": "AllPlayerLoseLife"
-      }
+      "description": "Each player loses 1 life for each creature they control.",
+      "effect": {
+        "description": "Each player loses 1 life for each creature they control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

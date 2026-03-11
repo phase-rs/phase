@@ -1,31 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCards": "Card.YouOwn",
-        "Destination": "Any",
-        "Origin": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more cards leave your graveyard, create a 1/1 white Zombie creature token."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Zombie"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Creature.token"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control that are Zombies and/or tokens get +1/+1 and have flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control that are Zombies and/or tokens get +1/+1 and have flying.",
-        "Affected": "Creature.Zombie+YouCtrl,Creature.token+YouCtrl",
-        "AddPower": "1",
-        "AddKeyword": "Flying",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more cards leave your graveyard, create a 1/1 white Zombie creature token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZoneAll",
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

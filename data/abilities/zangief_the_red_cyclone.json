@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Spinning Piledriver — Whenever NICKNAME deals damage to a creature, if that creature was dealt excess damage this turn, that creature's controller sacrifices a noncreature, nonland permanent.",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigSac",
-        "ValidTarget": "Creature.wasDealtExcessDamageThisTurn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Iron Muscle — As long as it's your turn, NICKNAME has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "Affected": "Card.Self",
-        "Description": "Iron Muscle — As long as it's your turn, NICKNAME has indestructible.",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Spinning Piledriver — Whenever NICKNAME deals damage to a creature, if that creature was dealt excess damage this turn, that creature's controller sacrifices a noncreature, nonland permanent.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

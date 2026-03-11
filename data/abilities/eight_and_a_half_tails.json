@@ -2,56 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "white",
-          "SpellDescription": "Target permanent you control gains protection from white until end of turn.",
-          "ValidTgts": "Permanent.YouCtrl",
-          "TgtPrompt": "Select target permanent you control"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
+      "description": "Target permanent you control gains protection from white until end of turn.",
+      "effect": {
+        "description": "Target permanent you control gains protection from white until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Gains": "white",
-        "SpellDescription": "Target permanent you control gains protection from white until end of turn.",
-        "ValidTgts": "Permanent.YouCtrl",
-        "TgtPrompt": "Select target permanent you control"
-      }
+      "target_prompt": "Select target permanent you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "White",
-        "SpellDescription": "Target spell or permanent becomes white until end of turn.",
-        "OverwriteColors": "True",
-        "TgtZone": "Stack,Battlefield"
-      }
+      "description": "Target spell or permanent becomes white until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,30 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When there are no creatures on the battlefield, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "TriggerDescription": "When there are no creatures on the battlefield, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "EQ0",
-        "Execute": "TrigSac",
-        "IsPresent": "Creature"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a permanent other than CARDNAME is put into a graveyard from the battlefield, CARDNAME deals 1 damage to each creature and each player.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigDamageAll",
-        "TriggerDescription": "Whenever a permanent other than CARDNAME is put into a graveyard from the battlefield, CARDNAME deals 1 damage to each creature and each player.",
-        "ValidCard": "Permanent.Other"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Permanent",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

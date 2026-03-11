@@ -1,30 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME enters, draw a card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Snow"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has deathtouch as long as you control at least three other snow permanents.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch",
-        "IsPresent": "Permanent.Snow+Other+YouCtrl",
-        "Description": "CARDNAME has deathtouch as long as you control at least three other snow permanents.",
-        "Affected": "Card.Self",
-        "PresentCompare": "GE3"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,29 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self,Creature.EquippedBy",
-        "ValidTarget": "Player",
-        "Execute": "TrigDiscard",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME or equipped creature deals combat damage to a player, you may sacrifice it. If you do, discard your hand, then draw three cards."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +2/+2.",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME or equipped creature deals combat damage to a player, you may sacrifice it. If you do, discard your hand, then draw three cards.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

@@ -1,28 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Unattach",
-      "params": {
-        "ValidAttachment": "Card.Self",
-        "ValidObject": "Permanent",
-        "TriggerDescription": "Whenever CARDNAME becomes unattached from a permanent, sacrifice that permanent.",
-        "Execute": "TrigSac"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +3/+2.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME becomes unattached from a permanent, sacrifice that permanent.",
+      "mode": "Unattach"
+    }
+  ]
 }

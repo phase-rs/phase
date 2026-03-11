@@ -2,50 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X",
+        "type": "Mana"
+      },
+      "description": "Put X vortex counters on CARDNAME. Activate only during your upkeep.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "VORTEX",
         "count": 1,
+        "counter_type": "VORTEX",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "PlayerTurn": "True",
-        "SpellDescription": "Put X vortex counters on CARDNAME. Activate only during your upkeep."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, remove all vortex counters from CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, remove all vortex counters from CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigRemove",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of the chosen player's upkeep, CARDNAME deals 3 damage to that player unless they pay {1} for each vortex counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDamage",
-        "TriggerDescription": "At the beginning of the chosen player's upkeep, CARDNAME deals 3 damage to that player unless they pay {1} for each vortex counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player.Chosen",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

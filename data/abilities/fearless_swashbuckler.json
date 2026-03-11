@@ -1,30 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigDraw",
-        "AttackingPlayer": "You",
-        "NoResolvingCheck": "True",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ2",
-        "TriggerDescription": "Whenever you attack, if a Pirate and a Vehicle attacked this combat, draw three cards, then discard two cards.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Vehicle",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Vehicles you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Vehicles you control have haste.",
-        "Affected": "Vehicle.YouCtrl",
-        "AddKeyword": "Haste"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you attack, if a Pirate and a Vehicle attacked this combat, draw three cards, then discard two cards.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

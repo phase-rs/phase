@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield,Stack",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent,Card.inZoneStack"
-        }
-      },
       "cost": null,
+      "description": "Return target spell or permanent to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield,Stack",
+        "target": {
+          "card_type": "Permanent,Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target spell or permanent to its owner's hand.",
-        "TgtPrompt": "Select target spell or permanent",
-        "TgtZone": "Stack,Battlefield",
-        "SubAbility": "DBDealDmg"
-      }
+      "target_prompt": "Select target spell or permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

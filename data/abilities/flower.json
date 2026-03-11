@@ -1,59 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Search your library for a basic Forest or Plains card, reveal it, put it into your hand, then shuffle.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
             "destination": "Hand",
+            "origin": "Library",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeTypeDesc": "basic Forest or Plains",
-            "ChangeType": "Forest.Basic,Plains.Basic",
-            "SpellDescription": "Search your library for a basic Forest or Plains card, reveal it, put it into your hand, then shuffle."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PumpAll",
-            "power": 2,
-            "toughness": 2,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Creatures you control get +2/+2 until end of turn.",
-            "ValidCards": "Creature.YouCtrl"
-          }
+          "description": "Creatures you control get +2/+2 until end of turn.",
+          "effect": {
+            "power": 2,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 2,
+            "type": "PumpAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

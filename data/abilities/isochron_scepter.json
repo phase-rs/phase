@@ -2,80 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "ValidSA": "Spell",
-          "Amount": "All",
-          "ValidZone": "Exile",
-          "Valid": "Card.IsImprinted+ExiledWithSource",
-          "SpellDescription": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
-          "Optional": "True",
-          "WithoutManaCost": "True",
-          "CopyCard": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidSA": "Spell",
-        "Amount": "All",
-        "ValidZone": "Exile",
-        "Valid": "Card.IsImprinted+ExiledWithSource",
-        "SpellDescription": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
-        "Optional": "True",
-        "WithoutManaCost": "True",
-        "CopyCard": "True"
-      }
+      "description": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
+      "effect": {
+        "description": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile an instant card with mana value 2 or less from your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile an instant card with mana value 2 or less from your hand.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBForget",
-        "Origin": "Exile",
-        "Static": "True",
-        "Destination": "Any",
-        "ValidCard": "Card.IsImprinted+ExiledWithSource"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

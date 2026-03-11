@@ -1,26 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When you cast this spell, target opponent exiles the top of half their library, rounded up.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "NICKNAME has annihilator X, where X is the number of +1/+1 counters on it.",
       "mode": "Continuous",
-      "params": {
-        "Description": "NICKNAME has annihilator X, where X is the number of +1/+1 counters on it.",
-        "Affected": "Card.Self",
-        "AddKeyword": "Annihilator:X"
-      }
+      "modifications": [
+        {
+          "keyword": "Annihilator:X",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you cast this spell, target opponent exiles the top of half their library, rounded up.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

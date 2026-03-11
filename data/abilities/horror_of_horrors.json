@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Creature.Black",
-          "SpellDescription": "Regenerate target black creature.",
-          "TgtPrompt": "Select target black creature"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Regenerate target black creature.",
+      "effect": {
+        "description": "Regenerate target black creature.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.Black",
-        "SpellDescription": "Regenerate target black creature.",
-        "TgtPrompt": "Select target black creature"
-      }
+      "target_prompt": "Select target black creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

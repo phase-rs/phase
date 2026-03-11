@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by black and/or red creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "Description": "CARDNAME can't be blocked by black and/or red creatures.",
-        "ValidBlocker": "Creature.Black,Creature.Red"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

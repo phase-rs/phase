@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "Number": "2",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies, return another target creature card with mana value less than or equal to CARDNAME's power from your graveyard to the battlefield.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, return another target creature card with mana value less than or equal to CARDNAME's power from your graveyard to the battlefield.",
-        "Execute": "TrigReturn"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

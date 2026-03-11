@@ -1,34 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Phase": "End Of Turn",
-        "TriggerDescription": "At the beginning of your end step, if it's not the first turn of the game, put a death counter on CARDNAME. You draw X cards and you lose X life, where X is the number of death counters on CARDNAME.",
-        "ValidPlayer": "You",
-        "SVarCompare": "GT1",
-        "CheckSVar": "Turns",
-        "TriggerZones": "Command"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "Skip": "True",
-        "Description": "Skip your draw step.",
-        "ActiveZones": "Command",
-        "ValidPlayer": "You",
-        "Phase": "Draw"
-      }
+      "description": "At the beginning of your end step, if it's not the first turn of the game, put a death counter on CARDNAME. You draw X cards and you lose X life, where X is the number of death counters on CARDNAME.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

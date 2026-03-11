@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Terror from the Deep — When CARDNAME enters, it fights up to one target creature an opponent controls. If that creature would die this turn, exile it instead.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigFight",
-        "TriggerDescription": "Terror from the Deep — When CARDNAME enters, it fights up to one target creature an opponent controls. If that creature would die this turn, exile it instead.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

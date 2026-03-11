@@ -1,50 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever one or more creatures you control become blocked, each blocking creature gets -1/-1 until end of turn.",
           "mode": "AttackerBlockedOnce",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Creature.YouCtrl",
-            "Execute": "TrigPump",
-            "TriggerDescription": "Whenever one or more creatures you control become blocked, each blocking creature gets -1/-1 until end of turn."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PumpAll",
-            "power": -1,
-            "toughness": -1,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature.blockedThisTurn",
-            "SpellDescription": "Each creature that blocked this turn gets -1/-1 until end of turn."
-          }
+          "description": "Each creature that blocked this turn gets -1/-1 until end of turn.",
+          "effect": {
+            "power": -1,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": -1,
+            "type": "PumpAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

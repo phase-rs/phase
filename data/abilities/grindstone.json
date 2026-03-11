@@ -2,48 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "SubAbility": "DBCleanup",
-          "RepeatSVarCompare": "GE2",
-          "StackDescription": "SpellDescription",
-          "RepeatSubAbility": "DBCleanAndGrind",
-          "ValidTgts": "Player",
-          "MaxRepeat": "MaxRepeats",
-          "SpellDescription": "Target player mills two cards. If two cards that share a color were milled this way, repeat this process.",
-          "RepeatCheckSVar": "MilledSharesColor"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCleanup",
-        "RepeatSVarCompare": "GE2",
-        "StackDescription": "SpellDescription",
-        "RepeatSubAbility": "DBCleanAndGrind",
-        "ValidTgts": "Player",
-        "MaxRepeat": "MaxRepeats",
-        "SpellDescription": "Target player mills two cards. If two cards that share a color were milled this way, repeat this process.",
-        "RepeatCheckSVar": "MilledSharesColor"
-      }
+      "description": "Target player mills two cards. If two cards that share a color were milled this way, repeat this process.",
+      "effect": {
+        "description": "Target player mills two cards. If two cards that share a color were milled this way, repeat this process.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

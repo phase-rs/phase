@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 1 damage to each creature you don't control.",
           "effect": {
-            "type": "DamageAll",
             "amount": {
               "type": "Fixed",
               "value": 1
             },
             "target": {
-              "type": "All",
-              "filter": ""
-            }
+              "type": "Any"
+            },
+            "type": "DamageAll"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 1 damage to each creature you don't control.",
-            "ValidDescription": "each creature you don't control.",
-            "ValidCards": "Creature.YouDontCtrl"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "SVarCompare": "EQ0",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "Description": "If an opponent has no cards in hand, this spell costs {6} less to cast.",
-        "Amount": "6"
-      }
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent has no cards in hand, this spell costs {6} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

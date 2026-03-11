@@ -2,30 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Sorcery.YouCtrl.Other"
-        }
-      },
       "cost": null,
+      "description": "Target sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (Mana cost includes color.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Sorcery",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl.Other"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Graveyard",
-        "TgtPrompt": "Select target sorcery card",
-        "KW": "Flashback",
-        "SpellDescription": "Target sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (Mana cost includes color.)",
-        "PumpZone": "Graveyard",
-        "AILogic": "ReplaySpell"
-      }
+      "target_prompt": "Select target sorcery card"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

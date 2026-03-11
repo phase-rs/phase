@@ -2,45 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME perpetually gets -1/-1,",
       "effect": {
-        "type": "Pump",
         "power": -1,
-        "toughness": -1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsPresent": "Card.Self+toughnessGE2",
-        "PumpZone": "Graveyard",
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "CARDNAME perpetually gets -1/-1,",
-        "PresentZone": "Graveyard",
-        "SubAbility": "DBChangeZone",
-        "Duration": "Perpetual",
-        "StackDescription": "SpellDescription"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

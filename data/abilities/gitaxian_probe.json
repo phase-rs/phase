@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "Look": "True",
-          "ValidTgts": "Player",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Look at target player's hand.",
-          "AIPhyrexianPayment": "Never"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Look": "True",
-        "ValidTgts": "Player",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Look at target player's hand.",
-        "AIPhyrexianPayment": "Never"
-      }
+      "description": "Look at target player's hand.",
+      "effect": {
+        "description": "Look at target player's hand.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

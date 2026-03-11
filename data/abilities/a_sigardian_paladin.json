@@ -2,40 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl+counters_GE1_P1P1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G W"
+        "cost": "G W",
+        "type": "Mana"
       },
+      "description": "Target creature you control with a +1/+1 counter on it gains trample and lifelink until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample & Lifelink",
-        "SpellDescription": "Target creature you control with a +1/+1 counter on it gains trample and lifelink until end of turn.",
-        "TgtPrompt": "Select target creature with a +1/+1 counter on it"
-      }
+      "target_prompt": "Select target creature with a +1/+1 counter on it"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've put one or more +1/+1 counters on a creature this turn, CARDNAME has trample and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample & Lifelink",
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "Description": "As long as you've put one or more +1/+1 counters on a creature this turn, CARDNAME has trample and lifelink."
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

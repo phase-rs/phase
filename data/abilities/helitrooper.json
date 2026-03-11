@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever this creature attacks, another target attacking creature gains flying until end of turn.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "ValidSpell": "Activated.Equip",
-        "Description": "Equip abilities you activate that target this creature cost {2} less to activate.",
-        "Amount": "2",
-        "ValidTarget": "Card.Self"
-      }
+      "description": "Equip abilities you activate that target this creature cost {2} less to activate.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever this creature attacks, another target attacking creature gains flying until end of turn.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

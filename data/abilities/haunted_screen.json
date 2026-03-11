@@ -2,72 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W B",
-        "params": {
-          "SpellDescription": "Add {W} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {B}."
-      }
+      "description": "Add {W} or {B}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G U R",
-        "params": {
-          "SpellDescription": "Add {G}, {U}, or {R}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<1>"
+            "cost": "PayLife<1>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}, {U}, or {R}."
-      }
+      "description": "Add {G}, {U}, or {R}.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "7",
+        "type": "Mana"
+      },
+      "description": "Put seven +1/+1 counters on CARDNAME. It becomes a 0/0 Spirit creature in addition to its other types. Activate only once.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 7,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "7"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimate",
-        "GameActivationLimit": "1",
-        "SpellDescription": "Put seven +1/+1 counters on CARDNAME. It becomes a 0/0 Spirit creature in addition to its other types. Activate only once."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

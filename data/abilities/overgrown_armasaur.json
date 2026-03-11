@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever CARDNAME is dealt damage, create a 1/1 green Saproling creature token.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, create a 1/1 green Saproling creature token.",
-        "Execute": "TrigToken",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

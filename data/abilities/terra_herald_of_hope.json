@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Trance — At the beginning of combat on your turn, mill two cards. NICKNAME gains flying until end of turn.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "Execute": "TrigMill",
-        "TriggerDescription": "Trance — At the beginning of combat on your turn, mill two cards. NICKNAME gains flying until end of turn.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, you may pay {2}. When you do, return target creature card with power 3 or less from your graveyard to the battlefield tapped.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigPayCost",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may pay {2}. When you do, return target creature card with power 3 or less from your graveyard to the battlefield tapped.",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

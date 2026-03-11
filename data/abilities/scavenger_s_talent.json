@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creatures you control die, create a Food token. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever one or more creatures you control die, create a Food token. This ability triggers only once each turn.",
-        "ValidCards": "Creature.YouCtrl",
-        "ActivationLimit": "1",
-        "Execute": "TrigToken",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

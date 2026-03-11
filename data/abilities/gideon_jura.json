@@ -2,90 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "SpellDescription": "During target opponent's next turn, creatures that player controls attack CARDNAME if able.",
-          "Mode": "Phase",
-          "Phase": "Upkeep->",
-          "ValidTgts": "Opponent",
-          "DelayedTriggerDefinedPlayer": "Targeted",
-          "Planeswalker": "True",
-          "Execute": "TrigEffect",
-          "RememberObjects": "Targeted",
-          "Static": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "During target opponent's next turn, creatures that player controls attack CARDNAME if able.",
-        "Mode": "Phase",
-        "Phase": "Upkeep->",
-        "ValidTgts": "Opponent",
-        "DelayedTriggerDefinedPlayer": "Targeted",
-        "Planeswalker": "True",
-        "Execute": "TrigEffect",
-        "RememberObjects": "Targeted",
-        "Static": "True"
-      }
+      "description": "During target opponent's next turn, creatures that player controls attack CARDNAME if able.",
+      "effect": {
+        "description": "During target opponent's next turn, creatures that player controls attack CARDNAME if able.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Destroy target tapped creature.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.tapped"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target tapped creature.",
-        "TgtPrompt": "Select target tapped creature",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Select target tapped creature"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Until end of turn, CARDNAME becomes a 6/6 Human Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
       "effect": {
-        "type": "Animate",
         "power": 6,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 6,
+        "type": "Animate",
         "types": [
           "Creature",
           "Human",
           "Soldier"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBPrevent",
-        "Defined": "Self",
-        "Ultimate": "True",
-        "SpellDescription": "Until end of turn, CARDNAME becomes a 6/6 Human Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

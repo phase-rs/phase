@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Doctor spell or creature spell with doctor's companion, draw a card.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Doctor,Creature.withDoctor's companion",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you cast a Doctor spell or creature spell with doctor's companion, draw a card.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Doctor,Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

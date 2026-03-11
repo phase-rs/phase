@@ -2,81 +2,87 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Target creature without first strike, double strike, or vigilance",
-          "ForgetOnMoved": "Battlefield",
-          "SpellDescription": "Target creature without first strike, double strike, or vigilance can't attack or block until your next turn.",
-          "Planeswalker": "True",
-          "StaticAbilities": "DBCantAttack,DBCantBlockBy",
-          "RememberObjects": "Targeted",
-          "Duration": "UntilYourNextTurn",
-          "IsCurse": "True",
-          "ValidTgts": "Creature.withoutFirst Strike+withoutDouble Strike+withoutVigilance"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Target creature without first strike, double strike, or vigilance can't attack or block until your next turn.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Target creature without first strike, double strike, or vigilance",
-        "ForgetOnMoved": "Battlefield",
-        "SpellDescription": "Target creature without first strike, double strike, or vigilance can't attack or block until your next turn.",
-        "Planeswalker": "True",
-        "StaticAbilities": "DBCantAttack,DBCantBlockBy",
-        "RememberObjects": "Targeted",
-        "Duration": "UntilYourNextTurn",
-        "IsCurse": "True",
-        "ValidTgts": "Creature.withoutFirst Strike+withoutDouble Strike+withoutVigilance"
-      }
+      "target_prompt": "Target creature without first strike, double strike, or vigilance"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Search your library and/or graveyard for a card named Monk of the Open Hand, reveal it, and put it into your hand. If you search your library this way, shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Optional": "True",
-        "SpellDescription": "Search your library and/or graveyard for a card named Monk of the Open Hand, reveal it, and put it into your hand. If you search your library this way, shuffle.",
-        "ShuffleNonMandatory": "True",
-        "OriginAlternative": "Graveyard",
-        "ChangeNum": "1",
-        "ChangeType": "Card.YouOwn+namedMonk of the Open Hand"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME has seven or more loyalty counters on him, he's a 7/7 Dragon God creature with flying and indestructible.",
       "mode": "Continuous",
-      "params": {
-        "RemoveCardTypes": "True",
-        "AddKeyword": "Flying & Indestructible",
-        "AddType": "Creature & Dragon & God",
-        "Description": "As long as CARDNAME has seven or more loyalty counters on him, he's a 7/7 Dragon God creature with flying and indestructible.",
-        "IsPresent": "Card.Self+counters_GE7_LOYALTY",
-        "CharacteristicDefining": "True",
-        "Affected": "Card.Self",
-        "SetPower": "7",
-        "SetToughness": "7"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 7
+        },
+        {
+          "type": "SetToughness",
+          "value": 7
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature & Dragon & God",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

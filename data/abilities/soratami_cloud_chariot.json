@@ -2,57 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Target creature you control gains flying until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "KW": "Flying",
-        "SpellDescription": "Target creature you control gains flying until end of turn."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Prevent all combat damage that would be dealt to and dealt by target creature you control this turn.",
-          "ReplacementEffects": "RPrevent1,RPrevent2",
-          "ExileOnMoved": "Battlefield",
-          "ValidTgts": "Creature.YouCtrl",
-          "TgtPrompt": "Select target creature you control",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
+      "description": "Prevent all combat damage that would be dealt to and dealt by target creature you control this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all combat damage that would be dealt to and dealt by target creature you control this turn.",
-        "ReplacementEffects": "RPrevent1,RPrevent2",
-        "ExileOnMoved": "Battlefield",
-        "ValidTgts": "Creature.YouCtrl",
-        "TgtPrompt": "Select target creature you control",
-        "RememberObjects": "Targeted"
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

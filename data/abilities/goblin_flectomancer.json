@@ -2,34 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "ValidTgts": "Instant,Sorcery",
-          "TgtPrompt": "Select target instant or sorcery spell",
-          "TargetType": "Spell",
-          "SpellDescription": "You may change the targets of target instant or sorcery spell."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "You may change the targets of target instant or sorcery spell.",
+      "effect": {
+        "description": "You may change the targets of target instant or sorcery spell.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Instant,Sorcery",
-        "TgtPrompt": "Select target instant or sorcery spell",
-        "TargetType": "Spell",
-        "SpellDescription": "You may change the targets of target instant or sorcery spell."
-      }
+      "target_prompt": "Select target instant or sorcery spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

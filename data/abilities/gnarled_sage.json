@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +0/+2 and has vigilance as long as you've drawn two or more cards this turn.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +0/+2 and has vigilance as long as you've drawn two or more cards this turn.",
-        "SVarCompare": "GE2",
-        "Affected": "Card.Self",
-        "AddKeyword": "Vigilance",
-        "CheckSVar": "X",
-        "AddToughness": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

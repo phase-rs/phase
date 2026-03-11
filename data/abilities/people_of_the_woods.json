@@ -1,17 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's toughness is equal to the number of Forests you control."
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's toughness is equal to the number of Forests you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

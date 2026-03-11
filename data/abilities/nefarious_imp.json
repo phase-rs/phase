@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more permanents you control leave the battlefield, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigScry",
-        "TriggerDescription": "Whenever one or more permanents you control leave the battlefield, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Permanent.YouCtrl"
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

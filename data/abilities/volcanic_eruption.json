@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Mountain"
-        }
-      },
       "cost": null,
+      "description": "Destroy X target Mountains. CARDNAME deals damage to each creature and each player equal to the number of Mountains put into a graveyard this way.",
+      "effect": {
+        "target": {
+          "card_type": "Mountain",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberTargets": "True",
-        "SpellDescription": "Destroy X target Mountains. CARDNAME deals damage to each creature and each player equal to the number of Mountains put into a graveyard this way.",
-        "TgtPrompt": "Select target Mountain",
-        "TargetMax": "X",
-        "TargetMin": "X",
-        "SubAbility": "DBDamage"
-      }
+      "target_prompt": "Select target Mountain"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

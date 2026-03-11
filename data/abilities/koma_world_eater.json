@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create four 3/3 blue Serpent creature tokens named Koma's Coil.",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "Layer": "CantHappen"
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, create four 3/3 blue Serpent creature tokens named Koma's Coil.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "faces": []
+  ]
 }

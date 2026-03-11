@@ -2,39 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "SpellDescription": "Roll a six-sided die.",
-          "AILogic": "AtOppEOT"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Bird>"
+        "cost": "tapXType<1/Bird>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Roll a six-sided die.",
-        "AILogic": "AtOppEOT"
-      }
+      "description": "Roll a six-sided die.",
+      "effect": {
+        "description": "Roll a six-sided die.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a 6 is rolled on a six-sided die, put a +1/+1 counter on each Bird.",
       "mode": "RolledDie",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSides": "6",
-        "TriggerDescription": "Whenever a 6 is rolled on a six-sided die, put a +1/+1 counter on each Bird.",
-        "Execute": "TrigCounters",
-        "ValidResult": "6"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

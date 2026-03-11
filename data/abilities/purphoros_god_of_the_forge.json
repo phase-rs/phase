@@ -2,52 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 R"
+        "cost": "2 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control get +1/+0 until end of turn."
-      }
+      "description": "Creatures you control get +1/+0 until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to red is less than 5, NICKNAME isn't a creature. (Each {R} in the mana costs of permanents you control counts towards your devotion to red.)",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever another creature you control enters, CARDNAME deals 2 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.Other+YouCtrl",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals 2 damage to each opponent.",
-        "Execute": "TrigDmg"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT5",
-        "Description": "As long as your devotion to red is less than 5, NICKNAME isn't a creature. (Each {R} in the mana costs of permanents you control counts towards your devotion to red.)",
-        "Affected": "Card.Self",
-        "RemoveType": "Creature",
-        "CheckSVar": "X"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

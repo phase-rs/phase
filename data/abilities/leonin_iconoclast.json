@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, destroy target enchantment creature an opponent controls.",
       "mode": "SpellCast",
-      "params": {
-        "TargetsValid": "Card.Self",
-        "Execute": "TrigDestroy",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, destroy target enchantment creature an opponent controls."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

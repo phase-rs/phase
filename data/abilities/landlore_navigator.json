@@ -1,30 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, create a Map token.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, create a Map token.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, if two or more artifacts entered the battlefield under your control this turn, conjure a card named Thieving Magpie onto the battlefield.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "TrigConjure",
-        "SVarCompare": "GE2",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if two or more artifacts entered the battlefield under your control this turn, conjure a card named Thieving Magpie onto the battlefield.",
-        "ValidPlayer": "You",
-        "CheckSVar": "ArtifactsEntered"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AssembleContraption",
-        "params": {
-          "Amount": "2",
-          "SpellDescription": "Assemble two Contraptions."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "SpellDescription": "Assemble two Contraptions."
-      }
+      "description": "Assemble two Contraptions.",
+      "effect": {
+        "description": "Assemble two Contraptions.",
+        "name": "AssembleContraption",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

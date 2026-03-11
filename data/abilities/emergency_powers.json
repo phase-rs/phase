@@ -2,31 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Hand,Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player shuffles their hand and graveyard into their library, then draws seven cards. Exile CARDNAME.",
-        "StackDescription": "SpellDescription",
-        "AILogic": "Timetwister",
-        "UseAllOriginZones": "True",
-        "Shuffle": "True",
-        "SubAbility": "DBDraw",
-        "ChangeType": "Card"
-      }
+      "description": "Each player shuffles their hand and graveyard into their library, then draws seven cards. Exile CARDNAME.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Hand,Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

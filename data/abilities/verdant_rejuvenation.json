@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Seek X creature, enchantment, and/or planeswalker cards, where X is the highest mana value among creatures you control. Put those cards onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "NoReveal": "True",
-        "NoShuffle": "True",
-        "AtRandom": "True",
-        "ChangeNum": "X",
-        "ChangeType": "Creature,Enchantment,Planeswalker",
-        "StackDescription": "SpellDescription",
-        "Mandatory": "True",
-        "NoLooking": "True",
-        "SpellDescription": "Seek X creature, enchantment, and/or planeswalker cards, where X is the highest mana value among creatures you control. Put those cards onto the battlefield."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,35 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target creature you control becomes a blue Dragon Illusion with base power and toughness 4/4, loses all abilities, and gains flying.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Dragon",
           "Illusion"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
+        ]
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "Keywords": "Flying",
-        "RemoveAllAbilities": "True",
-        "Colors": "Blue",
-        "RemoveCreatureTypes": "True",
-        "OverwriteColors": "True",
-        "SpellDescription": "Until end of turn, target creature you control becomes a blue Dragon Illusion with base power and toughness 4/4, loses all abilities, and gains flying."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,33 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Choose two target creatures controlled by the same player. That player sacrifices one of them.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "TargetMax": "2",
-        "TargetUnique": "True",
-        "SubAbility": "DBChooseSac",
-        "TargetsWithSameController": "True",
-        "TgtPrompt": "Choose two target creatures controlled by the same player",
-        "IsCurse": "True",
-        "TargetMin": "2",
-        "SpellDescription": "Choose two target creatures controlled by the same player. That player sacrifices one of them."
-      }
+      "target_prompt": "Choose two target creatures controlled by the same player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

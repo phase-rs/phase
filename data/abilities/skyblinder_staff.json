@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 and can't be blocked by creatures with flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+0 and can't be blocked by creatures with flying.",
-        "Affected": "Creature.EquippedBy",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     },
     {
+      "description": "Equipped creature can't be blocked by creatures with flying.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EquippedBy",
-        "ValidBlocker": "Creature.withFlying",
-        "Secondary": "True",
-        "Description": "Equipped creature can't be blocked by creatures with flying."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

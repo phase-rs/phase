@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a instant, sorcery, or Wizard spell, CARDNAME gets +2/+0 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPump",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant,Sorcery,Wizard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a instant, sorcery, or Wizard spell, CARDNAME gets +2/+0 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery,Wizard",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

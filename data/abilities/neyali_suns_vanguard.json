@@ -1,28 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclaredOneTarget",
-      "params": {
-        "ValidAttackers": "Creature.token+YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigExile",
-        "AttackedTarget": "Player",
-        "TriggerDescription": "Whenever one or more tokens you control attack a player, exile the top card of your library. During any turn you attacked with a token, you may play that card."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Attacking"
+          },
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Attacking tokens you control have double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.attacking+YouCtrl+token",
-        "AddKeyword": "Double Strike",
-        "Description": "Attacking tokens you control have double strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more tokens you control attack a player, exile the top card of your library. During any turn you attacked with a token, you may play that card.",
+      "mode": "AttackersDeclaredOneTarget",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

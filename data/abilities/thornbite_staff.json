@@ -1,32 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a Shaman creature enters, you may attach CARDNAME to it.",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.Shaman",
-        "Execute": "TrigAttach"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{2}, {T}: This creature deals 1 damage to any target\" and \"Whenever a creature dies, untap this creature.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "AddAbility": "Damage",
-        "AddTrigger": "TrigChangeZone",
-        "AddSVar": "ThornbiteTrigUntap",
-        "Description": "Equipped creature has \"{2}, {T}: This creature deals 1 damage to any target\" and \"Whenever a creature dies, untap this creature.\""
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Shaman creature enters, you may attach CARDNAME to it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Shaman"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,54 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W B",
-        "params": {
-          "SpellDescription": "Add {W} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {B}."
-      }
+      "description": "Add {W} or {B}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "W B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 1/4 white and black Thrull artifact creature with lifelink until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 1,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature",
           "Thrull"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "W B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Lifelink",
-        "OverwriteColors": "True",
-        "RemoveCreatureTypes": "True",
-        "Colors": "White,Black",
-        "SpellDescription": "CARDNAME becomes a 1/4 white and black Thrull artifact creature with lifelink until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

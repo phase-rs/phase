@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, destroy all nonenchantment creatures.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Execute": "TrigDestroyAll",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, destroy all nonenchantment creatures."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME or another enchantment you control enters, until end of turn, CARDNAME becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigAnimate",
-        "TriggerDescription": "Whenever CARDNAME or another enchantment you control enters, until end of turn, CARDNAME becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Enchantment.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

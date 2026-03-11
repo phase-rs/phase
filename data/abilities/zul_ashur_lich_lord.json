@@ -2,38 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature.Zombie+YouOwn",
-          "TgtZone": "Graveyard",
-          "StaticAbilities": "Play",
-          "ExileOnMoved": "Graveyard",
-          "TgtPrompt": "Select target Zombie creature card in your graveyard",
-          "PumpZone": "Graveyard",
-          "SpellDescription": "You may cast target Zombie creature card from your graveyard this turn.",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "You may cast target Zombie creature card from your graveyard this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.Zombie+YouOwn",
-        "TgtZone": "Graveyard",
-        "StaticAbilities": "Play",
-        "ExileOnMoved": "Graveyard",
-        "TgtPrompt": "Select target Zombie creature card in your graveyard",
-        "PumpZone": "Graveyard",
-        "SpellDescription": "You may cast target Zombie creature card from your graveyard this turn.",
-        "RememberObjects": "Targeted"
-      }
+      "target_prompt": "Select target Zombie creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

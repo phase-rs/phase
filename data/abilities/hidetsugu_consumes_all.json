@@ -1,40 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME deals damage, put a +1/+1 counter on it.",
           "mode": "DamageDealtOnce",
-          "params": {
-            "Execute": "TrigPutCounter",
-            "TriggerZones": "Battlefield",
-            "ValidSource": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME deals damage, put a +1/+1 counter on it."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME deals damage to a player, if it has dealt 10 or more damage to that player this turn, they lose the game.",
           "mode": "DamageDone",
-          "params": {
-            "Execute": "TrigLose",
-            "TriggerDescription": "Whenever CARDNAME deals damage to a player, if it has dealt 10 or more damage to that player this turn, they lose the game.",
-            "ValidTarget": "Player.wasDealtDamageThisTurnBySource GE10",
-            "ValidSource": "Card.Self"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "card_type": "Player",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "Any",
-        "count": 5,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "UpTo": "True",
-        "SpellDescription": "Remove up to five counters from target permanent.",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Remove up to five counters from target permanent.",
+      "effect": {
+        "count": 5,
+        "counter_type": "Any",
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "RemoveCounter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

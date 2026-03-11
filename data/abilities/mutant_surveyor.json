@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "This creature gets +1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "This creature gets +1/+1 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "AffectedZone": "Graveyard",
-        "Condition": "MaxSpeed",
-        "Description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
-        "AddAbility": "ABDraw",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "ability": "ABDraw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

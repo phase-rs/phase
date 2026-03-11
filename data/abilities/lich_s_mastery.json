@@ -1,49 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you gain life, draw that many cards.",
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw"
-      }
-    },
-    {
-      "mode": "LifeLost",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever you lose life, for each 1 life you lost, exile a permanent you control or a card from your hand or graveyard.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "TrigLose",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, you lose the game.",
-        "ValidCard": "Card.Self"
+      "description": "You can't lose the game.",
+      "event": {
+        "Other": "GameLoss"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "GameLoss"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Layer": "CantHappen",
-        "Description": "You can't lose the game."
+      "description": "Whenever you gain life, draw that many cards.",
+      "mode": "LifeGained",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever you lose life, for each 1 life you lost, exile a permanent you control or a card from your hand or graveyard.",
+      "mode": "LifeLost",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "When CARDNAME leaves the battlefield, you lose the game.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

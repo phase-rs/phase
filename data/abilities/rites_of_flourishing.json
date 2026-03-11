@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidPlayer": "Player",
-        "TriggerDescription": "At the beginning of each player's draw step, that player draws an additional card.",
-        "Phase": "Draw",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Player",
-        "Description": "Each player may play an additional land on each of their turns.",
-        "AdjustLandPlays": "1"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Each player may play an additional land on each of their turns.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's draw step, that player draws an additional card.",
+      "mode": "Phase",
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

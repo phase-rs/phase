@@ -2,45 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetState",
-        "params": {
-          "SpellDescription": "Turn target face-down attacking creature you control face up.",
-          "ValidTgts": "Creature.faceDown+attacking+YouCtrl",
-          "TgtPrompt": "Select target face-down attacking creature you control",
-          "StackDescription": "Turn {c:Targeted} face up.",
-          "Mode": "TurnFaceUp"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Turn target face-down attacking creature you control face up.",
+      "effect": {
+        "description": "Turn target face-down attacking creature you control face up.",
+        "name": "SetState",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Turn target face-down attacking creature you control face up.",
-        "ValidTgts": "Creature.faceDown+attacking+YouCtrl",
-        "TgtPrompt": "Select target face-down attacking creature you control",
-        "StackDescription": "Turn {c:Targeted} face up.",
-        "Mode": "TurnFaceUp"
-      }
+      "target_prompt": "Select target face-down attacking creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control that was turned face up this turn deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control that was turned face up this turn deals combat damage to a player, draw a card.",
-        "ValidSource": "Creature.YouCtrl+turnedFaceUpThisTurn"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,55 +1,64 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "5 W W",
+            "type": "Mana"
+          },
+          "description": "Exile this Equipment, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "5 W W"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBReturn",
-            "SpellDescription": "Exile this Equipment, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
-            "StackDescription": "SpellDescription",
-            "RememberChanged": "True",
-            "SorcerySpeed": "True"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Equipped creature gets +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "AddToughness": "1",
-            "Description": "Equipped creature gets +1/+1.",
-            "AddPower": "1",
-            "Affected": "Creature.EquippedBy"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

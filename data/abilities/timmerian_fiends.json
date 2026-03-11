@@ -2,43 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B B B"
+            "cost": "B B B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ImprintCards": "Targeted",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBAnte",
-        "RememberObjects": "TargetedController",
-        "SpellDescription": "The owner of target artifact may ante the top card of their library. If that player doesn't, exchange ownership of that artifact and CARDNAME. Put the artifact card into your graveyard and CARDNAME from anywhere into that player's graveyard. This change in ownership is permanent."
-      }
+      "description": "The owner of target artifact may ante the top card of their library. If that player doesn't, exchange ownership of that artifact and CARDNAME. Put the artifact card into your graveyard and CARDNAME from anywhere into that player's graveyard. This change in ownership is permanent.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": -2,
-        "toughness": -2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SpellDescription": "Non-Elf creatures get -2/-2 until end of turn.",
-        "ValidCards": "Creature.nonElf"
-      }
+      "description": "Non-Elf creatures get -2/-2 until end of turn.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": -2,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,25 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.EnchantedBy",
-        "Description": "You control enchanted permanent.",
-        "GainControl": "You"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted permanent.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is legendary.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Legendary",
-        "Description": "Enchanted permanent is legendary.",
-        "Affected": "Permanent.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "core_type": "Legendary",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

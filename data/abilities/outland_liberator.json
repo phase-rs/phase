@@ -1,92 +1,87 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact,Enchantment"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Destroy target artifact or enchantment.",
+          "effect": {
+            "target": {
+              "card_type": "Artifact,Enchantment",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target artifact or enchantment",
-            "SpellDescription": "Destroy target artifact or enchantment."
-          }
+          "target_prompt": "Select target artifact or enchantment"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Destroy",
-            "target": {
-              "type": "Filtered",
-              "filter": "Artifact,Enchantment"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Destroy target artifact or enchantment.",
+          "effect": {
+            "target": {
+              "card_type": "Artifact,Enchantment",
+              "type": "Typed"
+            },
+            "type": "Destroy"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target artifact or enchantment",
-            "SpellDescription": "Destroy target artifact or enchantment."
-          }
+          "target_prompt": "Select target artifact or enchantment"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, destroy target artifact or enchantment defending player controls.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME attacks, destroy target artifact or enchantment defending player controls.",
-            "Execute": "TrigDestroy"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

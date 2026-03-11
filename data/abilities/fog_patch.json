@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "BecomesBlocked",
-        "params": {
-          "Defined": "Valid Creature.attacking",
-          "ActivationPhases": "Declare Blockers",
-          "SpellDescription": "Attacking creatures become blocked. (This spell works on creatures that can't be blocked.)"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Valid Creature.attacking",
-        "ActivationPhases": "Declare Blockers",
-        "SpellDescription": "Attacking creatures become blocked. (This spell works on creatures that can't be blocked.)"
-      }
+      "description": "Attacking creatures become blocked. (This spell works on creatures that can't be blocked.)",
+      "effect": {
+        "description": "Attacking creatures become blocked. (This spell works on creatures that can't be blocked.)",
+        "name": "BecomesBlocked",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

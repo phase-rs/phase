@@ -1,38 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of your end step, sacrifice CARDNAME and you lose 8 life."
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigGainControl",
-        "Origin": "Any",
-        "ValidCard": "Card.!token+YouOwn+Other",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another card is put into your graveyard from anywhere, target opponent gains control of CARDNAME.",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.YouCtrl",
-        "AddSVar": "Sac"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, sacrifice CARDNAME and you lose 8 life.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever another card is put into your graveyard from anywhere, target opponent gains control of CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

@@ -2,62 +2,71 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B B B"
+            "cost": "B B B",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<3>"
+            "cost": "PayLife<3>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put target creature card from a graveyard onto the battlefield under your control. That creature is black and is a Nightmare in addition to its other creature types.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StaticEffect": "Animate",
-        "SpellDescription": "Put target creature card from a graveyard onto the battlefield under your control. That creature is black and is a Nightmare in addition to its other creature types.",
-        "ChangeNum": "1",
-        "GainControl": "True",
-        "TgtPrompt": "Select target creature card in a graveyard"
-      }
+      "target_prompt": "Select target creature card in a graveyard"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Nightmare"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Nightmare creatures get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME leaves the battlefield, exile all Nightmares.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "TrigExile",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, exile all Nightmares."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Nightmare creatures get +1/+1.",
-        "AddToughness": "1",
-        "Affected": "Creature.Nightmare"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

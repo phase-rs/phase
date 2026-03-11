@@ -2,52 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may put a Goblin permanent card from your hand onto the battlefield.",
-        "ChangeType": "Permanent.Goblin",
-        "ChangeNum": "1"
-      }
+      "description": "You may put a Goblin permanent card from your hand onto the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "white",
-          "SpellDescription": "Target Goblin gains protection from white until end of turn.",
-          "ValidTgts": "Permanent.Goblin",
-          "TgtPrompt": "Select target Goblin"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Target Goblin gains protection from white until end of turn.",
+      "effect": {
+        "description": "Target Goblin gains protection from white until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Gains": "white",
-        "SpellDescription": "Target Goblin gains protection from white until end of turn.",
-        "ValidTgts": "Permanent.Goblin",
-        "TgtPrompt": "Select target Goblin"
-      }
+      "target_prompt": "Select target Goblin"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

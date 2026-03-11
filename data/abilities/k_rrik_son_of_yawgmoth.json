@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Black",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "For each {B} in a cost, you may pay 2 life rather than pay that mana.",
       "mode": "Continuous",
-      "params": {
-        "Description": "For each {B} in a cost, you may pay 2 life rather than pay that mana.",
-        "AddKeyword": "PayLifeInsteadOf:B",
-        "Affected": "You"
-      }
+      "modifications": [
+        {
+          "keyword": "PayLifeInsteadOf:B",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,23 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell, if it's the second creature spell you cast this turn, you may return CARDNAME from your graveyard to the battlefield.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a spell, if it's the second creature spell you cast this turn, you may return CARDNAME from your graveyard to the battlefield.",
-        "Execute": "TrigReturn",
-        "CheckSVar": "X",
-        "OptionalDecider": "You",
-        "SVarCompare": "EQ2",
-        "TriggerZones": "Graveyard",
-        "NoResolvingCheck": "True",
-        "ValidCard": "Creature"
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,80 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top two cards of your library. Put one of them into your hand and the other on the bottom of your library.",
       "effect": {
-        "type": "Dig",
         "count": 2,
-        "destination": ""
+        "destination": "",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "NoReveal": "True",
-        "SpellDescription": "Look at the top two cards of your library. Put one of them into your hand and the other on the bottom of your library."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Untap up to four target permanents.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "4",
-        "SpellDescription": "Untap up to four target permanents.",
-        "TargetMin": "0",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Name": "Emblem — Teferi, Temporal Archmage",
-          "Stackable": "False",
-          "StaticAbilities": "InstantPlaneswalkers",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "Image": "emblem_teferi_temporal_archmage",
-          "SpellDescription": "You get an emblem with \"You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.\"",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Name": "Emblem — Teferi, Temporal Archmage",
-        "Stackable": "False",
-        "StaticAbilities": "InstantPlaneswalkers",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "Image": "emblem_teferi_temporal_archmage",
-        "SpellDescription": "You get an emblem with \"You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.\"",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

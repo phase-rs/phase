@@ -2,43 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SubAbility": "DBAnimate",
-          "SpellDescription": "CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)",
-          "StackDescription": "SpellDescription",
-          "Random": "True"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)",
-        "StackDescription": "SpellDescription",
-        "Random": "True"
-      }
+      "description": "CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)",
+      "effect": {
+        "description": "CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigChooseColor",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, CARDNAME becomes a color chosen at random. (This effect lasts indefinitely.)"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "The \"legend rule\" doesn't apply to Slivers you control.",
       "mode": {
         "Other": "IgnoreLegendRule"
-      },
-      "params": {
-        "Description": "The \"legend rule\" doesn't apply to Slivers you control.",
-        "ValidCard": "Sliver.YouCtrl"
       }
     },
     {
+      "affected": {
+        "card_type": "Sliver",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Each Sliver creature card in your graveyard has encore {X}, where X is its mana value.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Graveyard",
-        "Affected": "Sliver.Creature+YouCtrl",
-        "Description": "Each Sliver creature card in your graveyard has encore {X}, where X is its mana value.",
-        "AddKeyword": "Encore:X:XAlternative$ Number$ConvertedManaCost"
-      }
+      "modifications": [
+        {
+          "keyword": "Encore:X:XAlternative$",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Number$ConvertedManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

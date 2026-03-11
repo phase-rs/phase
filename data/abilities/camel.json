@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Desert",
-        "Prevent": "True",
-        "Description": "As long as CARDNAME is attacking, prevent all damage Deserts would deal to CARDNAME and to creatures banded with CARDNAME.",
-        "ValidTarget": "Creature.Self+attacking,Creature.attackersBandedWith"
-      }
+      "description": "As long as CARDNAME is attacking, prevent all damage Deserts would deal to CARDNAME and to creatures banded with CARDNAME.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

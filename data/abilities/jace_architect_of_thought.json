@@ -2,89 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Main2",
-          "Duration": "UntilYourNextTurn",
-          "Triggers": "TrigAttack",
-          "Planeswalker": "True",
-          "SpellDescription": "Until your next turn, whenever a creature an opponent controls attacks, it gets -1/-0 until end of turn."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Main2",
-        "Duration": "UntilYourNextTurn",
-        "Triggers": "TrigAttack",
-        "Planeswalker": "True",
-        "SpellDescription": "Until your next turn, whenever a creature an opponent controls attacks, it gets -1/-0 until end of turn."
-      }
+      "description": "Until your next turn, whenever a creature an opponent controls attacks, it gets -1/-0 until end of turn.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SubAbility": "DBTwoPiles",
-          "SpellDescription": "Reveal the top three cards of your library. An opponent separates them into two piles. Put one pile into your hand and the other on the bottom of your library in any order.",
-          "NoPeek": "True",
-          "RememberRevealed": "True",
-          "PeekAmount": "3",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBTwoPiles",
-        "SpellDescription": "Reveal the top three cards of your library. An opponent separates them into two piles. Put one pile into your hand and the other on the bottom of your library in any order.",
-        "NoPeek": "True",
-        "RememberRevealed": "True",
-        "PeekAmount": "3",
-        "Planeswalker": "True"
-      }
+      "description": "Reveal the top three cards of your library. An opponent separates them into two piles. Put one pile into your hand and the other on the bottom of your library in any order.",
+      "effect": {
+        "description": "Reveal the top three cards of your library. An opponent separates them into two piles. Put one pile into your hand and the other on the bottom of your library in any order.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -8,
+        "type": "Loyalty"
+      },
+      "description": "For each player, search that player's library for a nonland card and exile it, then that player shuffles. You may cast those cards without paying their mana costs.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Exile",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -8
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Chooser": "You",
-        "ChangeNum": "1",
-        "ChangeType": "Card.nonLand",
-        "Shuffle": "True",
-        "SubAbility": "DBPlayIt",
-        "SpellDescription": "For each player, search that player's library for a nonland card and exile it, then that player shuffles. You may cast those cards without paying their mana costs.",
-        "Imprint": "True",
-        "Planeswalker": "True",
-        "DefinedPlayer": "Player"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

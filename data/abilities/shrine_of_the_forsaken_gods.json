@@ -2,50 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "PresentCompare": "GE7",
-          "SpellDescription": "Add {C}{C}. Spend this mana only to cast colorless spells. Activate only if you control seven or more lands.",
-          "Amount": "2",
-          "RestrictValid": "Spell.Colorless",
-          "IsPresent": "Land.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PresentCompare": "GE7",
-        "SpellDescription": "Add {C}{C}. Spend this mana only to cast colorless spells. Activate only if you control seven or more lands.",
-        "Amount": "2",
-        "RestrictValid": "Spell.Colorless",
-        "IsPresent": "Land.YouCtrl"
-      }
+      "description": "Add {C}{C}. Spend this mana only to cast colorless spells. Activate only if you control seven or more lands.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

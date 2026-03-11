@@ -2,92 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "RandomNum": "3",
-          "AnySupportedCard": "Instant",
-          "RandomCopied": "True",
-          "WithoutManaCost": "True",
-          "ActivationZone": "Command",
-          "SpellDescription": "Copy three instant cards chosen at random. You may cast one of the copies without paying its mana cost.",
-          "ChoiceNum": "1",
-          "CopyCard": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RandomNum": "3",
-        "AnySupportedCard": "Instant",
-        "RandomCopied": "True",
-        "WithoutManaCost": "True",
-        "ActivationZone": "Command",
-        "SpellDescription": "Copy three instant cards chosen at random. You may cast one of the copies without paying its mana cost.",
-        "ChoiceNum": "1",
-        "CopyCard": "True"
-      }
+      "description": "Copy three instant cards chosen at random. You may cast one of the copies without paying its mana cost.",
+      "effect": {
+        "description": "Copy three instant cards chosen at random. You may cast one of the copies without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "RandomCopied": "True",
-          "WithoutManaCost": "True",
-          "ChoiceNum": "1",
-          "ActivationZone": "Command",
-          "SorcerySpeed": "True",
-          "SpellDescription": "Copy three sorcery cards chosen at random. You may cast one of the copies without paying its mana cost. Activate only as a sorcery.",
-          "RandomNum": "3",
-          "AnySupportedCard": "Sorcery",
-          "CopyCard": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RandomCopied": "True",
-        "WithoutManaCost": "True",
-        "ChoiceNum": "1",
-        "ActivationZone": "Command",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Copy three sorcery cards chosen at random. You may cast one of the copies without paying its mana cost. Activate only as a sorcery.",
-        "RandomNum": "3",
-        "AnySupportedCard": "Sorcery",
-        "CopyCard": "True"
-      }
+      "description": "Copy three sorcery cards chosen at random. You may cast one of the copies without paying its mana cost. Activate only as a sorcery.",
+      "effect": {
+        "description": "Copy three sorcery cards chosen at random. You may cast one of the copies without paying its mana cost. Activate only as a sorcery.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

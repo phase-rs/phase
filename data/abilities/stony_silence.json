@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Artifact",
-        "Description": "Activated abilities of artifacts can't be activated.",
-        "ValidSA": "Activated",
-        "AffectedZone": "Battlefield"
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of artifacts can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

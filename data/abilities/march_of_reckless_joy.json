@@ -2,51 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AdditionalDesc": "This spell costs {2} less to cast for each card exiled this way.",
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "Announce": "Exiled",
-        "AnnounceTitle": "how many red cards to exile",
-        "SpellDescription": "Exile the top X cards of your library. You may play up to two of those cards until the end of your next turn.",
-        "ChangeNum": "All",
-        "Defined": "You"
-      }
+      "description": "Exile the top X cards of your library. You may play up to two of those cards until the end of your next turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Cost": "ExileFromHand<Y/Card.Red/red cards>",
-        "Description": "As an additional cost to cast this spell, you may exile any number of red cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "As an additional cost to cast this spell, you may exile any number of red cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "Secondary": "True",
-        "Relative": "True",
-        "Type": "Spell",
-        "Description": "This spell costs {2} less to cast for each card exiled this way.",
-        "ValidCard": "Card.Self",
-        "Amount": "Z"
-      }
+      "description": "This spell costs {2} less to cast for each card exiled this way.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

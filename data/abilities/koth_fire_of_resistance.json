@@ -2,80 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Search your library for a basic Mountain card, reveal it, put it into your hand, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ChangeType": "Mountain.Basic",
-        "NumCards": "1",
-        "SpellDescription": "Search your library for a basic Mountain card, reveal it, put it into your hand, then shuffle."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals damage to target creature equal to the number of Mountains you control.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage to target creature equal to the number of Mountains you control.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "Permanent",
-          "SpellDescription": "You get an emblem with \"Whenever a Mountain you control enters, this emblem deals 4 damage to any target.\"",
-          "Triggers": "STDamage",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "Name": "Emblem — Koth, Fire of Resistance"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SpellDescription": "You get an emblem with \"Whenever a Mountain you control enters, this emblem deals 4 damage to any target.\"",
-        "Triggers": "STDamage",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "Name": "Emblem — Koth, Fire of Resistance"
-      }
+      "description": "You get an emblem with \"Whenever a Mountain you control enters, this emblem deals 4 damage to any target.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

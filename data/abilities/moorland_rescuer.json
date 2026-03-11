@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, return any number of other creature cards with total power X or less from the graveyard to the battlefield, where X is CARDNAME's power. Exile CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigReturn",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, return any number of other creature cards with total power X or less from the graveyard to the battlefield, where X is CARDNAME's power. Exile CARDNAME.",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,27 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "2",
-        "ValidCard": "Demon",
-        "Description": "Locus of Slaanesh — Demon spells you cast cost {2} less to cast.",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Locus of Slaanesh — Demon spells you cast cost {2} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Demon",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Demons you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Haste",
-        "Affected": "Demon.Other+YouCtrl",
-        "Description": "Other Demons you control have haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

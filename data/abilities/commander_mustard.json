@@ -2,39 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Triggers": "AttackTrig",
-          "ValidCards": "Soldier.YouCtrl",
-          "SpellDescription": "Until end of turn, Soldiers you control gain \"Whenever this creature attacks, it deals 1 damage to defending player.\""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 R W"
+        "cost": "2 R W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "AttackTrig",
-        "ValidCards": "Soldier.YouCtrl",
-        "SpellDescription": "Until end of turn, Soldiers you control gain \"Whenever this creature attacks, it deals 1 damage to defending player.\""
-      }
+      "description": "Until end of turn, Soldiers you control gain \"Whenever this creature attacks, it deals 1 damage to defending player.\"",
+      "effect": {
+        "description": "Until end of turn, Soldiers you control gain \"Whenever this creature attacks, it deals 1 damage to defending player.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Soldier",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Soldiers you control have vigilance, trample, and haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Soldier.Other+YouCtrl",
-        "AddKeyword": "Vigilance & Trample & Haste",
-        "Description": "Other Soldiers you control have vigilance, trample, and haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

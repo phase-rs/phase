@@ -1,31 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Equipment.YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever an Equipment you control enters, you may draw a card.",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Equipment",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Metalcraft — Equipment you control have equip {0} as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Metalcraft",
-        "Description": "Metalcraft — Equipment you control have equip {0} as long as you control three or more artifacts.",
-        "Affected": "Equipment.YouCtrl",
-        "AddKeyword": "Equip:0"
-      }
+      "modifications": [
+        {
+          "keyword": "Equip:0",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever an Equipment you control enters, you may draw a card.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Equipment",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,28 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't attack or block."
       }
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "It loses all abilities and has \"{T}: Remove a task counter from CARDNAME. Then if it has no task counters on it, destroy CARDNAME.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "It loses all abilities and has \"{T}: Remove a task counter from CARDNAME. Then if it has no task counters on it, destroy CARDNAME.\"",
-        "AddSVar": "DBHeliodsPunishment",
-        "Affected": "Creature.EnchantedBy",
-        "RemoveAllAbilities": "True",
-        "AddAbility": "ABRemoveCounter"
-      }
+      "modifications": [
+        {
+          "ability": "ABRemoveCounter",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

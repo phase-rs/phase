@@ -1,48 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigExplore",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, target creature you control explores."
-          }
-        },
-        {
-          "mode": "ChangesZone",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "SVarCompare": "GE7",
-            "TriggerDescription": "When a land you control enters, if you control seven or more lands, transform CARDNAME.",
-            "Origin": "Any",
-            "CheckSVar": "Count$Valid Land.YouCtrl",
-            "Destination": "Battlefield",
-            "Execute": "TrigTransform",
-            "ValidCard": "Land.YouCtrl"
+          "description": "If a creature you control would explore, instead you scry 1, then that creature explores.",
+          "event": {
+            "Other": "Explore"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": {
-            "Other": "Explore"
-          },
-          "params": {
-            "ReplaceWith": "DBScry",
-            "Description": "If a creature you control would explore, instead you scry 1, then that creature explores.",
-            "ActiveZones": "Battlefield",
-            "ValidExplorer": "Creature.YouCtrl"
+          "description": "When CARDNAME enters, target creature you control explores.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        },
+        {
+          "description": "When a land you control enters, if you control seven or more lands, transform CARDNAME.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Land",
+            "controller": "You",
+            "type": "Typed"
           }
         }
       ]
@@ -50,55 +42,48 @@
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G}."
-          }
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 4,
-            "destination": ""
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "3 G"
+                "cost": "3 G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "RestRandomOrder": "True",
-            "SpellDescription": "Look at the top four cards of your library. You may reveal a creature card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
-            "ForceRevealToController": "True",
-            "ChangeNum": "1",
-            "Optional": "True",
-            "ChangeValid": "Creature"
-          }
+          "description": "Look at the top four cards of your library. You may reveal a creature card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+          "effect": {
+            "count": 4,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

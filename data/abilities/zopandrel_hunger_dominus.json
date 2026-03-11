@@ -2,49 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "Indestructible",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "GP GP"
+            "cost": "GP GP",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Put an indestructible counter on CARDNAME. ({G/P} can be paid with either {G} or 2 life.)"
-      }
+      "description": "Put an indestructible counter on CARDNAME. ({G/P} can be paid with either {G} or 2 life.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "Indestructible",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, double the power and toughness of each creature you control until end of turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each combat, double the power and toughness of each creature you control until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "Execute": "TrigDouble"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

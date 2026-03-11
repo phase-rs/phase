@@ -2,43 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ControlSpell",
-        "params": {
-          "SpellDescription": "Gain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent you control enters.)",
-          "Mode": "Gain",
-          "SubAbility": "DBChooseTargets",
-          "ValidTgts": "Card.nonCreature",
-          "TargetType": "Spell"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent you control enters.)",
-        "Mode": "Gain",
-        "SubAbility": "DBChooseTargets",
-        "ValidTgts": "Card.nonCreature",
-        "TargetType": "Spell"
-      }
+      "description": "Gain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent you control enters.)",
+      "effect": {
+        "description": "Gain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent you control enters.)",
+        "name": "ControlSpell",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exile two blue cards from your hand rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "You may exile two blue cards from your hand rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "Cost": "ExileFromHand<2/Card.Blue+Other>",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

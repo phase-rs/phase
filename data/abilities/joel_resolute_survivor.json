@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature token dies, put a +1/+1 counter on NICKNAME and draw a card. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a creature token dies, put a +1/+1 counter on NICKNAME and draw a card. This ability triggers only once each turn.",
-        "ActivationLimit": "1",
-        "ValidCard": "Creature.token",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

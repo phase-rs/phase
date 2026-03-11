@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Elf",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Elves you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Elves you control get +2/+0.",
-        "Affected": "Elf.YouCtrl",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

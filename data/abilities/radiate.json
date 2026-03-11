@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TargetType": "Spell.numTargets EQ1",
-          "ValidTgts": "Instant,Sorcery",
-          "SpellDescription": "Choose target instant or sorcery spell that targets only a single permanent or player. Copy that spell for each other permanent or player the spell could target. Each copy targets a different one of those permanents and players.",
-          "TargetValidTargeting": "Permanent.inRealZoneBattlefield,Player",
-          "TgtPrompt": "Choose target instant or sorcery spell that targets only a single permanent or player",
-          "Controller": "You",
-          "CopyForEachCanTarget": "Permanent.inRealZoneBattlefield,Player"
-        }
-      },
       "cost": null,
+      "description": "Choose target instant or sorcery spell that targets only a single permanent or player. Copy that spell for each other permanent or player the spell could target. Each copy targets a different one of those permanents and players.",
+      "effect": {
+        "description": "Choose target instant or sorcery spell that targets only a single permanent or player. Copy that spell for each other permanent or player the spell could target. Each copy targets a different one of those permanents and players.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.numTargets EQ1",
-        "ValidTgts": "Instant,Sorcery",
-        "SpellDescription": "Choose target instant or sorcery spell that targets only a single permanent or player. Copy that spell for each other permanent or player the spell could target. Each copy targets a different one of those permanents and players.",
-        "TargetValidTargeting": "Permanent.inRealZoneBattlefield,Player",
-        "TgtPrompt": "Choose target instant or sorcery spell that targets only a single permanent or player",
-        "Controller": "You",
-        "CopyForEachCanTarget": "Permanent.inRealZoneBattlefield,Player"
-      }
+      "target_prompt": "Choose target instant or sorcery spell that targets only a single permanent or player"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

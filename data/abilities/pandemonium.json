@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature enters, that creature's controller may have it deal damage equal to its power to any target of their choice.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigDamage",
-        "OptionalDecider": "TriggeredCardController",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever a creature enters, that creature's controller may have it deal damage equal to its power to any target of their choice."
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

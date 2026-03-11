@@ -2,29 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "You gain hexproof until your next turn. You gain 2 life.",
+      "duration": "UntilYourNextTurn",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "You gain hexproof until your next turn. You gain 2 life.",
-        "Defined": "You",
-        "StackDescription": "{p:You} gains hexproof until their next turn.",
-        "KW": "Hexproof",
-        "Duration": "UntilYourNextTurn"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

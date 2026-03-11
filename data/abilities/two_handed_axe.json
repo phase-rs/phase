@@ -1,50 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever equipped creature attacks, double its power until end of turn.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigPump",
-            "ValidCard": "Card.EquippedBy",
-            "TriggerDescription": "Whenever equipped creature attacks, double its power until end of turn."
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Target creature you control gains double strike until end of turn. (Then exile this card. You may cast the artifact later from exile.)",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "KW": "Double Strike",
-            "SpellDescription": "Target creature you control gains double strike until end of turn. (Then exile this card. You may cast the artifact later from exile.)",
-            "TgtPrompt": "Select target creature you control"
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

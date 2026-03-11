@@ -1,41 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, tap enchanted permanent. If it's an Equipment, unattach it.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigTap",
-        "Origin": "Any"
+      "description": "Enchanted permanent doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.AttachedBy",
-        "RemoveAllAbilities": "True",
-        "Description": "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step."
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "ValidCard": "Permanent.AttachedBy",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
-        "Secondary": "True",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen"
-      }
+      "description": "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, tap enchanted permanent. If it's an Equipment, unattach it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

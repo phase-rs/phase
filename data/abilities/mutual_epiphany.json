@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you encounter CARDNAME, each player draws four cards. (Then planeswalk away from this phenomenon.)",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "TriggerDescription": "When you encounter CARDNAME, each player draws four cards. (Then planeswalk away from this phenomenon.)",
-        "Execute": "Epiphany",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

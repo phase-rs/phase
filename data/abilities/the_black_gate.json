@@ -2,70 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChoosePlayer",
-        "params": {
-          "SpellDescription": "Choose a player with the most life or tied for most life. Target creature can't be blocked by creatures that player controls this turn.",
-          "Choices": "Player.withMostLife",
-          "ChoiceTitle": "Choose a player with the most life or tied for most life",
-          "Defined": "You",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 B"
+            "cost": "1 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a player with the most life or tied for most life. Target creature can't be blocked by creatures that player controls this turn.",
-        "Choices": "Player.withMostLife",
-        "ChoiceTitle": "Choose a player with the most life or tied for most life",
-        "Defined": "You",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Choose a player with the most life or tied for most life. Target creature can't be blocked by creatures that player controls this turn.",
+      "effect": {
+        "description": "Choose a player with the most life or tied for most life. Target creature can't be blocked by creatures that player controls this turn.",
+        "name": "ChoosePlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "DBTap",
-        "ValidCard": "Card.Self",
-        "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

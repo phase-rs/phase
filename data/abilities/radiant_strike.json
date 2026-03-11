@@ -2,25 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature.tapped"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact or tapped creature. You gain 3 life.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact or tapped creature",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Destroy target artifact or tapped creature. You gain 3 life."
-      }
+      "target_prompt": "Select target artifact or tapped creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

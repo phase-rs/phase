@@ -1,21 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Vampire you control dies, you may pay {B}. If you do, target player loses 2 life and you gain 2 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigLoseLife",
-        "Origin": "Battlefield",
-        "ValidCard": "Vampire.Other+YouCtrl,Card.Self",
-        "TriggerDescription": "Whenever CARDNAME or another Vampire you control dies, you may pay {B}. If you do, target player loses 2 life and you gain 2 life."
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Vampire",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Card.Self"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

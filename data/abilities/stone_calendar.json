@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "UpTo": "True",
-        "Activator": "You",
-        "Type": "Spell",
-        "Description": "Spells you cast cost up to {1} less to cast."
-      }
+      "description": "Spells you cast cost up to {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, draw that many cards.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.EquippedBy",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, draw that many cards.",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

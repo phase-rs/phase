@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have seven or more cards in hand, CARDNAME gets +2/+1 and has fear.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Fear",
-        "Description": "As long as you have seven or more cards in hand, CARDNAME gets +2/+1 and has fear.",
-        "SVarCompare": "GE7",
-        "AddPower": "2",
-        "CheckSVar": "X",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Fear",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

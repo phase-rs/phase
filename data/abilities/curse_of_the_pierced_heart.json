@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted player's upkeep, CARDNAME deals 1 damage to that player or a planeswalker that player controls.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of enchanted player's upkeep, CARDNAME deals 1 damage to that player or a planeswalker that player controls.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.EnchantedBy",
-        "Phase": "Upkeep",
-        "Execute": "DBChooseCard"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,47 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "SVarCompare": "GE3",
-          "MayChooseTarget": "True",
-          "TargetType": "Spell",
-          "CheckSVar": "Count$ThisTurnCast_Card.YouCtrl",
-          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if you've cast three or more spells this turn.",
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SVarCompare": "GE3",
-        "MayChooseTarget": "True",
-        "TargetType": "Spell",
-        "CheckSVar": "Count$ThisTurnCast_Card.YouCtrl",
-        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if you've cast three or more spells this turn.",
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-      }
+      "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if you've cast three or more spells this turn.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if you've cast three or more spells this turn.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your second spell each turn, exile the top card of your library. Until the end of your next turn, you may play that card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ActivatorThisTurnCast": "EQ2",
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever you cast your second spell each turn, exile the top card of your library. Until the end of your next turn, you may play that card.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Zombie",
-        "Description": "Zombie spells you cast cost {1} less to cast.",
-        "Amount": "1",
-        "Activator": "You",
-        "Type": "Spell"
-      }
+      "description": "Zombie spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Zombie"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Zombie creatures you control get +2/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddPower": "2",
-        "Description": "Zombie creatures you control get +2/+1.",
-        "Affected": "Creature.Zombie+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, put a random instant card from your library into your graveyard. Then put a random sorcery card from your library into your graveyard.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChangeInstant",
-        "TriggerDescription": "When CARDNAME enters, put a random instant card from your library into your graveyard. Then put a random sorcery card from your library into your graveyard."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you cast an instant or sorcery spell from your graveyard, copy that spell. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell from your graveyard, copy that spell. You may choose new targets for the copy.",
-        "Execute": "TrigCopy",
-        "ValidCard": "Instant.wasCastFromYourGraveyard,Sorcery.wasCastFromYourGraveyard",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,76 +1,97 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, return target creature card from your graveyard to the battlefield.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReturnFromGraveyard",
-        "TriggerDescription": "When CARDNAME enters, return target creature card from your graveyard to the battlefield.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When the creature put onto the battlefield with CARDNAME dies, exile it and return CARDNAME to its owner's hand.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExileAndBounce",
-        "ValidCard": "Card.IsRemembered",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When the creature put onto the battlefield with CARDNAME dies, exile it and return CARDNAME to its owner's hand.",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, exile the creature put onto the battlefield with CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Execute": "TrigExileCreature",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, exile the creature put onto the battlefield with CARDNAME."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Forget remembered card if it goes into Exile.",
+      "destination": "Exile",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.IsRemembered",
-        "Origin": "Battlefield",
-        "Static": "True",
-        "Destination": "Exile",
-        "Execute": "DBCleanup",
-        "TriggerDescription": "Forget remembered card if it goes into Exile.",
-        "Secondary": "True"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Forget remembered card if it goes into Hand.",
+      "destination": "Hand",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Forget remembered card if it goes into Hand.",
-        "Static": "True",
-        "Destination": "Hand",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.IsRemembered",
-        "Execute": "DBCleanup"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Forget remembered card if it goes into Library.",
+      "destination": "Library",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Library",
-        "TriggerDescription": "Forget remembered card if it goes into Library.",
-        "Static": "True",
-        "Secondary": "True",
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup",
-        "ValidCard": "Card.IsRemembered"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,33 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Permanent.Green",
-        "Execute": "TrigCounters",
-        "TriggerDescription": "Whenever you cast a green permanent spell, put a +1/+1 counter on each creature you control.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast green permanent spells, you may pay 2 life. Those spells cost {G} less to cast if you paid life this way. This effect reduces only the amount of green mana you pay.",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Cost": "PayLife<2>",
-        "ReduceColor": "G",
-        "Description": "As an additional cost to cast green permanent spells, you may pay 2 life. Those spells cost {G} less to cast if you paid life this way. This effect reduces only the amount of green mana you pay.",
-        "ValidSA": "Spell",
-        "ValidCard": "Permanent.Green",
-        "Activator": "You"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a green permanent spell, put a +1/+1 counter on each creature you control.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

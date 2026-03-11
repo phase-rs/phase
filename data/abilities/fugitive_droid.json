@@ -2,51 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Counter target spell that targets an artifact or creature you control.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "TargetValidTargeting": "Artifact.YouCtrl+inRealZoneBattlefield,Creature.YouCtrl+inRealZoneBattlefield",
-        "SpellDescription": "Counter target spell that targets an artifact or creature you control.",
-        "TgtPrompt": "Select target spell"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This creature can't be blocked if an artifact entered the battlefield under your control this turn.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "CheckSVar": "X",
-        "ValidAttacker": "Card.Self",
-        "Description": "This creature can't be blocked if an artifact entered the battlefield under your control this turn."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

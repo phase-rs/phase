@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME gets +1/+1 as long as no opponent controls a white or blue creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "AddToughness": "1",
-        "SVarCompare": "EQ0",
-        "Description": "CARDNAME gets +1/+1 as long as no opponent controls a white or blue creature.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

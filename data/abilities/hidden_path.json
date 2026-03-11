@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Green creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:Forest",
-        "Description": "Green creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)",
-        "Affected": "Creature.Green"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Forest",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

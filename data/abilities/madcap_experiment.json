@@ -2,39 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "Valid": "Artifact",
-          "FoundDestination": "Battlefield",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal an artifact card. Put that card onto the battlefield and the rest on the bottom of your library in a random order. CARDNAME deals damage to you equal to the number of cards revealed this way.",
-          "RevealRandomOrder": "True",
-          "RevealedDestination": "Library",
-          "RevealedLibraryPosition": "-1",
-          "RememberRevealed": "True",
-          "ValidDescription": "artifact",
-          "SubAbility": "DBDealDamage"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Artifact",
-        "FoundDestination": "Battlefield",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal an artifact card. Put that card onto the battlefield and the rest on the bottom of your library in a random order. CARDNAME deals damage to you equal to the number of cards revealed this way.",
-        "RevealRandomOrder": "True",
-        "RevealedDestination": "Library",
-        "RevealedLibraryPosition": "-1",
-        "RememberRevealed": "True",
-        "ValidDescription": "artifact",
-        "SubAbility": "DBDealDamage"
-      }
+      "description": "Reveal cards from the top of your library until you reveal an artifact card. Put that card onto the battlefield and the rest on the bottom of your library in a random order. CARDNAME deals damage to you equal to the number of cards revealed this way.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal an artifact card. Put that card onto the battlefield and the rest on the bottom of your library in a random order. CARDNAME deals damage to you equal to the number of cards revealed this way.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

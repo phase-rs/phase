@@ -2,46 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Library"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G W"
+        "cost": "G W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition": "-1",
-        "SpellDescription": "Put the top card of your library on the bottom of your library.",
-        "Reveal": "False"
-      }
+      "description": "Put the top card of your library on the bottom of your library.",
+      "effect": {
+        "count": 1,
+        "destination": "Library",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Play with the top card of your library revealed.",
-        "MayLookAt": "Player",
-        "AffectedZone": "Library",
-        "Affected": "Card.TopLibrary+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "SharesColorWith TopOfLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as the top card of your library is a creature card, creatures you control that share a color with that card get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as the top card of your library is a creature card, creatures you control that share a color with that card get +1/+1.",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "TopCardOfLibraryIs": "Creature",
-        "Affected": "Creature.YouCtrl+SharesColorWith TopOfLibrary"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

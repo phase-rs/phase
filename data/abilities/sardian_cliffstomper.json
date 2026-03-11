@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "PresentCompare": "GE4",
-        "Affected": "Card.Self",
-        "IsPresent": "Mountain.YouCtrl",
-        "Condition": "PlayerTurn",
-        "Description": "As long as it's your turn and you control four or more Mountains, CARDNAME gets +X/+0, where X is the number of Mountains you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Mountain",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as it's your turn and you control four or more Mountains, CARDNAME gets +X/+0, where X is the number of Mountains you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

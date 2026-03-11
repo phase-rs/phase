@@ -1,26 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Static": "True",
-        "Execute": "ResetTurnCount"
-      }
+      "mode": "TurnBegin"
     },
     {
+      "description": "Whenever you roll a 6, create a 2/2 black Zombie Employee creature token.",
       "mode": "RolledDie",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidResult": "EQ6",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you roll a 6, create a 2/2 black Zombie Employee creature token."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

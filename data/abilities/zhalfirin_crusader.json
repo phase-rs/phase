@@ -2,39 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "TgtPrompt": "Select any target to redirect the damage to",
-          "ExileOnMoved": "Battlefield",
-          "Name": "Zhalfirin Redirection",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Any",
-          "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to any target instead.",
-          "ReplacementEffects": "Zhalfirin"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
+      "description": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to any target instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "TgtPrompt": "Select any target to redirect the damage to",
-        "ExileOnMoved": "Battlefield",
-        "Name": "Zhalfirin Redirection",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Any",
-        "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to any target instead.",
-        "ReplacementEffects": "Zhalfirin"
-      }
+      "target_prompt": "Select any target to redirect the damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

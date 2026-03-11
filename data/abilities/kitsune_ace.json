@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Vehicle you control attacks, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigCharm",
-        "ValidCard": "Vehicle.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Vehicle you control attacks, ABILITY"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Vehicle",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

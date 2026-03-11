@@ -1,54 +1,118 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +0/+2 as long as you control a Plains.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +0/+2 as long as you control a Plains.",
-        "AddToughness": "2",
-        "IsPresent": "Plains.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control an Island.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Island.YouCtrl",
-        "Description": "CARDNAME has flying as long as you control an Island.",
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Swamp",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +2/+0 as long as you control a Swamp.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +2/+0 as long as you control a Swamp.",
-        "Affected": "Card.Self",
-        "IsPresent": "Swamp.YouCtrl",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Mountain",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has first strike as long as you control a Mountain.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "First Strike",
-        "IsPresent": "Mountain.YouCtrl",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has first strike as long as you control a Mountain."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Forest",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has trample as long as you control a Forest.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has trample as long as you control a Forest.",
-        "AddKeyword": "Trample",
-        "IsPresent": "Forest.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "For each creature, its controller sacrifices a permanent unless they pay {1}.",
-          "RepeatPlayers": "Player",
-          "RepeatSubAbility": "DBRepeatCreature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each creature, its controller sacrifices a permanent unless they pay {1}.",
-        "RepeatPlayers": "Player",
-        "RepeatSubAbility": "DBRepeatCreature"
-      }
+      "description": "For each creature, its controller sacrifices a permanent unless they pay {1}.",
+      "effect": {
+        "description": "For each creature, its controller sacrifices a permanent unless they pay {1}.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

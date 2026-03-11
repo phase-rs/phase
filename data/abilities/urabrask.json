@@ -1,58 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "R",
+            "type": "Mana"
+          },
+          "description": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if you've cast three or more instant and/or sorcery spells this turn.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "CheckSVar": "X",
-            "RememberChanged": "True",
-            "SVarCompare": "GE3",
-            "SorcerySpeed": "True",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if you've cast three or more instant and/or sorcery spells this turn.",
-            "SubAbility": "DBReturn"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast an instant or sorcery spell, CARDNAME deals 1 damage to target opponent. Add {R}.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDealDamage",
-            "ValidActivatingPlayer": "You",
-            "ValidCard": "Card.Instant,Card.Sorcery",
-            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME deals 1 damage to target opponent. Add {R}."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Instant,Card.Sorcery"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,30 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackers": "Dragon.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever one or more Dragons you control attack, draw that many cards, then you may put a permanent card from your hand onto the battlefield."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "EffectZone": "Battlefield,Command",
-        "Type": "Spell",
-        "Activator": "You",
-        "Description": "Eminence — As long as CARDNAME is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
-        "ValidCard": "Dragon.Other"
-      }
+      "description": "Eminence — As long as CARDNAME is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
+      "effect_zone": "Battlefield,Command",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more Dragons you control attack, draw that many cards, then you may put a permanent card from your hand onto the battlefield.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

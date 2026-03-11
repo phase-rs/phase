@@ -1,19 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Slivers you control have flying and \"Whenever you draw a card, this creature deals 1 damage to any target\" and \"{T}: Draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Slivers you control have flying and \"Whenever you draw a card, this creature deals 1 damage to any target\" and \"{T}: Draw a card.\"",
-        "AddKeyword": "Flying",
-        "AddAbility": "Draw",
-        "Affected": "Permanent.Sliver+YouCtrl",
-        "AddTrigger": "PingTrig"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "Draw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

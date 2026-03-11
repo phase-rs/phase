@@ -2,42 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Search your library and/or graveyard for an Ally creature card, reveal it, and put it into your hand. If you search your library this way, shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Hand",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Search your library and/or graveyard for an Ally creature card, reveal it, and put it into your hand. If you search your library this way, shuffle.",
-        "ChangeNum": "1",
-        "ShuffleNonMandatory": "True",
-        "ChangeTypeDesc": "Ally creature card",
-        "Optional": "True",
-        "OriginAlternative": "Graveyard",
-        "ChangeType": "Creature.Ally+YouOwn"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "Description": "This spell costs {2} less to cast if a creature left the battlefield under your control this turn.",
-        "Amount": "2",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "Type": "Spell"
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {2} less to cast if a creature left the battlefield under your control this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

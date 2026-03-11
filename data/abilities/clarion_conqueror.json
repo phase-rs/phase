@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidSA": "Activated",
-        "AffectedZone": "Battlefield",
-        "ValidCard": "Artifact,Creature,Planeswalker",
-        "Description": "Activated abilities of artifacts, creatures, and planeswalkers can't be activated."
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of artifacts, creatures, and planeswalkers can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

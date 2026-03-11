@@ -1,44 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever one or more cards are put into your graveyard from your library, each opponent loses 1 life for each card type among those cards.",
+          "destination": "Graveyard",
           "mode": "ChangesZoneAll",
-          "params": {
-            "Execute": "TrigLoseLife",
-            "TriggerDescription": "Whenever one or more cards are put into your graveyard from your library, each opponent loses 1 life for each card type among those cards.",
-            "ValidCards": "Card.YouOwn",
-            "TriggerZones": "Battlefield",
-            "Origin": "Library",
-            "Destination": "Graveyard"
-          }
+          "origin": "Library",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, mill three cards, then return a creature card from your graveyard to the battlefield.",
           "mode": "UnlockDoor",
-          "params": {
-            "Execute": "TrigMill",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When you unlock this door, mill three cards, then return a creature card from your graveyard to the battlefield.",
-            "ThisDoor": "True",
-            "ValidPlayer": "You"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,44 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 4
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw four cards."
-      }
-    }
-  ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "OptionalCost"
+      "description": "Draw four cards.",
+      "effect": {
+        "count": 4,
+        "type": "Draw"
       },
-      "params": {
-        "ValidSA": "Spell",
-        "EffectZone": "All",
-        "Cost": "Reveal<1/Dragon>",
-        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
-        "ValidCard": "Card.Self"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you revealed a Dragon card or controlled a Dragon as you cast this spell, this spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "Layer": "CantHappen",
-        "Description": "If you revealed a Dragon card or controlled a Dragon as you cast this spell, this spell can't be countered.",
-        "CheckSVar": "Count$Presence_Dragon.1.0"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
+      "effect_zone": "Battlefield",
+      "mode": {
+        "Other": "OptionalCost"
+      }
+    }
+  ],
+  "triggers": []
 }

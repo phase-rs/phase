@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE30",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have 30 or more life, CARDNAME gets +5/+5 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "AddPower": "5",
-        "Description": "As long as you have 30 or more life, CARDNAME gets +5/+5 and has flying.",
-        "AddToughness": "5",
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "GE30"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 5
+        },
+        {
+          "type": "AddToughness",
+          "value": 5
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

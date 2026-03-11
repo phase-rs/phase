@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures your opponents control can't have +1/+1 counters put on them.",
       "mode": {
         "Other": "CantPutCounter"
-      },
-      "params": {
-        "ValidCard": "Creature.OppCtrl",
-        "Description": "Creatures your opponents control can't have +1/+1 counters put on them.",
-        "CounterType": "P1P1"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

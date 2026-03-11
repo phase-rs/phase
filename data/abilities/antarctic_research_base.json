@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, investigate.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, investigate.",
-        "Execute": "TrigInvestigate",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, investigate.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, investigate.",
-        "Phase": "Upkeep",
-        "Execute": "TrigInvestigate",
-        "Secondary": "True",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, put X +1/+1 counters on target creature you control, where X is the number of artifacts you control. It becomes a Plant in addition to its other types.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever chaos ensues, put X +1/+1 counters on target creature you control, where X is the number of artifacts you control. It becomes a Plant in addition to its other types."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

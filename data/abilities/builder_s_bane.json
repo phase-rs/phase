@@ -2,28 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "TargetMax": "MaxTgt",
-        "TargetMin": "0",
-        "RememberTargets": "True",
-        "SubAbility": "DBRepeat",
-        "SpellDescription": "Destroy X target artifacts. CARDNAME deals damage to each player equal to the number of artifacts they controlled that were put into a graveyard this way."
-      }
+      "description": "Destroy X target artifacts. CARDNAME deals damage to each player equal to the number of artifacts they controlled that were put into a graveyard this way.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

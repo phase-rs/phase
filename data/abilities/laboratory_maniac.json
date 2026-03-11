@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "IsPresent": "Card.YouOwn",
-        "PresentCompare": "EQ0",
-        "Description": "If you would draw a card while your library has no cards in it, you win the game instead.",
-        "ReplaceWith": "Win",
-        "PresentZone": "Library",
-        "ValidPlayer": "You"
-      }
+      "description": "If you would draw a card while your library has no cards in it, you win the game instead.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

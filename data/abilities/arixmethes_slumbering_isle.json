@@ -2,58 +2,65 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G U",
-        "params": {
-          "SpellDescription": "Add {G}{U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}{U}."
-      }
+      "description": "Add {G}{U}.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a spell, you may remove a slumber counter from NICKNAME.",
-        "ValidCard": "Card",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigRemoveCounter",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You"
+      "description": "CARDNAME enters tapped with five slumber counters on it.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as NICKNAME has a slumber counter on it, it's a land. (It's not a creature.)",
       "mode": "Continuous",
-      "params": {
-        "RemoveCardTypes": "True",
-        "Affected": "Card.Self+counters_GE1_SLUMBER",
-        "Description": "As long as NICKNAME has a slumber counter on it, it's a land. (It's not a creature.)",
-        "AddType": "Land"
-      }
+      "modifications": [
+        {
+          "core_type": "Land",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplaceWith": "LandTapped",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped with five slumber counters on it."
+      "description": "Whenever you cast a spell, you may remove a slumber counter from NICKNAME.",
+      "mode": "SpellCast",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

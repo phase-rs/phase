@@ -2,87 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo Any",
-        "params": {
-          "Planeswalker": "True",
-          "Amount": "2",
-          "SpellDescription": "Add two mana in any combination of colors."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Amount": "2",
-        "SpellDescription": "Add two mana in any combination of colors."
-      }
+      "description": "Add two mana in any combination of colors.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Exile the top five cards of your library. Until the end of your next turn, you may cast an instant or sorcery spell from among those exiled cards.",
       "effect": {
-        "type": "Dig",
         "count": 5,
-        "destination": "Exile"
+        "destination": "Exile",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "RememberChanged": "True",
-        "SubAbility": "DBEffect",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top five cards of your library. Until the end of your next turn, you may cast an instant or sorcery spell from among those exiled cards."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals X damage to each of up to two targets.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "TargetMax": "2",
-        "SpellDescription": "CARDNAME deals X damage to each of up to two targets."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy. This ability triggers only once each turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopySpell",
-        "ActivationLimit": "1",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy. This ability triggers only once each turn.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

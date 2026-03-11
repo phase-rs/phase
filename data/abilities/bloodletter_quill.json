@@ -2,55 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "AddCounter<1/BLOOD>"
+            "cost": "AddCounter<1/BLOOD>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw a card, then you lose 1 life for each blood counter on CARDNAME.",
-        "SubAbility": "DBLoseLife"
-      }
+      "description": "Draw a card, then you lose 1 life for each blood counter on CARDNAME.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U B",
+        "type": "Mana"
+      },
+      "description": "Remove a blood counter from CARDNAME.",
       "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "BLOOD",
         "count": 1,
+        "counter_type": "BLOOD",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "RemoveCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Remove a blood counter from CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

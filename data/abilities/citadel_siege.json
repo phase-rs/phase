@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+ChosenModeKhans",
-        "Description": "• Khans — At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
-        "AddTrigger": "KhansTrigger"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeKhans"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Khans — At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+ChosenModeDragons",
-        "AddTrigger": "DragonsTrigger",
-        "Description": "• Dragons — At the beginning of combat on each opponent's turn, tap target creature that player controls."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeDragons"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Dragons — At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

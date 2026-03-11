@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "IsPresent": "Vampire.YouCtrl",
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME can't block unless you control a Vampire.",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Vampire",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't block unless you control a Vampire.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

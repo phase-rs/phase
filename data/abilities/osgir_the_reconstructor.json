@@ -2,78 +2,66 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature you control gets +2/+0 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "SpellDescription": "Target creature you control gets +2/+0 until end of turn."
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Defined": "Exiled",
-          "StackDescription": "SpellDescription",
-          "NumCopies": "2",
-          "SpellDescription": "Create two tokens that are copies of the exiled card. Activate only as a sorcery.",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/Artifact.cmcEQX/artifact card with mana value X>"
+            "cost": "ExileFromGrave<1/Artifact.cmcEQX/artifact card with mana value X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Exiled",
-        "StackDescription": "SpellDescription",
-        "NumCopies": "2",
-        "SpellDescription": "Create two tokens that are copies of the exiled card. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "description": "Create two tokens that are copies of the exiled card. Activate only as a sorcery.",
+      "effect": {
+        "description": "Create two tokens that are copies of the exiled card. Activate only as a sorcery.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

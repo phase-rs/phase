@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Rhino",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Rhinos you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Rhino.YouCtrl",
-        "Description": "Rhinos you control have menace.",
-        "AddKeyword": "Menace"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

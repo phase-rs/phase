@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, ABILITY",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigCharm",
-        "AttackingPlayer": "You",
-        "TriggerDescription": "Whenever you attack, ABILITY",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "Defined": "Valid Creature.YouCtrl",
-          "SpellDescription": "Regenerate each creature you control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Valid Creature.YouCtrl",
-        "SpellDescription": "Regenerate each creature you control."
-      }
+      "description": "Regenerate each creature you control.",
+      "effect": {
+        "description": "Regenerate each creature you control.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

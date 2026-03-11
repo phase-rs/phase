@@ -1,26 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has ward {2}, is an Assassin in addition to its other types, and can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Ward:2",
-        "Affected": "Creature.EquippedBy",
-        "AddType": "Assassin",
-        "Description": "Equipped creature has ward {2}, is an Assassin in addition to its other types, and can't be blocked."
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:2",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Assassin",
+          "type": "AddType"
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.EquippedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

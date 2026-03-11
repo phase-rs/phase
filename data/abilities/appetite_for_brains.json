@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Target opponent reveals their hand.",
-          "Defined": "Targeted",
-          "ValidTgts": "Opponent",
-          "SubAbility": "ExileCard"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Target opponent reveals their hand.",
-        "Defined": "Targeted",
-        "ValidTgts": "Opponent",
-        "SubAbility": "ExileCard"
-      }
+      "description": "Target opponent reveals their hand.",
+      "effect": {
+        "description": "Target opponent reveals their hand.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

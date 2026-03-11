@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidTarget": "Player",
-        "Description": "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "CombatDamage": "True",
-        "ValidMode": "DamageDone,DamageDoneOnce,DamageDealtOnce,DamageAll",
-        "ValidSource": "Creature.YouCtrl",
-        "ValidCard": "Permanent.YouCtrl"
-      }
+      "description": "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

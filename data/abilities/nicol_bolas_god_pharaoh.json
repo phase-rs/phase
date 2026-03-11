@@ -2,117 +2,83 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "Valid": "Card.nonLand",
-          "SubAbility": "DBEffect",
-          "FoundDestination": "Exile",
-          "RevealedDestination": "Exile",
-          "SpellDescription": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
-          "StackDescription": "{p:Targeted} exiles cards from the top of their library until they exile a nonland card. Until end of turn, {p:You} may cast that card without paying its mana cost.",
-          "Planeswalker": "True",
-          "ValidTgts": "Opponent",
-          "RememberFound": "True",
-          "IsCurse": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Card.nonLand",
-        "SubAbility": "DBEffect",
-        "FoundDestination": "Exile",
-        "RevealedDestination": "Exile",
-        "SpellDescription": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
-        "StackDescription": "{p:Targeted} exiles cards from the top of their library until they exile a nonland card. Until end of turn, {p:You} may cast that card without paying its mana cost.",
-        "Planeswalker": "True",
-        "ValidTgts": "Opponent",
-        "RememberFound": "True",
-        "IsCurse": "True"
-      }
+      "description": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
+      "effect": {
+        "description": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Each opponent exiles two cards from their hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Exile",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ChangeNum": "2",
-        "SpellDescription": "Each opponent exiles two cards from their hand.",
-        "ChangeType": "Card",
-        "Hidden": "True",
-        "Mandatory": "True",
-        "DefinedPlayer": "Player.Opponent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -4,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 7 damage to target opponent, creature an opponent controls, or planeswalker an opponent controls.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 7
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent,Creature.OppCtrl,Planeswalker.OppCtrl"
-        }
+          "card_type": "Opponent,Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppCtrl,Planeswalker.OppCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -4
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 7 damage to target opponent, creature an opponent controls, or planeswalker an opponent controls.",
-        "TgtPrompt": "Select target opponent, creature an opponent controls, or planeswalker an opponent controls"
-      }
+      "target_prompt": "Select target opponent, creature an opponent controls, or planeswalker an opponent controls"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -12
+        "amount": -12,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Exile each nonland permanent your opponents control.",
-        "StackDescription": "SpellDescription",
-        "Ultimate": "True",
-        "ChangeType": "Permanent.OppCtrl+nonLand"
-      }
+      "description": "Exile each nonland permanent your opponents control.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

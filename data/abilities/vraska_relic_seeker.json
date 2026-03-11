@@ -2,78 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 black Pirate creature token with menace.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_2_2_pirate_menace",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 black Pirate creature token with menace."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Destroy target artifact, creature, or enchantment. Create a Treasure token.",
       "effect": {
-        "type": "Destroy",
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Enchantment"
-        }
+          "card_type": "Artifact,Creature,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "AILogic": "MinLoyalty.4",
-        "TgtPrompt": "Select target artifact, creature, or enchantment",
-        "SpellDescription": "Destroy target artifact, creature, or enchantment. Create a Treasure token.",
-        "SubAbility": "DBTreasure"
-      }
+      "target_prompt": "Select target artifact, creature, or enchantment"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "SpellDescription": "Target player's life total becomes 1.",
-          "ValidTgts": "Player",
-          "Ultimate": "True",
-          "LifeAmount": "1",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player's life total becomes 1.",
-        "ValidTgts": "Player",
-        "Ultimate": "True",
-        "LifeAmount": "1",
-        "Planeswalker": "True"
-      }
+      "description": "Target player's life total becomes 1.",
+      "effect": {
+        "description": "Target player's life total becomes 1.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

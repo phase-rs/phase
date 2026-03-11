@@ -2,42 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "MayChooseTarget": "True",
-          "AILogic": "Once",
-          "SpellDescription": "Copy target spell you control that wasn't cast. You may choose new targets for the copy.",
-          "TargetType": "Spell",
-          "ValidTgts": "Card.YouCtrl+!wasCast"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MayChooseTarget": "True",
-        "AILogic": "Once",
-        "SpellDescription": "Copy target spell you control that wasn't cast. You may choose new targets for the copy.",
-        "TargetType": "Spell",
-        "ValidTgts": "Card.YouCtrl+!wasCast"
-      }
+      "description": "Copy target spell you control that wasn't cast. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target spell you control that wasn't cast. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

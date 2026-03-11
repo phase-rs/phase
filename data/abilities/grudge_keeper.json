@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever players finish voting, each opponent who voted for a choice you didn't vote for loses 2 life.",
       "mode": "Vote",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever players finish voting, each opponent who voted for a choice you didn't vote for loses 2 life.",
-        "List": "OppVotedDiff"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

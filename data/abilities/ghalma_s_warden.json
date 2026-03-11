@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — CARDNAME gets +2/+2 as long as you control three or more artifacts.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Metalcraft — CARDNAME gets +2/+2 as long as you control three or more artifacts.",
-        "AddToughness": "2",
-        "Affected": "Card.Self",
-        "AddPower": "2",
-        "Condition": "Metalcraft"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

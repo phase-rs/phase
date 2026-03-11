@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
-        "AffectedZone": "Battlefield",
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "AffectedX",
-        "AddToughness": "AffectedX"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "description": "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Tap one or two target creatures an opponent controls.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCounter",
-        "TargetMax": "2",
-        "SpellDescription": "Tap one or two target creatures an opponent controls.",
-        "TargetMin": "1",
-        "TgtPrompt": "Select one or two target creatures an opponent controls"
-      }
+      "target_prompt": "Select one or two target creatures an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

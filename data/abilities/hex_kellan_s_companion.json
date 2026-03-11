@@ -1,31 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an Adventure spell, if CARDNAME is on the battlefield or in exile, it perpetually gets +1/+1. Then if it's on the battlefield, exile it with a fetch counter on it.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield,Exile",
-        "ValidCard": "Card.Adventure",
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Whenever you cast an Adventure spell, if CARDNAME is on the battlefield or in exile, it perpetually gets +1/+1. Then if it's on the battlefield, exile it with a fetch counter on it."
+      "trigger_zones": [
+        "Battlefield",
+        "Exile"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Adventure"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a spell from exile, if NICKNAME is in exile with a fetch counter on it, put it onto the battlefield.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.wasCastFromExile",
-        "IsPresent": "Card.Self+counters_EQ1_FETCH",
-        "TriggerDescription": "Whenever you cast a spell from exile, if NICKNAME is in exile with a fetch counter on it, put it onto the battlefield.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigReturn",
-        "PresentZone": "Exile",
-        "TriggerZones": "Exile"
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

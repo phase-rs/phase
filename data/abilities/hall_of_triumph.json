@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenColor"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control of the chosen color get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.ChosenColor+YouCtrl",
-        "AddPower": "1",
-        "Description": "Creatures you control of the chosen color get +1/+1.",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

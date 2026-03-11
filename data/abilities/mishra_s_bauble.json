@@ -2,42 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "ValidTgts": "Player",
-          "SpellDescription": "Look at the top card of target player's library.",
-          "NoReveal": "True",
-          "SubAbility": "DelTrigSlowtrip"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SpellDescription": "Look at the top card of target player's library.",
-        "NoReveal": "True",
-        "SubAbility": "DelTrigSlowtrip"
-      }
+      "description": "Look at the top card of target player's library.",
+      "effect": {
+        "description": "Look at the top card of target player's library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

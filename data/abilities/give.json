@@ -1,61 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 3,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
+          "description": "Put three +1/+1 counters on target creature.",
+          "effect": {
+            "count": 3,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Put three +1/+1 counters on target creature.",
-            "TgtPrompt": "Select target creature to put counters"
-          }
+          "target_prompt": "Select target creature to put counters"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "RemoveCounter",
-            "counter_type": "P1P1",
-            "count": 1,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": null,
+          "description": "Remove all +1/+1 counters from target creature you control. Draw that many cards.",
+          "effect": {
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDraw",
-            "SpellDescription": "Remove all +1/+1 counters from target creature you control. Draw that many cards.",
-            "TgtPrompt": "Select target creature you control to remove counters",
-            "RememberRemoved": "True"
-          }
+          "target_prompt": "Select target creature you control to remove counters"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 G"
+        "cost": "5 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control get +1/+1 and gain trample until end of turn."
-      }
+      "description": "Creatures you control get +1/+1 and gain trample until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 1,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

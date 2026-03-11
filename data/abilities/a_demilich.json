@@ -1,42 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, exile up to one target instant or sorcery card from your graveyard. Copy it. You may cast the copy.",
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "Amount": "X",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Description": "This spell costs {U} less to cast for each instant and sorcery spell you've cast this turn.",
-        "Color": "U"
-      }
+      "description": "This spell costs {U} less to cast for each instant and sorcery spell you've cast this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may cast CARDNAME from your graveyard by exiling four instant and/or sorcery cards from your graveyard in addition to paying its other costs.",
-        "ActivationZone": "Graveyard",
-        "MayPlayAltManaCost": "U U U U ExileFromGrave<4/Instant;Sorcery/instant or sorcery cards>",
-        "AffectedZone": "Graveyard",
-        "EffectZone": "Graveyard",
-        "Affected": "Card.Self",
-        "MayPlay": "True"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast CARDNAME from your graveyard by exiling four instant and/or sorcery cards from your graveyard in addition to paying its other costs.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, exile up to one target instant or sorcery card from your graveyard. Copy it. You may cast the copy.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

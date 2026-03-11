@@ -1,27 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch & Indestructible",
-        "Description": "Enchanted creature has deathtouch and indestructible.",
-        "Affected": "Creature.EnchantedBy"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME is turned face up, you may attach it to a creature.",
       "event": "TurnFaceUp",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "As CARDNAME is turned face up, you may attach it to a creature.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DBAttach"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has deathtouch and indestructible.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

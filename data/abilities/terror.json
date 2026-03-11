@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonArtifact+nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Artifact"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "NoRegen": "True",
-        "SpellDescription": "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
-        "TgtPrompt": "Select target nonartifact, nonblack creature"
-      }
+      "target_prompt": "Select target nonartifact, nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

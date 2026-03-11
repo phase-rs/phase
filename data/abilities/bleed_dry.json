@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": -13,
-        "toughness": -13,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets -13/-13 until end of turn. If that creature would die this turn, exile it instead.",
-        "ReplaceDyingDefined": "Targeted",
-        "IsCurse": "True",
-        "StackDescription": "{c:Targeted} gets -13/-13 until end of turn. If that creature would die this turn, exile it instead."
-      }
+      "description": "Target creature gets -13/-13 until end of turn. If that creature would die this turn, exile it instead.",
+      "effect": {
+        "power": -13,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -13,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

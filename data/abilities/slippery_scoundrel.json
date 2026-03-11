@@ -1,27 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as you have the city's blessing, CARDNAME has hexproof and can't be blocked.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Blessing",
-        "Description": "As long as you have the city's blessing, CARDNAME has hexproof and can't be blocked.",
-        "AddKeyword": "Hexproof",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Card.Self",
-        "Condition": "Blessing"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

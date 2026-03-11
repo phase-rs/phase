@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's end step, if that player didn't cast a spell this turn, CARDNAME deals 2 damage to that player.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "ImpatientDamage",
-        "TriggerDescription": "At the beginning of each player's end step, if that player didn't cast a spell this turn, CARDNAME deals 2 damage to that player.",
-        "TriggerZones": "Battlefield",
-        "SVarCompare": "EQ0",
-        "CheckSVar": "TrigCast"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

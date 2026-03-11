@@ -1,54 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, target creature you control gets +2/+0 until end of turn.",
           "mode": "Phase",
-          "params": {
-            "Phase": "BeginCombat",
-            "Execute": "TrigPump",
-            "ValidPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of combat on your turn, target creature you control gets +2/+0 until end of turn."
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         },
         {
+          "description": "At the end of combat on your turn, if a player was dealt 6 or more combat damage this turn, transform this enchantment, then attach it to a creature you control.",
           "mode": "Phase",
-          "params": {
-            "SVarCompare": "GE6",
-            "CheckSVar": "X",
-            "Execute": "TrigTransform",
-            "ValidPlayer": "You",
-            "Phase": "EndCombat",
-            "TriggerDescription": "At the end of combat on your turn, if a player was dealt 6 or more combat damage this turn, transform this enchantment, then attach it to a creature you control.",
-            "TriggerZones": "Battlefield"
-          }
+          "phase": "EndCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Double Overdrive — Equipped creature gets +2/+0 and has double strike.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Double Overdrive — Equipped creature gets +2/+0 and has double strike.",
-            "AddPower": "2",
-            "Affected": "Creature.EquippedBy",
-            "AddKeyword": "Double Strike"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            },
+            {
+              "keyword": "Double",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Strike",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

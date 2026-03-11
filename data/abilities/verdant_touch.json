@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target land becomes a 2/2 creature that's still a land. (This effect lasts indefinitely.)",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
         "toughness": 2,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target land becomes a 2/2 creature that's still a land. (This effect lasts indefinitely.)",
-        "Duration": "Permanent"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

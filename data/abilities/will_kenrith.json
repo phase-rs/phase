@@ -2,88 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Until your next turn, up to two target creatures each have base power and toughness 0/3 and lose all abilities.",
+      "duration": "UntilYourNextTurn",
       "effect": {
-        "type": "Animate",
         "power": 0,
-        "toughness": 3,
-        "types": [],
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 3,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "IsCurse": "True",
-        "Duration": "UntilYourNextTurn",
-        "RemoveAllAbilities": "True",
-        "TargetMin": "0",
-        "TargetMax": "2",
-        "SpellDescription": "Until your next turn, up to two target creatures each have base power and toughness 0/3 and lose all abilities."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Target player draws two cards. Until your next turn, instant, sorcery, and planeswalker spells that player casts cost {2} less to cast.",
-        "Planeswalker": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player draws two cards. Until your next turn, instant, sorcery, and planeswalker spells that player casts cost {2} less to cast.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "EffectOwner": "Targeted",
-          "Name": "Emblem — Will Kenrith",
-          "Planeswalker": "True",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "Ultimate": "True",
-          "Image": "emblem_will_kenrith",
-          "SpellDescription": "Target player gets an emblem with \"Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy.\"",
-          "ValidTgts": "Player",
-          "Triggers": "CopySpell"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "EffectOwner": "Targeted",
-        "Name": "Emblem — Will Kenrith",
-        "Planeswalker": "True",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "Ultimate": "True",
-        "Image": "emblem_will_kenrith",
-        "SpellDescription": "Target player gets an emblem with \"Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy.\"",
-        "ValidTgts": "Player",
-        "Triggers": "CopySpell"
-      }
+      "description": "Target player gets an emblem with \"Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

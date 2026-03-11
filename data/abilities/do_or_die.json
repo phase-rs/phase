@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TwoPiles",
-        "params": {
-          "AILogic": "Worst",
-          "ValidTgts": "Player",
-          "ChosenPile": "DBDestroy",
-          "Zone": "Battlefield",
-          "SpellDescription": "Separate all creatures target player controls into two piles. Destroy all creatures in the pile of that player's choice. They can't be regenerated.",
-          "ValidCards": "Creature",
-          "Separator": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Worst",
-        "ValidTgts": "Player",
-        "ChosenPile": "DBDestroy",
-        "Zone": "Battlefield",
-        "SpellDescription": "Separate all creatures target player controls into two piles. Destroy all creatures in the pile of that player's choice. They can't be regenerated.",
-        "ValidCards": "Creature",
-        "Separator": "You"
-      }
+      "description": "Separate all creatures target player controls into two piles. Destroy all creatures in the pile of that player's choice. They can't be regenerated.",
+      "effect": {
+        "description": "Separate all creatures target player controls into two piles. Destroy all creatures in the pile of that player's choice. They can't be regenerated.",
+        "name": "TwoPiles",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,99 +1,108 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "b_2_2_vampire_flying",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 2/2 black Vampire creature token with flying.",
-            "TokenOwner": "You"
-          }
+          "description": "Create a 2/2 black Vampire creature token with flying.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "b_2_2_vampire_flying",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "IsPresent": "Card.Vampire+YouCtrl",
-              "PresentCompare": "GE5",
-              "Mode": "Transform",
-              "Defined": "Self",
-              "SpellDescription": "Transform CARDNAME. Activate only if you control five or more Vampires."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "IsPresent": "Card.Vampire+YouCtrl",
-            "PresentCompare": "GE5",
-            "Mode": "Transform",
-            "Defined": "Self",
-            "SpellDescription": "Transform CARDNAME. Activate only if you control five or more Vampires."
-          }
+          "description": "Transform CARDNAME. Activate only if you control five or more Vampires.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if you control five or more Vampires.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "b_2_2_vampire_flying",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create a 2/2 black Vampire creature token with flying."
-          }
+          "description": "Create a 2/2 black Vampire creature token with flying.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "b_2_2_vampire_flying",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Vampire"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other Vampire creatures you control get +2/+2.",
           "mode": "Continuous",
-          "params": {
-            "AddToughness": "2",
-            "Description": "Other Vampire creatures you control get +2/+2.",
-            "Affected": "Creature.Vampire+Other+YouCtrl",
-            "AddPower": "2"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 2
+            },
+            {
+              "type": "AddToughness",
+              "value": 2
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

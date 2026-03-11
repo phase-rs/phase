@@ -2,50 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "ValidActivatingPlayer": "You",
-          "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
-          "ThisTurn": "True",
-          "AILogic": "SpellCopy",
-          "Mode": "SpellCast",
-          "Execute": "EffTrigCopy",
-          "ValidCard": "Instant,Sorcery"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<3/CHARGE>"
+        "cost": "SubCounter<3/CHARGE>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidActivatingPlayer": "You",
-        "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
-        "ThisTurn": "True",
-        "AILogic": "SpellCopy",
-        "Mode": "SpellCast",
-        "Execute": "EffTrigCopy",
-        "ValidCard": "Instant,Sorcery"
-      }
+      "description": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
+      "effect": {
+        "description": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an instant or sorcery spell, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant,Sorcery",
-        "IsPresent": "Card.Self+counters_LT3_CHARGE",
-        "TriggerDescription": "Whenever you cast an instant or sorcery spell, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, create two 1/1 black and green Insect creature tokens with flying.",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Insect",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Spider.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Delirium — As long as there are four or more card types among cards in your graveyard, Insects and Spiders you control get +1/+1 and have deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Delirium",
-        "AddKeyword": "Deathtouch",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Delirium — As long as there are four or more card types among cards in your graveyard, Insects and Spiders you control get +1/+1 and have deathtouch.",
-        "Affected": "Insect.YouCtrl,Spider.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create two 1/1 black and green Insect creature tokens with flying.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

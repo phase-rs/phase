@@ -1,31 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You",
-        "CheckSVar": "X",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if a creature died this turn, you may pay {1}. If you do, create a 1/1 black Skeleton creature token."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Zombie",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Skeleton.YouCtrl,Vampire.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Skeletons, Vampires, and Zombies you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Skeletons, Vampires, and Zombies you control get +1/+1.",
-        "Affected": "Zombie.YouCtrl,Skeleton.YouCtrl,Vampire.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if a creature died this turn, you may pay {1}. If you do, create a 1/1 black Skeleton creature token.",
+      "mode": "Phase",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

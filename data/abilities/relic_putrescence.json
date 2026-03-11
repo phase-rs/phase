@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted artifact becomes tapped, its controller gets a poison counter.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever enchanted artifact becomes tapped, its controller gets a poison counter.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigPoison"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a player, tap target creature that player controls. That creature doesn't untap during its controller's untap step for as long as CARDNAME remains on the battlefield.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "Execute": "TrigTap",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a player, tap target creature that player controls. That creature doesn't untap during its controller's untap step for as long as CARDNAME remains on the battlefield."
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

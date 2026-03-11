@@ -1,27 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +3/+3 for each opponent whose life total is less than half their starting life total.",
-        "AddPower": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +3/+3 for each opponent whose life total is less than half their starting life total.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "As long as an opponent's life total is less than half their starting life total, NICKNAME has indestructible.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Indestructible",
-        "CheckSVar": "Y",
-        "Description": "As long as an opponent's life total is less than half their starting life total, NICKNAME has indestructible.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

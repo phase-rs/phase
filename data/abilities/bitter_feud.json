@@ -1,41 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Static": "True",
-        "Execute": "DBCleanup",
-        "ValidCard": "Card.Self",
-        "Destination": "Any"
-      }
+      "description": "If a source controlled by one of the chosen players would deal damage to the other chosen player or a permanent that player controls, that source deals double that damage to that player or permanent instead.",
+      "event": "DamageDone"
+    },
+    {
+      "description": "If a source controlled by one of the chosen players would deal damage to the other chosen player or a permanent that player controls, that source deals double that damage to that player or permanent instead.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent.ChosenCtrl,Player.Chosen",
-        "ReplaceWith": "DmgTwice",
-        "Description": "If a source controlled by one of the chosen players would deal damage to the other chosen player or a permanent that player controls, that source deals double that damage to that player or permanent instead.",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Card.RememberedPlayerCtrl,Emblem.RememberedPlayerCtrl"
-      }
-    },
-    {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DmgTwice",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Card.ChosenCtrl,Emblem.ChosenCtrl",
-        "Secondary": "True",
-        "Description": "If a source controlled by one of the chosen players would deal damage to the other chosen player or a permanent that player controls, that source deals double that damage to that player or permanent instead.",
-        "ValidTarget": "Permanent.RememberedPlayerCtrl,Player.IsRemembered"
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

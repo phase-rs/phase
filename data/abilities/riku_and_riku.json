@@ -2,60 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TgtPrompt": "Select target instant or sorcery spell you control",
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-          "TargetType": "Spell",
-          "SpellDescription": "Copy target instant or sorcery spell you control. Activate this ability only once.",
-          "GameActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U R"
+        "cost": "U R",
+        "type": "Mana"
       },
+      "description": "Copy target instant or sorcery spell you control. Activate this ability only once.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control. Activate this ability only once.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target instant or sorcery spell you control",
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "TargetType": "Spell",
-        "SpellDescription": "Copy target instant or sorcery spell you control. Activate this ability only once.",
-        "GameActivationLimit": "1"
-      }
+      "target_prompt": "Select target instant or sorcery spell you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "ValidTgts": "Creature.YouCtrl",
-          "TargetType": "Spell",
-          "TgtPrompt": "Select target creature spell you control",
-          "SpellDescription": "Copy target creature spell you control. Activate this ability only once.",
-          "GameActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G U"
+        "cost": "G U",
+        "type": "Mana"
       },
+      "description": "Copy target creature spell you control. Activate this ability only once.",
+      "effect": {
+        "description": "Copy target creature spell you control. Activate this ability only once.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.YouCtrl",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target creature spell you control",
-        "SpellDescription": "Copy target creature spell you control. Activate this ability only once.",
-        "GameActivationLimit": "1"
-      }
+      "target_prompt": "Select target creature spell you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,25 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Artifact",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other artifacts you control have ward {2}.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Ward:2",
-        "Affected": "Artifact.YouCtrl+Other",
-        "Description": "Other artifacts you control have ward {2}."
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:2",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power is equal to the number of artifacts you control.",
-        "CharacteristicDefining": "True",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of artifacts you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,70 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Dig",
-            "count": 6,
-            "destination": ""
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeValid": "Instant,Sorcery",
-            "ChangeNum": "1",
-            "RestRandomOrder": "True",
-            "SpellDescription": "Look at the top six cards of your library. You may reveal an instant or sorcery card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-            "Optional": "True",
-            "ForceRevealToController": "True",
-            "StackDescription": "SpellDescription"
-          }
+          "description": "Look at the top six cards of your library. You may reveal an instant or sorcery card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+          "effect": {
+            "count": 6,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "SpellDescription": "Add {U}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {U}."
+          "description": "Add {U}.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "CARDNAME enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Description": "CARDNAME enters tapped.",
-            "ReplacementResult": "Updated",
-            "ReplaceWith": "ETBTapped",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield"
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

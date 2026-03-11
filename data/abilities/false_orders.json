@@ -2,37 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RemoveFromCombat",
-        "params": {
-          "TgtPrompt": "Select target creature defending player controls",
-          "ValidTgts": "Creature.DefendingPlayerCtrl",
-          "UnblockCreaturesBlockedOnlyBy": "Targeted",
-          "SubAbility": "ChooseAttacker",
-          "SpellDescription": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
-          "ActivationPhases": "Declare Blockers",
-          "Defined": "Targeted",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": null,
+      "description": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
+      "effect": {
+        "description": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
+        "name": "RemoveFromCombat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature defending player controls",
-        "ValidTgts": "Creature.DefendingPlayerCtrl",
-        "UnblockCreaturesBlockedOnlyBy": "Targeted",
-        "SubAbility": "ChooseAttacker",
-        "SpellDescription": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
-        "ActivationPhases": "Declare Blockers",
-        "Defined": "Targeted",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target creature defending player controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

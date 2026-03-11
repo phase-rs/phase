@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's end step, if no permanents left the battlefield this turn, that player loses X life, where X is NICKNAME's power.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of each player's end step, if no permanents left the battlefield this turn, that player loses X life, where X is NICKNAME's power.",
-        "Revolt": "None",
-        "ValidPlayer": "Player",
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

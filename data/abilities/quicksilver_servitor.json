@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell from among cards put into your hand this turn, proliferate.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a spell from among cards put into your hand this turn, proliferate.",
-        "Execute": "TrigProliferate",
-        "ValidCard": "Card.ThisTurnEnteredYourHand",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ThisTurnEnteredYourHand"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

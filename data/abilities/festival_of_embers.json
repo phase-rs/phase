@@ -2,49 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "Sacrifice CARDNAME.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Affected": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Graveyard",
-        "RaiseCost": "PayLife<1>",
-        "Description": "During your turn, you may cast instant and sorcery spells from your graveyard by paying 1 life in addition to their other costs.",
-        "MayPlay": "True"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a card or token would be put into your graveyard from anywhere, exile it instead.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Description": "If a card or token would be put into your graveyard from anywhere, exile it instead.",
-        "ValidCard": "Card.YouOwn",
-        "ReplaceWith": "Exile",
-        "Destination": "Graveyard"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During your turn, you may cast instant and sorcery spells from your graveyard by paying 1 life in addition to their other costs.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

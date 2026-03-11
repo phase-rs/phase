@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a instant or sorcery spell, CARDNAME gets +1/+1 until end of turn. Untap it.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever you cast a instant or sorcery spell, CARDNAME gets +1/+1 until end of turn. Untap it.",
-        "ValidCard": "Instant,Sorcery",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

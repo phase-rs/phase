@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — CARDNAME gets +2/+2 as long as there are seven or more cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Threshold",
-        "AddPower": "2",
-        "Description": "Threshold — CARDNAME gets +2/+2 as long as there are seven or more cards in your graveyard.",
-        "AddToughness": "2",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

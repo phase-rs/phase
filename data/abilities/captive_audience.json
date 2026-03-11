@@ -1,30 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigCharm",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, ABILITY"
+      "description": "CARDNAME enters under the control of an opponent of your choice.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters under the control of an opponent of your choice.",
-        "ReplaceWith": "DBChooseOpp",
-        "Layer": "Control"
-      }
+      "description": "At the beginning of your upkeep, ABILITY",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,39 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +X/+X, where X is the greatest number of stored results on it of the same value.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, roll five six-sided dice and store those results on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, roll five six-sided dice and store those results on it.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigRollDice"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of combat on your turn, you may reroll any number of CARDNAME's stored results.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of combat on your turn, you may reroll any number of CARDNAME's stored results.",
-        "Phase": "BeginCombat",
-        "Execute": "TrigReroll"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +X/+X, where X is the greatest number of stored results on it of the same value."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

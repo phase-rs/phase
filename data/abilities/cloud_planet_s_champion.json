@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, as long as NICKNAME is equipped, it has double strike and indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.Self+equipped",
-        "Description": "During your turn, as long as NICKNAME is equipped, it has double strike and indestructible.",
-        "AddKeyword": "Double Strike & Indestructible",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Equip abilities you activate that target NICKNAME cost {2} less to activate.",
-        "ValidTarget": "Card.Self",
-        "Amount": "2",
-        "ValidSpell": "Activated.Equip",
-        "Activator": "You"
-      }
+      "description": "Equip abilities you activate that target NICKNAME cost {2} less to activate.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

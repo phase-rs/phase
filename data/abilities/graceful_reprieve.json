@@ -2,41 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "SpellDescription": "When target creature dies this turn, return that card to the battlefield under its owner's control.",
-          "Destination": "Graveyard",
-          "StackDescription": "When {c:Targeted} dies this turn, return that card to the battlefield under its owner's control.",
-          "ValidTgts": "Creature",
-          "Origin": "Battlefield",
-          "RememberObjects": "Targeted",
-          "Mode": "ChangesZone",
-          "ValidCard": "Card.IsTriggerRemembered",
-          "ThisTurn": "True",
-          "Execute": "TrigChangeZone"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "When target creature dies this turn, return that card to the battlefield under its owner's control.",
-        "Destination": "Graveyard",
-        "StackDescription": "When {c:Targeted} dies this turn, return that card to the battlefield under its owner's control.",
-        "ValidTgts": "Creature",
-        "Origin": "Battlefield",
-        "RememberObjects": "Targeted",
-        "Mode": "ChangesZone",
-        "ValidCard": "Card.IsTriggerRemembered",
-        "ThisTurn": "True",
-        "Execute": "TrigChangeZone"
-      }
+      "description": "When target creature dies this turn, return that card to the battlefield under its owner's control.",
+      "effect": {
+        "description": "When target creature dies this turn, return that card to the battlefield under its owner's control.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

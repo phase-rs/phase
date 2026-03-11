@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, choose first strike, vigilance or lifelink. Creatures you control gain that ability until end of turn.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each combat, choose first strike, vigilance or lifelink. Creatures you control gain that ability until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChoose",
-        "Phase": "BeginCombat"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

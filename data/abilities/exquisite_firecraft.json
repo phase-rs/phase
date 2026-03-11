@@ -2,39 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 4 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 4
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 4 damage to any target."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, this spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "PresentCompare": "GE2",
-        "PresentZone": "Graveyard",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, this spell can't be countered.",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

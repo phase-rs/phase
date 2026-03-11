@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if there is an Elf card in your graveyard and this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "IsPresent": "Card.Self+counters_GE1_M1M1",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "SVarCompare": "GE1",
-        "TriggerDescription": "At the beginning of your end step, if there is an Elf card in your graveyard and this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.",
-        "Execute": "TrigRemoveCounter",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,62 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Defined": "You",
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top card of your library. You may play it this turn.",
-        "SubAbility": "DBEffect",
-        "RememberChanged": "True"
-      }
+      "description": "Exile the top card of your library. You may play it this turn.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 7,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "ChangeNum": "All",
-        "Ultimate": "True",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile the top seven cards of your library. You may play them this turn.",
-        "SubAbility": "DBEffect",
-        "Planeswalker": "True"
-      }
+      "description": "Exile the top seven cards of your library. You may play them this turn.",
+      "effect": {
+        "count": 7,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more loyalty counters are removed from CARDNAME, CARDNAME deals that much damage to target opponent or planeswalker.",
       "mode": "CounterRemovedOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more loyalty counters are removed from CARDNAME, CARDNAME deals that much damage to target opponent or planeswalker.",
-        "ValidCard": "Card.Self",
-        "CounterType": "LOYALTY",
-        "Execute": "TrigDmg"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Warlock",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Warlocks you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Warlocks you control have menace.",
-        "AddKeyword": "Menace",
-        "Affected": "Warlock.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

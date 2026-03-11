@@ -1,66 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "PumpAll",
-            "power": -2,
-            "toughness": -2,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "All creatures get -2/-2 until end of turn.",
-            "IsCurse": "True",
-            "ValidCards": "Creature"
-          }
+          "description": "All creatures get -2/-2 until end of turn.",
+          "effect": {
+            "power": -2,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": -2,
+            "type": "PumpAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Each opponent chooses a creature they control. You gain control of those creatures.",
           "effect": {
-            "type": "ChooseCard",
             "choices": [
               "Creature"
             ],
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChooseCard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "AILogic": "WorstCard",
-            "SpellDescription": "Each opponent chooses a creature they control. You gain control of those creatures.",
-            "Defined": "Opponent",
-            "ControlledByPlayer": "Chooser",
-            "SubAbility": "StealChosen",
-            "Mandatory": "True",
-            "ChoiceTitle": "Choose a creature to be stolen"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

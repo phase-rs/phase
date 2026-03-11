@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME's cumulative upkeep is paid, it gets +1/+0 until end of turn for each {B} or {R} spent this way.",
       "mode": "PayCumulativeUpkeep",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME's cumulative upkeep is paid, it gets +1/+0 until end of turn for each {B} or {R} spent this way.",
-        "Paid": "True",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

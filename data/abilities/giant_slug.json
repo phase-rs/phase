@@ -2,38 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "Phase": "Upkeep",
-          "ValidPlayer": "You",
-          "Mode": "Phase",
-          "RememberObjects": "Self",
-          "Execute": "ChooseB",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5"
+        "cost": "5",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Mode": "Phase",
-        "RememberObjects": "Self",
-        "Execute": "ChooseB",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)"
-      }
+      "description": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)",
+      "effect": {
+        "description": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

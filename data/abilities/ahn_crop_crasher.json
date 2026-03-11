@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, target creature can't block this turn.",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "Cost": "Exert<1/CARDNAME>",
-        "Description": "You may exert CARDNAME as it attacks. When you do, target creature can't block this turn.",
-        "Trigger": "TrigCanNotBlock",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

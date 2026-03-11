@@ -2,27 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo G U R",
-        "params": {
-          "SubAbility": "DBLoseLife",
-          "SpellDescription": "Add {G}, {U}, or {R}. If you don't have the city's blessing, you lose 1 life."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Add {G}, {U}, or {R}. If you don't have the city's blessing, you lose 1 life."
-      }
+      "description": "Add {G}, {U}, or {R}. If you don't have the city's blessing, you lose 1 life.",
+      "effect": {
+        "produced": [
+          "Green",
+          "Blue",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

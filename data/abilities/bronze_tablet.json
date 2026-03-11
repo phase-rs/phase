@@ -2,51 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.!token+OppOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Exile CARDNAME and target nontoken permanent an opponent owns. That player may pay 10 life. If they do, put CARDNAME into its owner's graveyard. Otherwise, that player owns CARDNAME and you own the other exiled card.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "RememberObjects": "TargetedController",
-        "TgtPrompt": "Select target nontoken permanent an opponent owns",
-        "SubAbility": "Choice1",
-        "SpellDescription": "Exile CARDNAME and target nontoken permanent an opponent owns. That player may pay 10 life. If they do, put CARDNAME into its owner's graveyard. Otherwise, that player owns CARDNAME and you own the other exiled card."
-      }
+      "target_prompt": "Select target nontoken permanent an opponent owns"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

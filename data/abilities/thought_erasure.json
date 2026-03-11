@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent reveals their hand. You choose a nonland card from it. That player discards that card. Surveil 1 (Look at the top card of your library. You may put that card into your graveyard.)",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DiscardValid": "Card.nonLand",
-        "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from it. That player discards that card. Surveil 1 (Look at the top card of your library. You may put that card into your graveyard.)",
-        "Mode": "RevealYouChoose",
-        "SubAbility": "DBSurveil"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "IsPoisoned",
-        "Description": "CARDNAME can't attack unless defending player is poisoned.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't attack unless defending player is poisoned.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "GainsAbilitiesOfZones": "Graveyard",
-        "Description": "As long as CARDNAME is on the battlefield, it has all activated abilities of all creature cards in all graveyards.",
-        "GainsAbilitiesOf": "Creature",
-        "EffectZone": "Battlefield",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as CARDNAME is on the battlefield, it has all activated abilities of all creature cards in all graveyards.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

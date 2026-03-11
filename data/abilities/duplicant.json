@@ -1,53 +1,61 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target nontoken creature.",
-        "Origin": "Any",
-        "Execute": "TrigExile",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBCleanup",
-        "Destination": "Any",
-        "ValidCard": "Card.IsImprinted",
-        "Static": "True",
-        "Origin": "Exile"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "DBCleanup"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ1",
+        "type": "CheckSVar",
+        "var": "Z"
+      },
+      "description": "As long as a card exiled with CARDNAME is a creature card, CARDNAME has the power, toughness, and creature types of the last creature card exiled with CARDNAME. It's still a Shapeshifter.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "Y",
-        "Affected": "Card.Self",
-        "Description": "As long as a card exiled with CARDNAME is a creature card, CARDNAME has the power, toughness, and creature types of the last creature card exiled with CARDNAME. It's still a Shapeshifter.",
-        "AddType": "ImprintedCreatureType",
-        "SetPower": "X",
-        "CheckSVar": "Z",
-        "SVarCompare": "EQ1"
-      }
+      "modifications": [
+        {
+          "core_type": "ImprintedCreatureType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Imprint — When CARDNAME enters, you may exile target nontoken creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          }
+        ],
+        "type": "Typed"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -1,26 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have first strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have first strike.",
-        "AddKeyword": "First Strike"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Creatures your opponents control lose first strike and can't have or gain first strike.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures your opponents control lose first strike and can't have or gain first strike.",
-        "CantHaveKeyword": "First Strike",
-        "RemoveKeyword": "First Strike",
-        "Affected": "Creature.OppCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "RemoveKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

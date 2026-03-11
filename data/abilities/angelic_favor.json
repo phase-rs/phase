@@ -2,41 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Cast this spell only during combat. Create a 4/4 white Angel creature token with flying. Exile it at the beginning of the next end step.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_4_4_angel_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AtEOT": "Exile",
-        "ActivationPhases": "BeginCombat->EndCombat",
-        "StackDescription": "{p:You} creates a 4/4 white Angel creature token with flying. Exile it at the beginning of the next end step.",
-        "SpellDescription": "Cast this spell only during combat. Create a 4/4 white Angel creature token with flying. Exile it at the beginning of the next end step."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Description": "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.",
-        "EffectZone": "All",
-        "Cost": "tapXType<1/Creature>",
-        "IsPresent": "Plains.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

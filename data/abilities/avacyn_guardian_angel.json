@@ -2,52 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBEffect",
-          "SpellDescription": "Prevent all damage that would be dealt to another target creature this turn by sources of the color of your choice."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Prevent all damage that would be dealt to another target creature this turn by sources of the color of your choice."
-      }
+      "description": "Prevent all damage that would be dealt to another target creature this turn by sources of the color of your choice.",
+      "effect": {
+        "description": "Prevent all damage that would be dealt to another target creature this turn by sources of the color of your choice.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "Defined": "You",
-          "SubAbility": "DBEffect2",
-          "SpellDescription": "Prevent all damage that would be dealt to target player or planeswalker this turn by sources of the color of your choice."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 W W"
+        "cost": "5 W W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SubAbility": "DBEffect2",
-        "SpellDescription": "Prevent all damage that would be dealt to target player or planeswalker this turn by sources of the color of your choice."
-      }
+      "description": "Prevent all damage that would be dealt to target player or planeswalker this turn by sources of the color of your choice.",
+      "effect": {
+        "description": "Prevent all damage that would be dealt to target player or planeswalker this turn by sources of the color of your choice.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

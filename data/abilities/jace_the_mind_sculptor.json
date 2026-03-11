@@ -2,89 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
       "effect": {
-        "type": "Dig",
         "count": 1,
-        "destination": "Library"
+        "destination": "Library",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "LibraryPosition2": "0",
-        "SpellDescription": "Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
-        "Planeswalker": "True",
-        "ValidTgts": "Player",
-        "ChangeNum": "Any"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw three cards, then put two cards from your hand on top of your library in any order.",
-        "Planeswalker": "True",
-        "SubAbility": "DBChangeZone"
-      }
+      "description": "Draw three cards, then put two cards from your hand on top of your library in any order.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Return target creature to its owner's hand.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Hand",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Return target creature to its owner's hand."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Library",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -12
+        "amount": -12,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SpellDescription": "Exile all cards from target player's library, then that player shuffles their hand into their library.",
-        "Planeswalker": "True",
-        "SubAbility": "DBChangeZone2"
-      }
+      "description": "Exile all cards from target player's library, then that player shuffles their hand into their library.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Library",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

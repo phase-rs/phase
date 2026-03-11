@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters during the declare attackers step, choose target player and any number of target attacking creatures their opponents control. Those creatures are now attacking that player.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Phase": "Declare Attackers",
-        "Destination": "Battlefield",
-        "Execute": "TrigChoosePlayer",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters during the declare attackers step, choose target player and any number of target attacking creatures their opponents control. Those creatures are now attacking that player."
+      "origin": "Battlefield",
+      "phase": "DeclareAttackers",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

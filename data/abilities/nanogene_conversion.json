@@ -2,37 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "TgtPrompt": "Choose target creature you control",
-          "Defined": "Targeted",
-          "Duration": "UntilEndOfTurn",
-          "SpellDescription": "Choose target creature you control. Each other creature becomes a copy of that creature until end of turn, except it isn't legendary.",
-          "ValidTgts": "Creature.YouCtrl",
-          "NonLegendary": "True",
-          "StackDescription": "Each other creature becomes a copy of {c:Targeted} until end of turn, except those creatures aren't legendary.",
-          "CloneTarget": "Valid Creature.NotDefinedTargeted"
-        }
-      },
       "cost": null,
+      "description": "Choose target creature you control. Each other creature becomes a copy of that creature until end of turn, except it isn't legendary.",
+      "duration": "UntilEndOfTurn",
+      "effect": {
+        "description": "Choose target creature you control. Each other creature becomes a copy of that creature until end of turn, except it isn't legendary.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target creature you control",
-        "Defined": "Targeted",
-        "Duration": "UntilEndOfTurn",
-        "SpellDescription": "Choose target creature you control. Each other creature becomes a copy of that creature until end of turn, except it isn't legendary.",
-        "ValidTgts": "Creature.YouCtrl",
-        "NonLegendary": "True",
-        "StackDescription": "Each other creature becomes a copy of {c:Targeted} until end of turn, except those creatures aren't legendary.",
-        "CloneTarget": "Valid Creature.NotDefinedTargeted"
-      }
+      "target_prompt": "Choose target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

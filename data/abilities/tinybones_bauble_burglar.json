@@ -2,59 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Discard",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 B"
+            "cost": "3 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Opponent",
-        "SpellDescription": "Each opponent discards a card. Activate only as a sorcery.",
-        "Mode": "TgtChoose",
-        "SorcerySpeed": "True"
-      }
+      "description": "Each opponent discards a card. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "target": {
+          "type": "Any"
+        },
+        "type": "Discard"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "During your turn, you may play cards you don't own with stash counters on them from exile, and mana of any type can be spent to cast those spells.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever an opponent discards a card, exile it from their graveyard with a stash counter on it.",
       "mode": "Discarded",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.OppOwn",
-        "TriggerDescription": "Whenever an opponent discards a card, exile it from their graveyard with a stash counter on it.",
-        "Execute": "TrigExile"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "During your turn, you may play cards you don't own with stash counters on them from exile, and mana of any type can be spent to cast those spells.",
-        "MayPlay": "True",
-        "Affected": "Card.YouDontOwn+counters_GE1_STASH",
-        "MayPlayIgnoreType": "True",
-        "AffectedZone": "Exile",
-        "Condition": "PlayerTurn"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

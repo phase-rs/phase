@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more tokens would be created under your control, those tokens plus an additional Mutagen token are created instead.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DBReplace",
-        "Description": "If one or more tokens would be created under your control, those tokens plus an additional Mutagen token are created instead.",
-        "ValidToken": "Card.YouCtrl"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, if you've cast three or more instant and sorcery spells this turn, return CARDNAME from your graveyard to the battlefield.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigReturn",
-        "TriggerZones": "Graveyard",
-        "CheckSVar": "X",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, if you've cast three or more instant and sorcery spells this turn, return CARDNAME from your graveyard to the battlefield.",
-        "SVarCompare": "GE3"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,60 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TargetMax": "2",
-            "KW": "HIDDEN CARDNAME's power and toughness are switched",
-            "TargetMin": "0",
-            "SpellDescription": "Switch the power and toughness of each of up to two target creatures until end of turn."
-          }
+          "description": "Switch the power and toughness of each of up to two target creatures until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Search your library for an instant card and/or a sorcery card, reveal them, put them into your hand, then shuffle.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Library",
             "destination": "Hand",
+            "origin": "Library",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeType": "EACH Instant & Sorcery",
-            "SpellDescription": "Search your library for an instant card and/or a sorcery card, reveal them, put them into your hand, then shuffle."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

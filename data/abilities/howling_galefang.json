@@ -1,19 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AdventureCard"
+            },
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has haste as long as you own a card in exile that has an Adventure.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.AdventureCard+YouOwn",
-        "Affected": "Card.Self",
-        "AddKeyword": "Haste",
-        "PresentZone": "Exile",
-        "Description": "CARDNAME has haste as long as you own a card in exile that has an Adventure."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

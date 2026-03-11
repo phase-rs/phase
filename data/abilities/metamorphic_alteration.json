@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enchanted creature is a copy of the chosen creature.",
       "mode": "Attached",
-      "params": {
-        "ValidSource": "Card.Self",
-        "Execute": "DBClone",
-        "TriggerDescription": "Enchanted creature is a copy of the chosen creature.",
-        "Static": "True"
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

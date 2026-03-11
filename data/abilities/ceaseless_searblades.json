@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you activate an ability of an Elemental, CARDNAME gets +1/+0 until end of turn.",
       "mode": "AbilityCast",
-      "params": {
-        "TriggerDescription": "Whenever you activate an ability of an Elemental, CARDNAME gets +1/+0 until end of turn.",
-        "ValidCard": "Elemental.inZoneBattlefield",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Elemental",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

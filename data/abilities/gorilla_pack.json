@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Forest.YouCtrl",
-        "PresentCompare": "EQ0",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When you control no Forests, sacrifice CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "controlsForest",
-        "Description": "CARDNAME can't attack unless defending player controls a Forest.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "CARDNAME can't attack unless defending player controls a Forest.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you control no Forests, sacrifice CARDNAME.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

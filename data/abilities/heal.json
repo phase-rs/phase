@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "SubAbility": "DelTrigSlowtrip",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn. Draw a card at the beginning of the next turn's upkeep.",
-          "ValidTgts": "Any",
-          "Amount": "1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrigSlowtrip",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn. Draw a card at the beginning of the next turn's upkeep.",
-        "ValidTgts": "Any",
-        "Amount": "1"
-      }
+      "description": "Prevent the next 1 damage that would be dealt to any target this turn. Draw a card at the beginning of the next turn's upkeep.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to any target this turn. Draw a card at the beginning of the next turn's upkeep.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

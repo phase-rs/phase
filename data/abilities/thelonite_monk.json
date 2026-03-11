@@ -2,43 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Forest"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target land becomes a Forest. (This effect lasts indefinitely.)",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Forest"
         ]
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveLandTypes": "True",
-        "SpellDescription": "Target land becomes a Forest. (This effect lasts indefinitely.)",
-        "Duration": "Permanent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,26 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "Sliver cards in your hand have warp {3}.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver.YouOwn",
-        "AffectedZone": "Hand",
-        "AddKeyword": "Warp:3",
-        "Description": "Sliver cards in your hand have warp {3}."
-      }
+      "modifications": [
+        {
+          "keyword": "Warp:3",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "WeftwinderTrig",
-        "Description": "Sliver creatures you control have \"When this creature enters, conjure a random card from the Slivers spellbook into the top ten cards of your library at random, then draw a card.\"",
-        "Affected": "Creature.Sliver+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Sliver"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Sliver creatures you control have \"When this creature enters, conjure a random card from the Slivers spellbook into the top ten cards of your library at random, then draw a card.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

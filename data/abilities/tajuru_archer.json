@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Ally you control enters, you may have CARDNAME deal damage to target creature with flying equal to the number of Allies you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "Execute": "TrigDamage",
-        "Origin": "Any",
-        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may have CARDNAME deal damage to target creature with flying equal to the number of Allies you control."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Ally.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

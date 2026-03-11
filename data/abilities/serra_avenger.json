@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "EffectZone": "All",
-        "Description": "You can't cast this spell during your first, second, or third turns of the game.",
-        "ValidCard": "Card.Self",
-        "Caster": "Player.Active",
-        "CheckSVar": "X",
-        "SVarCompare": "LE3"
-      }
+      "condition": {
+        "compare": "LE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "You can't cast this spell during your first, second, or third turns of the game.",
+      "effect_zone": "Battlefield",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

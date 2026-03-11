@@ -2,59 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.MonoColor"
-        }
-      },
       "cost": null,
+      "description": "Gain control of target monocolored creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "MonoColor"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Gain control of target monocolored creature.",
-        "TgtPrompt": "Select target monocolored creature"
-      }
+      "target_prompt": "Select target monocolored creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SpellDescription": "Target creature becomes the color or colors of your choice until end of turn. (Activate only during your upkeep and only once each turn.)",
-          "OrColors": "True",
-          "Forecast": "True",
-          "SubAbility": "Animate",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Reveal<1/CARDNAME>"
+            "cost": "Reveal<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature becomes the color or colors of your choice until end of turn. (Activate only during your upkeep and only once each turn.)",
-        "OrColors": "True",
-        "Forecast": "True",
-        "SubAbility": "Animate",
-        "Defined": "You"
-      }
+      "description": "Target creature becomes the color or colors of your choice until end of turn. (Activate only during your upkeep and only once each turn.)",
+      "effect": {
+        "description": "Target creature becomes the color or colors of your choice until end of turn. (Activate only during your upkeep and only once each turn.)",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

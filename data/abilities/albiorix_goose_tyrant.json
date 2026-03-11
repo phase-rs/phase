@@ -1,47 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you sacrifice a token, NICKNAME perpetually gets +1/+1. This ability also triggers if NICKNAME is in exile.",
           "mode": "Sacrificed",
-          "params": {
-            "TriggerDescription": "Whenever you sacrifice a token, NICKNAME perpetually gets +1/+1. This ability also triggers if NICKNAME is in exile.",
-            "TriggerZones": "Battlefield,Exile",
-            "ValidPlayer": "You",
-            "Execute": "TrigPump",
-            "ValidCard": "Card.token"
+          "trigger_zones": [
+            "Battlefield",
+            "Exile"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Token"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "You",
-            "SubAbility": "TrigDiscard",
-            "SpellDescription": "Draw two cards, then discard two cards."
-          }
+          "description": "Draw two cards, then discard two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

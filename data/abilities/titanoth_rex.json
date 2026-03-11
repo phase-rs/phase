@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cycle CARDNAME, put a trample counter on target creature you control.",
       "mode": "Cycled",
-      "params": {
-        "TriggerDescription": "When you cycle CARDNAME, put a trample counter on target creature you control.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

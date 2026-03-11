@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Each creature card in your graveyard has the chosen creature type in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Graveyard",
-        "AddType": "ChosenType",
-        "Description": "Each creature card in your graveyard has the chosen creature type in addition to its other types.",
-        "Affected": "Creature.YouOwn"
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Destroy all creatures target opponent controls. You lose 2 life for each creature destroyed this way.",
-        "ValidCards": "Creature",
-        "RememberDestroyed": "True"
-      }
+      "description": "Destroy all creatures target opponent controls. You lose 2 life for each creature destroyed this way.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

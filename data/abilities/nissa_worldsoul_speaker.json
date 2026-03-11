@@ -1,32 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigEnergy",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Landfall — Whenever a land you control enters, you get {E}{E} (two energy counters)."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Hand,Graveyard,Exile,Library,Command",
-        "MayPlayAltManaCost": "PayEnergy<8>",
-        "Description": "You may pay eight {E} rather than pay the mana cost for permanent spells you cast.",
-        "MayPlay": "True",
-        "MayPlayDontGrantZonePermissions": "True",
-        "Affected": "Card.YouCtrl+Permanent+nonLand"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Permanent"
+          },
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "description": "You may pay eight {E} rather than pay the mana cost for permanent spells you cast.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Landfall — Whenever a land you control enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

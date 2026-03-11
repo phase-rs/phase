@@ -2,42 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "Choice",
-          "Choser": "Controller",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Target creature gains protection from the color of its controller's choice until end of turn.",
-          "Choices": "AnyColor"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 W W"
+            "cost": "2 W W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Gains": "Choice",
-        "Choser": "Controller",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Target creature gains protection from the color of its controller's choice until end of turn.",
-        "Choices": "AnyColor"
-      }
+      "description": "Target creature gains protection from the color of its controller's choice until end of turn.",
+      "effect": {
+        "description": "Target creature gains protection from the color of its controller's choice until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

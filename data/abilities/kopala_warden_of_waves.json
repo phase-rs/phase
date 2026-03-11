@@ -1,29 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Description": "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.",
-        "Activator": "Player.Opponent",
-        "ValidTarget": "Merfolk.YouCtrl+inZoneBattlefield",
-        "Type": "Spell",
-        "Amount": "2"
-      }
+      "description": "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.",
+      "mode": "RaiseCost"
     },
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Description": "Abilities your opponents activate that target a Merfolk you control cost {2} more to activate.",
-        "ValidTarget": "Merfolk.YouCtrl+inZoneBattlefield",
-        "Type": "Ability",
-        "Amount": "2",
-        "Activator": "Player.Opponent"
-      }
+      "description": "Abilities your opponents activate that target a Merfolk you control cost {2} more to activate.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,28 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCopySpell",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Colorless",
-        "TriggerDescription": "Whenever you cast a colorless spell, copy it and you may choose new targets for the copy."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidZone": "Battlefield,Stack",
-        "ValidCard": "Card.YouCtrl+Colorless+Other",
-        "Description": "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time."
-      }
+      "description": "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a colorless spell, copy it and you may choose new targets for the copy.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

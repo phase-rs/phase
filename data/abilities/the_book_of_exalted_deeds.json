@@ -2,56 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "ENLIGHTENED",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Angel"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W W W"
+            "cost": "W W W",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Put an enlightened counter on target Angel. It gains \"You can't lose the game and your opponents can't win the game.\" Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "counter_type": "ENLIGHTENED",
+        "target": {
+          "card_type": "Angel",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put an enlightened counter on target Angel. It gains \"You can't lose the game and your opponents can't win the game.\" Activate only as a sorcery.",
-        "TgtPrompt": "Select target Angel",
-        "SorcerySpeed": "True",
-        "SubAbility": "DBAnimate"
-      }
+      "target_prompt": "Select target Angel"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you gained 3 or more life this turn, create a 3/3 white Angel creature token with flying.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "SVarCompare": "GE3",
-        "CheckSVar": "LifeGained",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you gained 3 or more life this turn, create a 3/3 white Angel creature token with flying."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

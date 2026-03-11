@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Death Frenzy — When CARDNAME dies, create a number of 1/1 green Tyranid creature tokens equal to CARDNAME's power.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Death Frenzy — When CARDNAME dies, create a number of 1/1 green Tyranid creature tokens equal to CARDNAME's power."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

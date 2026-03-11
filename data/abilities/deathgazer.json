@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a nonblack creature, destroy that creature at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidCard": "Creature.nonBlack",
-        "ValidBlocker": "Card.Self",
-        "Execute": "DelTrigBlocked",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a nonblack creature, destroy that creature at end of combat."
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a nonblack creature, destroy that creature at end of combat.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DelTrigBlocker",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a nonblack creature, destroy that creature at end of combat.",
-        "Secondary": "True",
-        "ValidBlocker": "Creature.nonBlack"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

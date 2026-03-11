@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact or enchantment if its mana value is less than or equal to the number of cards in your hand.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ConditionSVarCompare": "LEX",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Destroy target artifact or enchantment if its mana value is less than or equal to the number of cards in your hand.",
-        "TgtPrompt": "Select target artifact or enchantment",
-        "AITgts": "Card.cmcLTX",
-        "ConditionCheckSVar": "Y"
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

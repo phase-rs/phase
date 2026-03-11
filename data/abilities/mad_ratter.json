@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, create two 1/1 black Rat creature tokens.",
       "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever you draw your second card each turn, create two 1/1 black Rat creature tokens.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigToken",
-        "Number": "2"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

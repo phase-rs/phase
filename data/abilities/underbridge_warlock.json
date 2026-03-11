@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you get a one-time boon with \"At the beginning of your end step, if three or more creatures died this turn, each opponent loses 5 life and you gain 5 life.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigBoon",
-        "TriggerDescription": "When CARDNAME enters, you get a one-time boon with \"At the beginning of your end step, if three or more creatures died this turn, each opponent loses 5 life and you gain 5 life.\"",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, if you have a boon, you mill three cards, draw a card, and lose 2 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, if you have a boon, you mill three cards, draw a card, and lose 2 life.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "TrigMill",
-        "ValidPlayer": "You",
-        "IsPresent": "Boon.YouOwn",
-        "PresentZone": "Command"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

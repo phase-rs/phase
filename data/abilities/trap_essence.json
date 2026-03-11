@@ -2,26 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.Creature"
-        }
-      },
       "cost": null,
+      "description": "Counter target creature spell. Put two +1/+1 counters on up to one target creature.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPutCounter",
-        "TargetType": "Spell",
-        "TgtPrompt": "Select target creature spell",
-        "SpellDescription": "Counter target creature spell. Put two +1/+1 counters on up to one target creature."
-      }
+      "target_prompt": "Select target creature spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

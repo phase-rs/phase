@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "For each opponent, gain control of target permanent that player controls.",
+      "effect": {
+        "target": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "OneEach",
-        "SpellDescription": "For each opponent, gain control of target permanent that player controls.",
-        "TargetsForEachPlayer": "True",
-        "TgtPrompt": "Select target permanent an opponent controls to gain control of.",
-        "TargetMax": "OneEach"
-      }
+      "target_prompt": "Select target permanent an opponent controls to gain control of."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

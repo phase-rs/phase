@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each opponent sacrifices a creature or planeswalker and gets a poison counter.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Opponent",
-        "SacValid": "Creature,Planeswalker",
-        "SubAbility": "DBPoison",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Each opponent sacrifices a creature or planeswalker and gets a poison counter."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

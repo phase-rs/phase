@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Scavenge:CardManaCost",
-        "Affected": "Creature.YouOwn",
-        "AffectedZone": "Graveyard",
-        "Description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost."
-      }
+      "modifications": [
+        {
+          "keyword": "Scavenge:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

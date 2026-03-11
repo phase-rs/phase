@@ -2,38 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SubAbility": "DBImmediateTrig",
-          "SpellDescription": "Add {C}. When you do, mill two cards."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBImmediateTrig",
-        "SpellDescription": "Add {C}. When you do, mill two cards."
-      }
+      "description": "Add {C}. When you do, mill two cards.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, search your graveyard, hand, and library for a card named The Animus and put it onto the battlefield, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, search your graveyard, hand, and library for a card named The Animus and put it onto the battlefield, then shuffle.",
-        "Origin": "Any",
-        "Execute": "TrigSearch",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't attack unless you return an enchantment you control to its owner's hand.",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "Description": "CARDNAME can't attack unless you return an enchantment you control to its owner's hand.",
-        "ValidCard": "Creature.Self",
-        "Cost": "Return<1/Enchantment>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

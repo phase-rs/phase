@@ -1,22 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, return a white creature you control to its owner's hand.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "IsPresent": "Creature.White",
-        "PresentZone": "Battlefield",
-        "PresentPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, return a white creature you control to its owner's hand.",
-        "Execute": "TrigBounce",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

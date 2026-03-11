@@ -2,41 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Attach",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Attach CARDNAME to target creature. Activate only as a sorcery and only once each turn.",
-        "AILogic": "Curse",
-        "ActivationLimit": "1",
-        "SorcerySpeed": "True"
-      }
+      "description": "Attach CARDNAME to target creature. Activate only as a sorcery and only once each turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Attach"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block, or transform.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantTransform"
-      },
-      "params": {
-        "Description": "Enchanted creature can't attack or block, or transform.",
-        "ValidCard": "Creature.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

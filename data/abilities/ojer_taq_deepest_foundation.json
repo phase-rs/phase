@@ -1,35 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigTransform",
-            "Destination": "Graveyard",
-            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control."
+          "description": "If one or more creature tokens would be created under your control, three times that many of those tokens are created instead.",
+          "event": {
+            "Other": "CreateToken"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": {
-            "Other": "CreateToken"
-          },
-          "params": {
-            "ReplaceWith": "TripleToken",
-            "ActiveZones": "Battlefield",
-            "Description": "If one or more creature tokens would be created under your control, three times that many of those tokens are created instead.",
-            "ValidToken": "Creature.YouCtrl"
+          "description": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control.",
+          "destination": "Graveyard",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
@@ -37,62 +28,49 @@
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "W",
-            "params": {
-              "SpellDescription": "Add {W}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {W}."
-          }
+          "description": "Add {W}.",
+          "effect": {
+            "produced": [
+              "White"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "Mode": "Transform",
-              "CheckSVar": "X",
-              "SpellDescription": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
-              "SVarCompare": "GE3",
-              "SorcerySpeed": "True"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 W"
+                "cost": "2 W",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Mode": "Transform",
-            "CheckSVar": "X",
-            "SpellDescription": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
-            "SVarCompare": "GE3",
-            "SorcerySpeed": "True"
-          }
+          "description": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

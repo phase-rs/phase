@@ -2,52 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "SpellDescription": "Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.",
-          "Valid": "Instant,Sorcery",
-          "FoundDestination": "Exile",
-          "RememberRevealed": "True",
-          "IsCurse": "True",
-          "RevealedDestination": "Exile",
-          "ValidTgts": "Opponent",
-          "ValidDescription": "instant or sorcery",
-          "RememberFound": "True",
-          "SubAbility": "DBPlay"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.",
-        "Valid": "Instant,Sorcery",
-        "FoundDestination": "Exile",
-        "RememberRevealed": "True",
-        "IsCurse": "True",
-        "RevealedDestination": "Exile",
-        "ValidTgts": "Opponent",
-        "ValidDescription": "instant or sorcery",
-        "RememberFound": "True",
-        "SubAbility": "DBPlay"
-      }
+      "description": "Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.",
+      "effect": {
+        "description": "Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

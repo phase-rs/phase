@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "Each land is a Forest in addition to its other land types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land",
-        "Description": "Each land is a Forest in addition to its other land types.",
-        "AddType": "Forest"
-      }
+      "modifications": [
+        {
+          "core_type": "Forest",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,42 +2,48 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "CARDNAME deals damage equal to its power to another target creature. That creature deals damage equal to its power to CARDNAME.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Tap"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature",
-        "SpellDescription": "CARDNAME deals damage equal to its power to another target creature. That creature deals damage equal to its power to CARDNAME.",
-        "SubAbility": "DamageThis"
-      }
+      "target_prompt": "Select another target creature"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may sacrifice a Forest. If you sacrifice a snow Forest this way, CARDNAME gains trample until end of turn. If you don't sacrifice a Forest, sacrifice CARDNAME and it deals 7 damage to you.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigSacrifice",
-        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice a Forest. If you sacrifice a snow Forest this way, CARDNAME gains trample until end of turn. If you don't sacrifice a Forest, sacrifice CARDNAME and it deals 7 damage to you.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

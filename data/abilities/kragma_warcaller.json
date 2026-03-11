@@ -1,27 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever a Minotaur you control attacks, it gets +2/+0 until end of turn.",
-        "ValidCard": "Minotaur.YouCtrl",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Minotaur"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Minotaur creatures you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Minotaur+YouCtrl",
-        "AddKeyword": "Haste",
-        "Description": "Minotaur creatures you control have haste."
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Minotaur you control attacks, it gets +2/+0 until end of turn.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Minotaur",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

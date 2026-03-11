@@ -1,27 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AdjustLandPlays": "1",
-        "Affected": "You",
-        "Description": "You may play an additional land on each of your turns."
-      }
+      "affected": {
+        "card_type": "You",
+        "type": "Typed"
+      },
+      "description": "You may play an additional land on each of your turns.",
+      "mode": "Continuous"
     },
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack or block unless you have the city's blessing.",
       "mode": {
         "Other": "CantAttack,CantBlock"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack or block unless you have the city's blessing.",
-        "CheckSVar": "X"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

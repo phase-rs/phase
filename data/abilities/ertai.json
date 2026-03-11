@@ -1,18 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have hexproof. (They can't be the targets of spells or abilities your opponents control.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control have hexproof. (They can't be the targets of spells or abilities your opponents control.)",
-        "EffectZone": "Command",
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Hexproof"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

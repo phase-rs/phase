@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.cmcLE3"
-        }
-      },
       "cost": null,
+      "description": "Destroy target artifact with mana value 3 or less. You gain 3 life.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact with mana value 3 or less. You gain 3 life.",
-        "TgtPrompt": "Choose target artifact with mana value 3 or less",
-        "SubAbility": "DBGainLife"
-      }
+      "target_prompt": "Choose target artifact with mana value 3 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

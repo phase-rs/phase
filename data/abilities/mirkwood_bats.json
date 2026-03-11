@@ -1,29 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you create or sacrifice a token, each opponent loses 1 life.",
       "mode": "TokenCreated",
-      "params": {
-        "ValidToken": "Card.token+YouCtrl",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever you create or sacrifice a token, each opponent loses 1 life.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you create or sacrifice a token, each opponent loses 1 life.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidCard": "Card.token+YouCtrl",
-        "TriggerDescription": "Whenever you create or sacrifice a token, each opponent loses 1 life."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

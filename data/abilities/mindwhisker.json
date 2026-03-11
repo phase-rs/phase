@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "Execute": "TrigSurveil"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, creatures your opponents control get -1/-0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.OppCtrl",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, creatures your opponents control get -1/-0.",
-        "Condition": "Threshold",
-        "AddPower": "-1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

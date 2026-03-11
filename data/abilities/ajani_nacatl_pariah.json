@@ -1,124 +1,92 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create a 2/1 white Cat Warrior creature token.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, create a 2/1 white Cat Warrior creature token.",
-            "Origin": "Any",
-            "Execute": "TrigToken"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever one or more other Cats you control die, you may exile NICKNAME, then return him to the battlefield transformed under his owner's control.",
+          "destination": "Graveyard",
           "mode": "ChangesZoneAll",
-          "params": {
-            "ValidCards": "Cat.Other+YouCtrl",
-            "Origin": "Battlefield",
-            "TriggerZones": "Battlefield",
-            "Destination": "Graveyard",
-            "OptionalDecider": "You",
-            "TriggerDescription": "Whenever one or more other Cats you control die, you may exile NICKNAME, then return him to the battlefield transformed under his owner's control.",
-            "Execute": "TrigExile"
-          }
+          "optional": true,
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "PutCounterAll",
-            "params": {
-              "CounterNum": "1",
-              "Planeswalker": "True",
-              "SpellDescription": "Put a +1/+1 counter on each Cat you control.",
-              "ValidCards": "Cat.YouCtrl",
-              "CounterType": "P1P1"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "CounterNum": "1",
-            "Planeswalker": "True",
-            "SpellDescription": "Put a +1/+1 counter on each Cat you control.",
-            "ValidCards": "Cat.YouCtrl",
-            "CounterType": "P1P1"
-          }
+          "description": "Put a +1/+1 counter on each Cat you control.",
+          "effect": {
+            "description": "Put a +1/+1 counter on each Cat you control.",
+            "name": "PutCounterAll",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "Create a 2/1 white Cat Warrior creature token. When you do, if you control a red permanent other than CARDNAME, he deals damage equal to the number of creatures you control to any target.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "w_2_1_cat_warrior",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SubAbility": "DBImmediateTrig1",
-            "SpellDescription": "Create a 2/1 white Cat Warrior creature token. When you do, if you control a red permanent other than CARDNAME, he deals damage equal to the number of creatures you control to any target.",
-            "TokenOwner": "You",
-            "RememberOriginalTokens": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -4,
+            "type": "Loyalty"
+          },
+          "description": "Each opponent chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
           "effect": {
-            "type": "ChooseCard",
             "choices": [
               "Permanent.nonLand"
             ],
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChooseCard"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -4
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "SacAllOthers",
-            "Defined": "Opponent",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Each opponent chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
-            "Ultimate": "True",
-            "ChooseEach": "Artifact & Creature & Enchantment & Planeswalker",
-            "Planeswalker": "True",
-            "Mandatory": "True",
-            "ControlledByPlayer": "Chooser",
-            "Reveal": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,52 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U B"
+            "cost": "2 U B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<X/Artifact>"
+            "cost": "ExileFromGrave<X/Artifact>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "Exhaust": "True",
-        "ValidCards": "Creature.nonArtifact+Other",
-        "SpellDescription": "Each other nonartifact creature gets -X/-X until end of turn. (Activate each exhaust ability only once.)"
-      }
+      "description": "Each other nonartifact creature gets -X/-X until end of turn. (Activate each exhaust ability only once.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Artifacts you control have \"Ward—Pay 2 life.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Artifact.YouCtrl",
-        "Description": "Artifacts you control have \"Ward—Pay 2 life.\"",
-        "AddKeyword": "Ward:PayLife<2>"
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:PayLife<2>",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

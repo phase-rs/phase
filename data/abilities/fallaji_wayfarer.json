@@ -1,28 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SetColor": "All",
-        "Description": "CARDNAME is all colors. This ability doesn't affect its color identity. (It can be in any deck whose commander's color identity includes green.)",
-        "EffectZone": "All",
-        "CharacteristicDefining": "False"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is all colors. This ability doesn't affect its color identity. (It can be in any deck whose commander's color identity includes green.)",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "MultiColor"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Multicolored spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a multicolored spell pays for {1} or one mana of a color that creature is.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.YouCtrl+MultiColor+wasCast",
-        "AffectedZone": "Stack",
-        "AddKeyword": "Convoke",
-        "Description": "Multicolored spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a multicolored spell pays for {1} or one mana of a color that creature is.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Convoke",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

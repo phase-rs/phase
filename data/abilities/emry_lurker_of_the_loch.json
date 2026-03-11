@@ -2,47 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtZone": "Graveyard",
-          "StaticAbilities": "STPlay",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Artifact.YouOwn",
-          "SpellDescription": "Choose target artifact card in your graveyard. You may cast that card this turn.",
-          "TgtPrompt": "Select target artifact card in your graveyard",
-          "ExileOnMoved": "Graveyard"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Choose target artifact card in your graveyard. You may cast that card this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Graveyard",
-        "StaticAbilities": "STPlay",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Artifact.YouOwn",
-        "SpellDescription": "Choose target artifact card in your graveyard. You may cast that card this turn.",
-        "TgtPrompt": "Select target artifact card in your graveyard",
-        "ExileOnMoved": "Graveyard"
-      }
+      "target_prompt": "Select target artifact card in your graveyard"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, mill four cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, mill four cards.",
-        "Destination": "Battlefield",
-        "Execute": "TrigMill"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

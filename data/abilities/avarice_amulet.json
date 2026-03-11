@@ -1,31 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "Destination": "Graveyard",
-        "Execute": "TrigGainControl",
-        "TriggerDescription": "When equipped creature dies, target opponent gains control of CARDNAME.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0 and has vigilance and \"At the beginning of your upkeep, draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+0 and has vigilance and \"At the beginning of your upkeep, draw a card.\"",
-        "AddPower": "2",
-        "AddKeyword": "Vigilance",
-        "AddTrigger": "AvariceUpkeepTrig",
-        "Affected": "Creature.EquippedBy",
-        "AddSVar": "AvariceUpkeepSVar"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When equipped creature dies, target opponent gains control of CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

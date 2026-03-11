@@ -2,77 +2,72 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
-          "AtEOT": "Exile",
-          "Choices": "Card",
-          "PumpKeywords": "Haste",
-          "AILogic": "MimicVat",
-          "Defined": "Imprinted.ExiledWithSource"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
-        "AtEOT": "Exile",
-        "Choices": "Card",
-        "PumpKeywords": "Haste",
-        "AILogic": "MimicVat",
-        "Defined": "Imprinted.ExiledWithSource"
-      }
+      "description": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
+      "effect": {
+        "description": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — Whenever a nontoken creature dies, you may exile that card. If you do, return each other card exiled with CARDNAME to its owner's graveyard.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.!token",
-        "Execute": "TrigReturn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Imprint — Whenever a nontoken creature dies, you may exile that card. If you do, return each other card exiled with CARDNAME to its owner's graveyard.",
-        "Destination": "Graveyard",
-        "OptionalDecider": "You",
-        "Origin": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Static": "True",
-        "Execute": "DBForget",
-        "ValidCard": "Card.IsImprinted+ExiledWithSource",
-        "Origin": "Exile"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Execute": "DBCleanImprinted",
-        "Origin": "Battlefield",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

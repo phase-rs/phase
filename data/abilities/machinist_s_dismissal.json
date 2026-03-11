@@ -2,36 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonCreature"
-        }
-      },
       "cost": null,
+      "description": "Counter target noncreature spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature spell",
-        "SpellDescription": "Counter target noncreature spell.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target noncreature spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Amount": "X",
-        "Description": "This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.",
-        "EffectZone": "All",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

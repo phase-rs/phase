@@ -2,41 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Defined": "You",
-          "Type": "Basic Land",
-          "SubAbility": "DBAnimate",
-          "SpellDescription": "Target land becomes the basic land type of your choice until end of turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/Land>"
+            "cost": "Return<1/Land>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "Type": "Basic Land",
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "Target land becomes the basic land type of your choice until end of turn."
-      }
+      "description": "Target land becomes the basic land type of your choice until end of turn.",
+      "effect": {
+        "description": "Target land becomes the basic land type of your choice until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

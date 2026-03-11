@@ -2,51 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayEnergy<2>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME perpetually gets +1/+0.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayEnergy<2>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "CARDNAME perpetually gets +1/+0.",
-        "Duration": "Perpetual",
-        "SubAbility": "DBChooseCard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, you get {E}.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you get {E}.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigEnergy",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, you get {E}.",
       "mode": "Attacks",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigEnergy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, you get {E}.",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

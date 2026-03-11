@@ -1,29 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{W}.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUpkeep",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{W}."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a creature of the chosen color deals damage to you or a white creature you control, CARDNAME deals that much damage to that creature.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature.White+YouCtrl,You",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Creature.ChosenColor+inZoneBattlefield",
-        "Execute": "MangarasRetribution",
-        "TriggerDescription": "Whenever a creature of the chosen color deals damage to you or a white creature you control, CARDNAME deals that much damage to that creature."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenColor"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,You"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

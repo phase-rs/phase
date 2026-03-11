@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Creature",
-          "SpellDescription": "Regenerate target creature. Draw a card.",
-          "SubAbility": "DBDraw"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "SpellDescription": "Regenerate target creature. Draw a card.",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Regenerate target creature. Draw a card.",
+      "effect": {
+        "description": "Regenerate target creature. Draw a card.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,35 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "SorcerySpeed": "True",
-          "ValidTgts": "Creature",
-          "CounterNum": "1",
-          "Source": "Self",
-          "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
-          "CounterType": "P1P1"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "ValidTgts": "Creature",
-        "CounterNum": "1",
-        "Source": "Self",
-        "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
-        "CounterType": "P1P1"
-      }
+      "description": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
+      "effect": {
+        "description": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

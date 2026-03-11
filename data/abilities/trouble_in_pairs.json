@@ -1,56 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackersAmount": "GE2",
-        "Execute": "TrigDraw",
-        "AttackingPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Creature.attackingYou",
-        "TriggerDescription": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
-        "AttackedTarget": "You"
-      }
-    },
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "EQ2",
-        "TriggerDescription": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
-        "ValidActivatingPlayer": "Opponent",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
-      }
-    },
-    {
-      "mode": "Drawn",
-      "params": {
-        "Number": "2",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True"
+      "description": "If an opponent would begin an extra turn, that player skips that turn instead.",
+      "event": {
+        "Other": "BeginTurn"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginTurn"
-      },
-      "params": {
-        "ValidPlayer": "Opponent",
-        "ExtraTurn": "True",
-        "Skip": "True",
-        "ActiveZones": "Battlefield",
-        "Description": "If an opponent would begin an extra turn, that player skips that turn instead."
-      }
+      "description": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
+      "mode": "SpellCast",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.",
+      "mode": "Drawn",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

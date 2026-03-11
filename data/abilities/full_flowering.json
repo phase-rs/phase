@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "MaxRepeat": "X",
-          "RepeatSubAbility": "DBPopulate",
-          "SpellDescription": "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "MaxRepeat": "X",
-        "RepeatSubAbility": "DBPopulate",
-        "SpellDescription": "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)"
-      }
+      "description": "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)",
+      "effect": {
+        "description": "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

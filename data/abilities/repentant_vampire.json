@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Creature.DamagedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME is white and has \"{T}: Destroy target black creature.\"",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Threshold",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME is white and has \"{T}: Destroy target black creature.\"",
-        "SetColor": "White",
-        "AddAbility": "Destroy",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "ability": "Destroy",
+          "type": "AddAbility"
+        },
+        {
+          "colors": [
+            "White"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +1/+1 counter on CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "DamagedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

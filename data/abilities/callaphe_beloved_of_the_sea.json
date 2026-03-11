@@ -1,25 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "NICKNAME's power is equal to your devotion to blue."
-      }
+      "characteristic_defining": true,
+      "description": "NICKNAME's power is equal to your devotion to blue.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddStaticAbility": "RaiseCost",
-        "Affected": "Creature.YouCtrl,Enchantment.YouCtrl",
-        "Description": "Creatures and enchantments you control have \"Spells your opponents cast that target this permanent cost {1} more to cast.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Enchantment.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures and enchantments you control have \"Spells your opponents cast that target this permanent cost {1} more to cast.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

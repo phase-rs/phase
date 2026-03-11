@@ -1,29 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted player's draw step, that player draws two additional cards.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Draw",
-        "TriggerDescription": "At the beginning of enchanted player's draw step, that player draws two additional cards.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.EnchantedBy",
-        "Execute": "TrigDraw"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of enchanted player's end step, that player discards their hand.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of enchanted player's end step, that player discards their hand.",
-        "ValidPlayer": "Player.EnchantedBy",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

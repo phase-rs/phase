@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell, put two +1/+1 counters on CARDNAME. If that spell has mana value 5 or greater, CARDNAME deals damage equal to the number of counters on it to each opponent.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Creature",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a creature spell, put two +1/+1 counters on CARDNAME. If that spell has mana value 5 or greater, CARDNAME deals damage equal to the number of counters on it to each opponent."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

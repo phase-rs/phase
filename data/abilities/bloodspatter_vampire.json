@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an opponent would create a Clue, they create a Blood instead.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "ReplaceWith": "TokenReplace",
-        "Description": "If an opponent would create a Clue, they create a Blood instead.",
-        "ValidToken": "Clue",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "Opponent"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

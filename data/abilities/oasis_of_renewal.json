@@ -1,57 +1,75 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters and whenever a land card leaves your graveyard, seek a land card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters and whenever a land card leaves your graveyard, seek a land card. This ability triggers only once each turn.",
-        "Execute": "TrigSeekLand",
-        "Origin": "Any",
-        "ActivationLimit": "1"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and whenever a land card leaves your graveyard, seek a land card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card.Land+YouOwn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters and whenever a land card leaves your graveyard, seek a land card. This ability triggers only once each turn.",
-        "Execute": "TrigSeekLand",
-        "ActivationLimit": "1",
-        "Origin": "Graveyard",
-        "Destination": "Any"
+      "origin": "Graveyard",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME enters and whenever a nonland card leaves your graveyard, seek a nonland card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigSeekNonLand",
-        "ActivationLimit": "1",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters and whenever a nonland card leaves your graveyard, seek a nonland card. This ability triggers only once each turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and whenever a nonland card leaves your graveyard, seek a nonland card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "ActivationLimit": "1",
-        "Destination": "Any",
-        "ValidCard": "Card.nonLand+YouOwn",
-        "Execute": "TrigSeekNonLand",
-        "TriggerDescription": "When CARDNAME enters and whenever a nonland card leaves your graveyard, seek a nonland card. This ability triggers only once each turn.",
-        "Origin": "Graveyard"
+      "origin": "Graveyard",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

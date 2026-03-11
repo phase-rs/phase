@@ -1,20 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another nontoken Zombie you control dies, create a 2/2 black Zombie creature token.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever CARDNAME or another nontoken Zombie you control dies, create a 2/2 black Zombie creature token.",
-        "Origin": "Battlefield",
-        "ValidCard": "Zombie.!token+YouCtrl+Other,Card.Self"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Zombie",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Other,Card.Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

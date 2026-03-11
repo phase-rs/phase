@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as it's not your turn, CARDNAME gets +0/+2.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield",
-        "Condition": "NotPlayerTurn",
-        "AddToughness": "2",
-        "Description": "As long as it's not your turn, CARDNAME gets +0/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

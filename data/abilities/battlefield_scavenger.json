@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Exerted",
-      "params": {
-        "Execute": "TrigDiscard",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever you exert a creature, you may discard a card. If you do, draw a card.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. (It won't untap during your next untap step.)",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Cost": "Exert<1/CARDNAME>",
-        "Description": "You may exert CARDNAME as it attacks. (It won't untap during your next untap step.)"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you exert a creature, you may discard a card. If you do, draw a card.",
+      "mode": "Exerted",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

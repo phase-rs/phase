@@ -1,20 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Permanent",
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "MultiColor"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control another multicolored permanent, CARDNAME gets +1/+1 and has deathtouch. (Any amount of damage it deals to a creature is enough to destroy that creature.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "AddKeyword": "Deathtouch",
-        "IsPresent": "Permanent.YouCtrl+MultiColor+Other",
-        "Description": "As long as you control another multicolored permanent, CARDNAME gets +1/+1 and has deathtouch. (Any amount of damage it deals to a creature is enough to destroy that creature.)"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

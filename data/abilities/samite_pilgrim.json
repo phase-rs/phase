@@ -2,31 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "SpellDescription": "Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.",
-          "PrecostDesc": "Domain —",
-          "Amount": "X",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.",
-        "PrecostDesc": "Domain —",
-        "Amount": "X",
-        "ValidTgts": "Creature"
-      }
+      "description": "Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.",
+      "effect": {
+        "description": "Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

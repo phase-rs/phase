@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCharm",
-        "ValidCard": "Card.cmcGE5",
-        "TriggerDescription": "Whenever you cast a spell with mana value 5 or greater, ABILITY"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Beast",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Bird.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Beasts and Birds you control have ward {1}.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Beasts and Birds you control have ward {1}.",
-        "AddKeyword": "Ward:1",
-        "Affected": "Beast.YouCtrl,Bird.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a spell with mana value 5 or greater, ABILITY",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

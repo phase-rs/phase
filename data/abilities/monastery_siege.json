@@ -1,25 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "• Khans — At the beginning of your draw step, draw an additional card, then discard a card.",
-        "Affected": "Card.Self+ChosenModeKhans",
-        "AddTrigger": "KhansTrigger"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeKhans"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Khans — At the beginning of your draw step, draw an additional card, then discard a card.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddStaticAbility": "DragonsST",
-        "Description": "• Dragons — Spells your opponents cast that target you or a permanent you control cost {2} more to cast.",
-        "Affected": "Card.Self+ChosenModeDragons"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenModeDragons"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "• Dragons — Spells your opponents cast that target you or a permanent you control cost {2} more to cast.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

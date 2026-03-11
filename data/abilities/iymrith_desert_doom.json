@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, draw a card. Then if you have fewer than three cards in hand, draw cards equal to the difference.",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has ward {4} as long as it's untapped.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has ward {4} as long as it's untapped.",
-        "Affected": "Card.Self+untapped",
-        "AddKeyword": "Ward:4"
-      }
+      "modifications": [
+        {
+          "keyword": "Ward:4",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, draw a card. Then if you have fewer than three cards in hand, draw cards equal to the difference.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

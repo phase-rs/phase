@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, destroy target nonbasic land an opponent controls.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Description": "This spell costs {1} less to cast for each land your opponents control that could produce {C}.",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Amount": "X"
-      }
+      "description": "This spell costs {1} less to cast for each land your opponents control that could produce {C}.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, destroy target nonbasic land an opponent controls.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

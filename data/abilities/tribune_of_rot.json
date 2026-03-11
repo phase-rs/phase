@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, mill two cards. For each creature card milled this way, create a 1/1 green Saproling creature token.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, mill two cards. For each creature card milled this way, create a 1/1 green Saproling creature token.",
-        "Execute": "TrigMill"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

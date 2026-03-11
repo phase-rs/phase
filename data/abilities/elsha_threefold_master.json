@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, create that many 1/1 white Monk creature tokens with prowess.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigToken",
-        "CombatDamage": "True",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create that many 1/1 white Monk creature tokens with prowess."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

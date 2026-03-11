@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by one or more blue and/or black creatures, CARDNAME gets +3/+3 until end of turn.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by one or more blue and/or black creatures, CARDNAME gets +3/+3 until end of turn.",
-        "Execute": "TrigPump",
-        "ValidBlocked": "Creature.Blue,Creature.Black"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by one or more blue and/or black creatures, CARDNAME gets +3/+3 until end of turn.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by one or more blue and/or black creatures, CARDNAME gets +3/+3 until end of turn.",
-        "ValidCard": "Card.Self",
-        "ValidBlocker": "Creature.Blue,Creature.Black",
-        "Execute": "TrigPump"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

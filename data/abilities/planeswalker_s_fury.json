@@ -2,36 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "RememberRevealed": "True",
-          "ValidTgts": "Opponent",
-          "SorcerySpeed": "True",
-          "Random": "True",
-          "SubAbility": "DBDamage",
-          "SpellDescription": "Target opponent reveals a card at random from their hand. CARDNAME deals damage equal to that card's mana value to that player. Activate only as a sorcery."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 R"
+        "cost": "3 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberRevealed": "True",
-        "ValidTgts": "Opponent",
-        "SorcerySpeed": "True",
-        "Random": "True",
-        "SubAbility": "DBDamage",
-        "SpellDescription": "Target opponent reveals a card at random from their hand. CARDNAME deals damage equal to that card's mana value to that player. Activate only as a sorcery."
-      }
+      "description": "Target opponent reveals a card at random from their hand. CARDNAME deals damage equal to that card's mana value to that player. Activate only as a sorcery.",
+      "effect": {
+        "description": "Target opponent reveals a card at random from their hand. CARDNAME deals damage equal to that card's mana value to that player. Activate only as a sorcery.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

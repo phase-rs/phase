@@ -1,19 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control an artifact, CARDNAME gets +2/+0 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as you control an artifact, CARDNAME gets +2/+0 and has flying.",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying",
-        "AddPower": "2",
-        "IsPresent": "Artifact.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

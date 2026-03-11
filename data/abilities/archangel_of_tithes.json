@@ -1,32 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "ValidCard": "Creature",
-        "IsPresent": "Card.Self+untapped",
-        "Cost": "1",
-        "Description": "As long as CARDNAME is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
-        "Target": "You,Planeswalker.YouCtrl"
       }
     },
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is attacking, creatures can't block unless their controller pays {1} for each of those creatures.",
       "mode": {
         "Other": "CantBlockUnless"
-      },
-      "params": {
-        "IsPresent": "Card.Self+attacking",
-        "Description": "As long as CARDNAME is attacking, creatures can't block unless their controller pays {1} for each of those creatures.",
-        "ValidCard": "Creature",
-        "Cost": "1"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

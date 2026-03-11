@@ -1,28 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks or dies, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigChoose",
-        "TriggerDescription": "Whenever CARDNAME attacks or dies, ABILITY",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME attacks or dies, ABILITY",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever CARDNAME attacks or dies, ABILITY",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Secondary": "True",
-        "Execute": "TrigChoose"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

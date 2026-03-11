@@ -1,64 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME.",
-            "OptionalDecider": "You",
-            "Execute": "TrigPutCounter",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Spirit,Arcane",
-            "ValidActivatingPlayer": "You"
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Spirit,Arcane",
+            "type": "Typed"
           }
         },
         {
+          "description": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it.",
           "mode": "Phase",
-          "params": {
-            "IsPresent": "Card.Self+counters_GE2_KI",
-            "Execute": "TrigFlip",
-            "TriggerDescription": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it.",
-            "Phase": "End of Turn",
-            "OptionalDecider": "You",
-            "TriggerZones": "Battlefield"
-          }
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GainControl",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "SubCounter<1/KI>"
+            "cost": "SubCounter<1/KI>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Gain control of target creature until end of turn.",
-            "LoseControl": "EOT"
-          }
+          "description": "Gain control of target creature until end of turn.",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "GainControl"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

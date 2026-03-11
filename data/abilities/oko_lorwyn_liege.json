@@ -1,169 +1,129 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Animate",
-            "power": null,
-            "toughness": null,
-            "types": [],
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
+          "description": "Up to one target creature gains all creature types. (This effect doesn't end.)",
+          "duration": "Permanent",
+          "effect": {
+            "power": null,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": null,
+            "type": "Animate",
+            "types": []
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMin": "0",
-            "TargetMax": "1",
-            "Planeswalker": "True",
-            "AddAllCreatureTypes": "True",
-            "Duration": "Permanent",
-            "TgtPrompt": "Select up to one target creature",
-            "SpellDescription": "Up to one target creature gains all creature types. (This effect doesn't end.)"
-          }
+          "target_prompt": "Select up to one target creature"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": -2,
-            "toughness": 0,
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 1
+            "amount": 1,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target creature gets -2/-0 until your next turn.",
-            "IsCurse": "True",
-            "Duration": "UntilYourNextTurn",
-            "Planeswalker": "True"
-          }
+          "description": "Target creature gets -2/-0 until your next turn.",
+          "duration": "UntilYourNextTurn",
+          "effect": {
+            "power": -2,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your first main phase, you may pay {G}. If you do, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Phase": "Main1",
-            "TriggerDescription": "At the beginning of your first main phase, you may pay {G}. If you do, transform NICKNAME.",
-            "ValidPlayer": "You",
-            "Execute": "TrigTransform"
-          }
+          "phase": "PreCombatMain",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -1,
+            "type": "Loyalty"
+          },
+          "description": "Mill three cards. You may put a permanent card from among them into your hand.",
           "effect": {
-            "type": "Mill",
             "count": 3,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "You",
-            "SpellDescription": "Mill three cards. You may put a permanent card from among them into your hand.",
-            "SubAbility": "DBChangeZone",
-            "RememberMilled": "True",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -3,
+            "type": "Loyalty"
+          },
+          "description": "Create two 3/3 green Elk creature tokens.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_3_3_elk",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -3
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenAmount": "2",
-            "SpellDescription": "Create two 3/3 green Elk creature tokens.",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "ChooseType",
-            "params": {
-              "Ultimate": "True",
-              "Type": "Creature",
-              "AILogic": "MostProminentInComputerDeck",
-              "Defined": "You",
-              "Planeswalker": "True",
-              "SubAbility": "DBEffect",
-              "SpellDescription": "Choose a creature type. You get an emblem with \"Creatures you control of the chosen type get +3/+3 and have vigilance and hexproof.\""
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -6
+            "amount": -6,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Ultimate": "True",
-            "Type": "Creature",
-            "AILogic": "MostProminentInComputerDeck",
-            "Defined": "You",
-            "Planeswalker": "True",
-            "SubAbility": "DBEffect",
-            "SpellDescription": "Choose a creature type. You get an emblem with \"Creatures you control of the chosen type get +3/+3 and have vigilance and hexproof.\""
-          }
+          "description": "Choose a creature type. You get an emblem with \"Creatures you control of the chosen type get +3/+3 and have vigilance and hexproof.\"",
+          "effect": {
+            "description": "Choose a creature type. You get an emblem with \"Creatures you control of the chosen type get +3/+3 and have vigilance and hexproof.\"",
+            "name": "ChooseType",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your first main phase, you may pay {U}. If you do, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of your first main phase, you may pay {U}. If you do, transform NICKNAME.",
-            "Phase": "Main1",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "ValidPlayer": "You"
-          }
+          "phase": "PreCombatMain",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

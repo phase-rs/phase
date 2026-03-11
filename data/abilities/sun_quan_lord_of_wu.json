@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have horsemanship.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control have horsemanship.",
-        "Affected": "Creature.YouCtrl",
-        "AddKeyword": "Horsemanship"
-      }
+      "modifications": [
+        {
+          "keyword": "Horsemanship",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

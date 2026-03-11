@@ -1,96 +1,84 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 B"
+                "cost": "1 B",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "KW": "Indestructible",
-            "SubAbility": "DBTap",
-            "SpellDescription": "CARDNAME gains indestructible until end of turn."
-          }
+          "description": "CARDNAME gains indestructible until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": 0,
-            "toughness": 0,
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1 B"
+                "cost": "1 B",
+                "type": "Mana"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "Indestructible",
-            "Defined": "Self",
-            "SpellDescription": "CARDNAME gains indestructible until end of turn.",
-            "SubAbility": "DBTap"
-          }
+          "description": "CARDNAME gains indestructible until end of turn.",
+          "effect": {
+            "power": 0,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "Pump"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "CharacteristicDefining": "True",
-            "SetPower": "X",
-            "Affected": "Card.Self",
-            "Description": "CARDNAME's power and toughness are each equal to the number of creature cards in your graveyard.",
-            "SetToughness": "X"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to the number of creature cards in your graveyard.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

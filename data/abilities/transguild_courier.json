@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetColor": "All",
-        "Description": "CARDNAME is all colors.",
-        "Affected": "Card.Self",
-        "CharacteristicDefining": "True"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "CARDNAME is all colors.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

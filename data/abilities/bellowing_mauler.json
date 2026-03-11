@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, each player loses 4 life unless they sacrifice a nontoken creature.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, each player loses 4 life unless they sacrifice a nontoken creature.",
-        "Phase": "End of Turn",
-        "Execute": "TrigRepeatEach",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

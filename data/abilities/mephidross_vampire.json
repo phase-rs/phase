@@ -1,19 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control is a Vampire in addition to its other types and has \"Whenever this creature deals damage to a creature, put a +1/+1 counter on this creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddSVar": "MephidrossCounters",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Each creature you control is a Vampire in addition to its other types and has \"Whenever this creature deals damage to a creature, put a +1/+1 counter on this creature.\"",
-        "AddType": "Vampire",
-        "AddTrigger": "MephidrossPutCounter"
-      }
+      "modifications": [
+        {
+          "core_type": "Vampire",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

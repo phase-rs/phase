@@ -1,30 +1,73 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-4 0/6",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SetToughness": "6",
-        "Description": "LEVEL 1-4 0/6",
-        "SetPower": "0",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 0
+        },
+        {
+          "type": "SetToughness",
+          "value": 6
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 5+ 6/6 Islandwalk",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE5_LEVEL",
-        "Description": "LEVEL 5+ 6/6 Islandwalk",
-        "AddKeyword": "Landwalk:Island",
-        "SetToughness": "6",
-        "SetPower": "6",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 6
+        },
+        {
+          "type": "SetToughness",
+          "value": 6
+        },
+        {
+          "keyword": "Landwalk:Island",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,27 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonland+OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Exile target nonland permanent an opponent controls and all tokens that player controls with the same name as that permanent.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "ExileAll",
-        "SpellDescription": "Exile target nonland permanent an opponent controls and all tokens that player controls with the same name as that permanent.",
-        "TgtPrompt": "Select target nonland permanent an opponent controls"
-      }
+      "target_prompt": "Select target nonland permanent an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,60 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card"
-            }
-          },
           "cost": null,
+          "description": "Exile target card from a graveyard.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Choose target card in a graveyard",
-            "SpellDescription": "Exile target card from a graveyard.",
-            "SubAbility": "DBDraw"
-          }
+          "target_prompt": "Choose target card in a graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player sacrifices a creature with the greatest power among creatures they control. You gain life equal to its power.",
           "effect": {
-            "type": "Sacrifice",
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Sacrifice"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target player sacrifices a creature with the greatest power among creatures they control. You gain life equal to its power.",
-            "SacMessage": "the creature with the greatest power",
-            "RememberSacrificed": "True",
-            "SubAbility": "DBGainLife",
-            "SacValid": "Creature.greatestPowerControlledByTargeted"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

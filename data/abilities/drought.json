@@ -1,40 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUpkeep"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Cost": "Sac<1/Swamp>",
-        "ForEachShard": "Black",
-        "Description": "Spells cost an additional \"Sacrifice a Swamp\" to cast for each black mana symbol in their mana costs.",
-        "Type": "Spell",
-        "EffectZone": "All"
-      }
+      "description": "Spells cost an additional \"Sacrifice a Swamp\" to cast for each black mana symbol in their mana costs.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     },
     {
-      "mode": "RaiseCost",
-      "params": {
-        "ForEachShard": "Black",
-        "EffectZone": "All",
-        "Type": "Ability",
-        "Cost": "Sac<1/Swamp>",
-        "Description": "Activated abilities cost an additional \"Sacrifice a Swamp\" to activate for each black mana symbol in their activation costs."
-      }
+      "description": "Activated abilities cost an additional \"Sacrifice a Swamp\" to activate for each black mana symbol in their activation costs.",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

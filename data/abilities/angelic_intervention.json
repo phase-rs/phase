@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "Gains": "Choice",
-          "TgtPrompt": "Select target creature or planeswalker you control",
-          "Choices": "AnyColor,colorless",
-          "SubAbility": "DBCounter",
-          "SpellDescription": "Target creature or planeswalker you control gains protection from colorless or from the color of your choice until end of turn. If it's a creature, put a +1/+1 counter on it. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything with that quality.)",
-          "ValidTgts": "Creature.YouCtrl,Planeswalker.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Target creature or planeswalker you control gains protection from colorless or from the color of your choice until end of turn. If it's a creature, put a +1/+1 counter on it. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything with that quality.)",
+      "effect": {
+        "description": "Target creature or planeswalker you control gains protection from colorless or from the color of your choice until end of turn. If it's a creature, put a +1/+1 counter on it. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything with that quality.)",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Gains": "Choice",
-        "TgtPrompt": "Select target creature or planeswalker you control",
-        "Choices": "AnyColor,colorless",
-        "SubAbility": "DBCounter",
-        "SpellDescription": "Target creature or planeswalker you control gains protection from colorless or from the color of your choice until end of turn. If it's a creature, put a +1/+1 counter on it. (It can't be blocked, targeted, dealt damage, enchanted, or equipped by anything with that quality.)",
-        "ValidTgts": "Creature.YouCtrl,Planeswalker.YouCtrl"
-      }
+      "target_prompt": "Select target creature or planeswalker you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

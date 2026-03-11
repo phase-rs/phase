@@ -1,36 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, look at target player's hand. You may choose a nonland card from it. That player discards that card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDiscard",
-        "TriggerDescription": "When CARDNAME enters, look at target player's hand. You may choose a nonland card from it. That player discards that card.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When enchanted creature is dealt damage, destroy it.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature.EnchantedBy",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When enchanted creature is dealt damage, destroy it."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddSVar": "MortalDestroy"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

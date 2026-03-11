@@ -2,89 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Choose up to one target artifact, up to one target creature, and up to one target land. Untap the chosen permanents you control. Tap the chosen permanents you don't control. You gain 2 life.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Choose up to one target artifact, up to one target creature, and up to one target land.",
-        "SpellDescription": "Choose up to one target artifact, up to one target creature, and up to one target land. Untap the chosen permanents you control. Tap the chosen permanents you don't control. You gain 2 life.",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TgtPrompt": "Choose up to one target artifact",
-        "Planeswalker": "True",
-        "SubAbility": "DBChooseCreature"
-      }
+      "target_prompt": "Choose up to one target artifact"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
       "effect": {
-        "type": "Dig",
         "count": 3,
-        "destination": ""
+        "destination": "",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "NoReveal": "True",
-        "Planeswalker": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "UntapOppStep",
-          "Image": "emblem_teferi_who_slows_the_sunset",
-          "Stackable": "False",
-          "Duration": "Permanent",
-          "AILogic": "Always",
-          "SpellDescription": "You get an emblem with \"Untap all permanents you control during each opponent's untap step\" and \"You draw a card during each opponent's draw step.\"",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "Name": "Emblem — Teferi, Who Slows the Sunset",
-          "Triggers": "DrawOppStep"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "UntapOppStep",
-        "Image": "emblem_teferi_who_slows_the_sunset",
-        "Stackable": "False",
-        "Duration": "Permanent",
-        "AILogic": "Always",
-        "SpellDescription": "You get an emblem with \"Untap all permanents you control during each opponent's untap step\" and \"You draw a card during each opponent's draw step.\"",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "Name": "Emblem — Teferi, Who Slows the Sunset",
-        "Triggers": "DrawOppStep"
-      }
+      "description": "You get an emblem with \"Untap all permanents you control during each opponent's untap step\" and \"You draw a card during each opponent's draw step.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

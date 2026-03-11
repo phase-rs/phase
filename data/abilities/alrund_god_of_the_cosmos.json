@@ -1,53 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, choose a card type, then reveal the top two cards of your library. Put all cards of the chosen type revealed this way into your hand and the rest on the bottom of your library in any order.",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "Execute": "TrigChooseCardType"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AddToughness": "Z",
-            "Description": "NICKNAME gets +1/+1 for each card in your hand and each foretold card you own in exile.",
-            "Affected": "Card.Self",
-            "AddPower": "Z"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "NICKNAME gets +1/+1 for each card in your hand and each foretold card you own in exile.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, choose a card type, then reveal the top two cards of your library. Put all cards of the chosen type revealed this way into your hand and the rest on the bottom of your library in any order.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, return it to its owner's hand, then scry 2.",
           "mode": "DamageDone",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, return it to its owner's hand, then scry 2.",
-            "CombatDamage": "True",
-            "ValidSource": "Card.Self",
-            "Execute": "TrigReturn",
-            "ValidTarget": "Player"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

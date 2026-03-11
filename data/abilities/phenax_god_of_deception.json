@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to blue and black is less than seven, NICKNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as your devotion to blue and black is less than seven, NICKNAME isn't a creature.",
-        "RemoveType": "Creature",
-        "SVarCompare": "LT7",
-        "CheckSVar": "X",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have \"{T}: Target player mills X cards, where X is this creature's toughness.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddSVar": "PhenaxToughness",
-        "Description": "Creatures you control have \"{T}: Target player mills X cards, where X is this creature's toughness.\"",
-        "AddAbility": "PhenaxMill"
-      }
+      "modifications": [
+        {
+          "ability": "PhenaxMill",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

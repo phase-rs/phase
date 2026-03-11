@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, untap target nonland permanent.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever CARDNAME attacks, untap target nonland permanent.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,61 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "Amount": "1",
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "Valid": "Defined.ValidGraveyard Creature.Legendary+YouOwn",
-          "ReflectProperty": "Is",
-          "SpellDescription": "Add one mana of any color among legendary creature cards in your graveyard.",
-          "ColorOrType": "Color"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Valid": "Defined.ValidGraveyard Creature.Legendary+YouOwn",
-        "ReflectProperty": "Is",
-        "SpellDescription": "Add one mana of any color among legendary creature cards in your graveyard.",
-        "ColorOrType": "Color"
-      }
+      "description": "Add one mana of any color among legendary creature cards in your graveyard.",
+      "effect": {
+        "description": "Add one mana of any color among legendary creature cards in your graveyard.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, scry 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigScry",
-        "TriggerDescription": "When CARDNAME enters, scry 1.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,35 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, choose an opponent. Creatures the chosen player controls can't attack you or planeswalkers you control.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "ChooseOpponent",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, choose an opponent. Creatures the chosen player controls can't attack you or planeswalkers you control."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "RepeatOpp",
-        "TriggerDescription": "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
       "mode": "Abandoned",
-      "params": {
-        "Execute": "DBCleanup",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

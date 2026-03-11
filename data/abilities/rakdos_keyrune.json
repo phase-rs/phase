@@ -2,54 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo B R",
-        "params": {
-          "SpellDescription": "Add {B} or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B} or {R}."
-      }
+      "description": "Add {B} or {R}.",
+      "effect": {
+        "produced": [
+          "Black",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "B R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 3/1 black and red Devil artifact creature with first strike until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 1,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature",
           "Devil"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "B R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "Colors": "Black,Red",
-        "SpellDescription": "CARDNAME becomes a 3/1 black and red Devil artifact creature with first strike until end of turn.",
-        "Defined": "Self",
-        "OverwriteColors": "True",
-        "Keywords": "First Strike"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

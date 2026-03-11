@@ -1,42 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AddToughness": "1",
-            "AddKeyword": "Flying",
-            "Affected": "Card.EnchantedBy",
-            "Description": "Enchanted creature gets +1/+1 and has flying.",
-            "AddPower": "1"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Destination": "Graveyard",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ValidCard": "Card.Self"
-          }
+          "affected": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature gets +1/+1 and has flying.",
+          "mode": "Continuous",
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            },
+            {
+              "keyword": "Flying",
+              "type": "AddKeyword"
+            }
+          ]
         }
-      ]
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

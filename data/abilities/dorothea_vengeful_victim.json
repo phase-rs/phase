@@ -1,59 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME attacks or blocks, sacrifice it at end of combat.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME attacks or blocks, sacrifice it at end of combat.",
-            "Execute": "DelTrig"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME attacks or blocks, sacrifice it at end of combat.",
           "mode": "Blocks",
-          "params": {
-            "Secondary": "True",
-            "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it at end of combat.",
-            "Execute": "DelTrig",
-            "ValidCard": "Card.Self"
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "Description": "Enchanted creature has \"Whenever this creature attacks, create a 4/4 white Spirit creature token with flying that's tapped and attacking. Sacrifice that token at end of combat.\"",
-            "Affected": "Creature.EnchantedBy",
-            "AddSVar": "AE",
-            "AddTrigger": "AttackTrigger"
-          }
-        }
-      ],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "ReplaceWith": "Exile",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard"
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature has \"Whenever this creature attacks, create a 4/4 white Spirit creature token with flying that's tapped and attacking. Sacrifice that token at end of combat.\"",
+          "mode": "Continuous"
+        }
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,40 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.",
-          "RestrictValid": "Spell.Demon,Spell.Cleric,Spell.Vampire",
-          "Amount": "3"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.",
-        "RestrictValid": "Spell.Demon,Spell.Cleric,Spell.Vampire",
-        "Amount": "3"
-      }
+      "description": "Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

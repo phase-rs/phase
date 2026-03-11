@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "The \"legend rule\" doesn't apply to permanents you control.",
       "mode": {
         "Other": "IgnoreLegendRule"
-      },
-      "params": {
-        "ValidCard": "Permanent.YouCtrl",
-        "Description": "The \"legend rule\" doesn't apply to permanents you control."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

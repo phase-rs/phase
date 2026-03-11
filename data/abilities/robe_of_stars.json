@@ -2,39 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "Defined": "Equipped",
-          "SpellDescription": "Equipped creature phases out.",
-          "PrecostDesc": "Astral Projection —"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Equipped",
-        "SpellDescription": "Equipped creature phases out.",
-        "PrecostDesc": "Astral Projection —"
-      }
+      "description": "Equipped creature phases out.",
+      "effect": {
+        "description": "Equipped creature phases out.",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+3.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +0/+3.",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "3"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

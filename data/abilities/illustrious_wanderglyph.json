@@ -1,29 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of each upkeep, create a 1/1 colorless Gnome artifact creature token."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Artifact",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Creature"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other artifact creatures you control get +2/+2 as long as you have the city's blessing.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Blessing",
-        "Affected": "Artifact.Creature+Other+YouCtrl",
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Other artifact creatures you control get +2/+2 as long as you have the city's blessing."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each upkeep, create a 1/1 colorless Gnome artifact creature token.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

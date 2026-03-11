@@ -1,47 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "SetPower": "X",
-            "SetToughness": "X",
-            "CharacteristicDefining": "True",
-            "Description": "CARDNAME's power and toughness are each equal to the number of creature cards in all graveyards."
-          }
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to the number of creature cards in all graveyards.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target player mills four cards. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Mill",
             "count": 4,
             "target": {
               "type": "Player"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target player mills four cards. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

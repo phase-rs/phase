@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell that's both red and white, CARDNAME has base power and toughness 4/2 until end of turn and gains first strike until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigAnimate",
-        "ValidCard": "Card.Red+White",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you cast a spell that's both red and white, CARDNAME has base power and toughness 4/2 until end of turn and gains first strike until end of turn.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          },
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

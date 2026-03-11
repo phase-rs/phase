@@ -2,31 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4"
+        "cost": "4",
+        "type": "Mana"
       },
+      "description": "Return target creature card from a graveyard to its owner's hand. Any player may activate this ability but only as a sorcery.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "Activator": "Player",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Return target creature card from a graveyard to its owner's hand. Any player may activate this ability but only as a sorcery.",
-        "TgtPrompt": "Select target creature from any graveyard"
-      }
+      "target_prompt": "Select target creature from any graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

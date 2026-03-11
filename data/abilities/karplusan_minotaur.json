@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you win a coin flip, CARDNAME deals 1 damage to any target.",
       "mode": "FlippedCoin",
-      "params": {
-        "ValidResult": "Win",
-        "TriggerDescription": "Whenever you win a coin flip, CARDNAME deals 1 damage to any target.",
-        "ValidPlayer": "You",
-        "Execute": "TrigYouDmg",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you lose a coin flip, CARDNAME deals 1 damage to any target of an opponent's choice.",
       "mode": "FlippedCoin",
-      "params": {
-        "ValidResult": "Lose",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigOppDmg",
-        "TriggerDescription": "Whenever you lose a coin flip, CARDNAME deals 1 damage to any target of an opponent's choice."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

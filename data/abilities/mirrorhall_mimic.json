@@ -1,42 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You",
-            "Phase": "Upkeep",
-            "TriggerDescription": "At the beginning of your upkeep, create a token that's a copy of enchanted creature, except it's a Spirit in addition to its other types.",
-            "Execute": "TrigCopy"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
-          }
+          "description": "At the beginning of your upkeep, create a token that's a copy of enchanted creature, except it's a Spirit in addition to its other types.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

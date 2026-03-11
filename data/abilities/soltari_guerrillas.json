@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ImprintCards": "Self",
-          "ReplacementEffects": "EventGuerrillasDamageDone",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "The next time CARDNAME would deal combat damage to an opponent this turn, it deals that damage to target creature instead."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ImprintCards": "Self",
-        "ReplacementEffects": "EventGuerrillasDamageDone",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "The next time CARDNAME would deal combat damage to an opponent this turn, it deals that damage to target creature instead."
-      }
+      "description": "The next time CARDNAME would deal combat damage to an opponent this turn, it deals that damage to target creature instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

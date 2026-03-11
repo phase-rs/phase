@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Riot",
-        "Description": "Nontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)",
-        "Affected": "Creature.!token+YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Permanent,Player",
-        "ReplaceWith": "DmgTwice",
-        "ValidSource": "Creature.YouCtrl+counters_GE1_P1P1",
-        "Description": "If a creature you control with a +1/+1 counter on it would deal damage to a permanent or player, it deals double that damage instead."
-      }
+      "description": "If a creature you control with a +1/+1 counter on it would deal damage to a permanent or player, it deals double that damage instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Nontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Riot",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

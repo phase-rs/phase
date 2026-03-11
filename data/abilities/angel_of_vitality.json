@@ -1,31 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "SVarCompare": "GE25",
-        "AddToughness": "2",
-        "Description": "CARDNAME gets +2/+2 as long as you have 25 or more life.",
-        "Affected": "Card.Self",
-        "CheckSVar": "Y"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "GainLife",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "AILogic": "DoubleLife",
-        "ValidPlayer": "You",
-        "ReplaceWith": "GainLife",
-        "Description": "If you would gain life, you gain that much life plus 1 instead."
-      }
+      "description": "If you would gain life, you gain that much life plus 1 instead.",
+      "event": "GainLife"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE25",
+        "type": "CheckSVar",
+        "var": "Y"
+      },
+      "description": "CARDNAME gets +2/+2 as long as you have 25 or more life.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more cards leave your graveyard, scry 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigScry",
-        "Origin": "Graveyard",
-        "Destination": "Any",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more cards leave your graveyard, scry 1.",
-        "ValidCards": "Card.YouOwn"
-      }
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

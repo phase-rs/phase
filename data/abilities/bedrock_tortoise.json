@@ -1,27 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, creatures you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Description": "During your turn, creatures you control have hexproof.",
-        "Affected": "Creature.YouCtrl",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "Each creature you control with toughness greater than its power assigns combat damage equal to its toughness rather than its power.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "Description": "Each creature you control with toughness greater than its power assigns combat damage equal to its toughness rather than its power.",
-        "ValidCard": "Creature.powerLTtoughness+YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

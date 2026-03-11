@@ -2,45 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 5 damage divided as you choose among any number of target attacking creatures.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 5
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "DividedAsYouChoose": "5",
-        "TargetMax": "5",
-        "TgtPrompt": "Select any number of target attacking creatures to distribute damage to",
-        "SpellDescription": "CARDNAME deals 5 damage divided as you choose among any number of target attacking creatures."
-      }
+      "target_prompt": "Select any number of target attacking creatures to distribute damage to"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If four or more creatures are attacking, you may pay {1}{W} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Cost": "1 W",
-        "PresentCompare": "GE4",
-        "Description": "If four or more creatures are attacking, you may pay {1}{W} rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self",
-        "IsPresent": "Creature.attacking"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

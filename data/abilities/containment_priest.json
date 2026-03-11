@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a nontoken creature would enter and it wasn't cast, exile it instead.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Creature.!token+!wasCast",
-        "ReplaceWith": "Exile",
-        "Description": "If a nontoken creature would enter and it wasn't cast, exile it instead.",
-        "ActiveZones": "Battlefield",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

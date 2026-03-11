@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose a creature you control, then each opponent chooses a creature they control with equal or lesser power.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.YouCtrl"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a creature you control, then each opponent chooses a creature they control with equal or lesser power.",
-        "Mandatory": "True",
-        "SubAbility": "DBChooseCard",
-        "ChoiceTitle": "Choose a creature you control",
-        "ChoiceDesc": "creature they control",
-        "ImprintChosen": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

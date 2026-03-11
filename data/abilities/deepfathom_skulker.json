@@ -2,50 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Pump",
-          "ExileOnMoved": "Battlefield",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "Target creature can't be blocked this turn.",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 C"
+        "cost": "3 C",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Pump",
-        "ExileOnMoved": "Battlefield",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "Target creature can't be blocked this turn.",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted"
-      }
+      "description": "Target creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage to an opponent, you may draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidSource": "Creature.YouCtrl",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a creature you control deals combat damage to an opponent, you may draw a card."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

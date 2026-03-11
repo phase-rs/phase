@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player cycles a card, CARDNAME gets +2/+2 until end of turn.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever a player cycles a card, CARDNAME gets +2/+2 until end of turn.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

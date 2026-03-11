@@ -2,54 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W U",
-        "params": {
-          "SpellDescription": "Add {W} or {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {W} or {U}."
-      }
+      "description": "Add {W} or {U}.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "4 W U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 4/4 white and blue Dragon artifact creature with flying until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature",
           "Dragon"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "4 W U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "OverwriteColors": "True",
-        "SpellDescription": "CARDNAME becomes a 4/4 white and blue Dragon artifact creature with flying until end of turn.",
-        "Colors": "White,Blue",
-        "Defined": "Self",
-        "RemoveCreatureTypes": "True",
-        "Keywords": "Flying"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

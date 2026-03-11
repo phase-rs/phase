@@ -1,46 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's upkeep, that player gains control of NICKNAME, untaps it, and puts a +1/+1 counter on it. It gains haste until end of turn.",
-        "ValidPlayer": "Player",
-        "Execute": "TrigControl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner.",
-        "ValidCard": "Card.Self",
-        "Target": "Player.CardOwner"
-      }
+      "description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner.",
+      "mode": "CantAttack"
     },
     {
-      "mode": "MustAttack",
-      "params": {
-        "Secondary": "True",
-        "ValidCreature": "Card.Self",
-        "Description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner."
-      }
+      "description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner.",
+      "mode": "MustAttack"
     },
     {
+      "description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner.",
       "mode": {
         "Other": "CantSacrifice"
-      },
-      "params": {
-        "Description": "CARDNAME attacks each combat if able, can't be sacrificed, and can't attack its owner.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's upkeep, that player gains control of NICKNAME, untaps it, and puts a +1/+1 counter on it. It gains haste until end of turn.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

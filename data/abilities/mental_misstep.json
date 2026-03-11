@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.cmcEQ1"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell with mana value 1.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell with mana value 1",
-        "AIPhyrexianPayment": "Never",
-        "TargetType": "Spell",
-        "SpellDescription": "Counter target spell with mana value 1."
-      }
+      "target_prompt": "Select target spell with mana value 1"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

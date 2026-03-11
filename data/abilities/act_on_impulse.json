@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "SpellDescription": "Exile the top three cards of your library. Until end of turn, you may play cards exiled this way.",
-        "Defined": "You",
-        "ChangeNum": "All",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Exile the top three cards of your library. Until end of turn, you may play cards exiled this way.",
+      "effect": {
+        "count": 3,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,119 +1,91 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "SpellDescription": "Until your next turn, you may cast creature spells as though they had flash, and each creature you control enters with an additional +1/+1 counter on it.",
-              "ReplacementEffects": "ExtraETBCounter",
-              "StaticAbilities": "WithFlash",
-              "Planeswalker": "True",
-              "Duration": "UntilYourNextTurn"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 1
+            "amount": 1,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Until your next turn, you may cast creature spells as though they had flash, and each creature you control enters with an additional +1/+1 counter on it.",
-            "ReplacementEffects": "ExtraETBCounter",
-            "StaticAbilities": "WithFlash",
-            "Planeswalker": "True",
-            "Duration": "UntilYourNextTurn"
-          }
+          "description": "Until your next turn, you may cast creature spells as though they had flash, and each creature you control enters with an additional +1/+1 counter on it.",
+          "duration": "UntilYourNextTurn",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -3,
+            "type": "Loyalty"
+          },
+          "description": "Create two 2/2 green Wolf creature tokens.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_2_2_wolf",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -3
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "TokenAmount": "2",
-            "SpellDescription": "Create two 2/2 green Wolf creature tokens."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "R G",
-            "params": {
-              "Planeswalker": "True",
-              "SpellDescription": "Add {R}{G}."
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SpellDescription": "Add {R}{G}."
-          }
+          "description": "Add {R}{G}.",
+          "effect": {
+            "produced": [
+              "Red",
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "Until end of turn, CARDNAME becomes a 5/5 Werewolf creature with trample, indestructible, and haste.",
           "effect": {
-            "type": "Animate",
             "power": 5,
+            "target": {
+              "type": "Any"
+            },
             "toughness": 5,
+            "type": "Animate",
             "types": [
               "Creature",
               "Werewolf"
-            ],
-            "target": {
-              "type": "Any"
-            }
+            ]
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "RemoveCardTypes": "True",
-            "SpellDescription": "Until end of turn, CARDNAME becomes a 5/5 Werewolf creature with trample, indestructible, and haste.",
-            "Defined": "Self",
-            "StackDescription": "SpellDescription",
-            "Keywords": "Trample & Indestructible & Haste",
-            "RemoveCreatureTypes": "True",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

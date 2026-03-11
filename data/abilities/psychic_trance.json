@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "Abilities": "Counter",
-          "SpellDescription": "Until end of turn, Wizards you control gain \"{T}: Counter target spell.\"",
-          "ValidCards": "Card.Wizard+YouCtrl"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Abilities": "Counter",
-        "SpellDescription": "Until end of turn, Wizards you control gain \"{T}: Counter target spell.\"",
-        "ValidCards": "Card.Wizard+YouCtrl"
-      }
+      "description": "Until end of turn, Wizards you control gain \"{T}: Counter target spell.\"",
+      "effect": {
+        "description": "Until end of turn, Wizards you control gain \"{T}: Counter target spell.\"",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

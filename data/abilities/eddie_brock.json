@@ -1,68 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-              "Defined": "Self",
-              "AILogic": "Always",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "3 B R G"
+            "cost": "3 B R G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
-            "Defined": "Self",
-            "AILogic": "Always",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, return target creature card with mana value 1 or less from your graveyard to the battlefield.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, return target creature card with mana value 1 or less from your graveyard to the battlefield.",
-            "Execute": "TrigChangeZone",
-            "Destination": "Battlefield",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attacks, you may sacrifice another creature. If you do, draw X cards, then you may put a permanent card with mana value X or less from your hand onto the battlefield, where X is the sacrificed creature's mana value.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDraw",
-            "TriggerDescription": "Whenever NICKNAME attacks, you may sacrifice another creature. If you do, draw X cards, then you may put a permanent card with mana value X or less from your hand onto the battlefield, where X is the sacrificed creature's mana value."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,40 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Main1,Main2",
-        "TriggerDescription": "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
-        "ValidPlayer": "You",
-        "CheckSVar": "CarpetX",
-        "OptionalDecider": "You",
-        "Execute": "TrigMana",
-        "SVarCompare": "EQ0"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "Phase": "Cleanup",
-        "Static": "True",
-        "Execute": "TrigReset"
-      }
+      "phase": "Cleanup"
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReset",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

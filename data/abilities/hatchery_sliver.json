@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each Sliver spell you cast has replicate. The replicate cost is equal to its mana cost. (A copy of a permanent spell becomes a token.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Stack",
-        "Description": "Each Sliver spell you cast has replicate. The replicate cost is equal to its mana cost. (A copy of a permanent spell becomes a token.)",
-        "EffectZone": "Battlefield",
-        "Affected": "Sliver.YouCtrl+wasCast",
-        "AddKeyword": "Replicate:CardManaCost"
-      }
+      "modifications": [
+        {
+          "keyword": "Replicate:CardManaCost",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

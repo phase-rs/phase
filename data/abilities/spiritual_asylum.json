@@ -1,27 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "When a creature you control attacks, sacrifice CARDNAME.",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSacrifice"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Land.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures and lands you control have shroud.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl,Land.YouCtrl",
-        "AddKeyword": "Shroud",
-        "Description": "Creatures and lands you control have shroud."
-      }
+      "modifications": [
+        {
+          "keyword": "Shroud",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When a creature you control attacks, sacrifice CARDNAME.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

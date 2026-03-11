@@ -1,34 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "Phase": "Main",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you may search your library for a card, put it into your graveyard, then shuffle.",
-        "IsPresent": "Card.tapped",
-        "PhaseCount": "2",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "PresentDefined": "Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by Glimmers.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by Glimmers.",
-        "ValidBlocker": "Creature.Glimmer",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you may search your library for a card, put it into your graveyard, then shuffle.",
+      "mode": "Phase",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

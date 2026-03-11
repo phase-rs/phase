@@ -2,38 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 3,
-        "toughness": 3,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Flying",
-        "SpellDescription": "Target creature gets +3/+3 and gains flying until end of turn."
-      }
+      "description": "Target creature gets +3/+3 and gains flying until end of turn.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 3,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Zombie you control enters, you may pay {W}. If you do, return CARDNAME from your graveyard to your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a Zombie you control enters, you may pay {W}. If you do, return CARDNAME from your graveyard to your hand.",
-        "Origin": "Any",
-        "ValidCard": "Card.Zombie+YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigChange"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Zombie"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

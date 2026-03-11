@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and has \"Whenever this creature attacks, untap all lands you control.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddSVar": "BearUmbraUntap & HasAttackEffect",
-        "AddTrigger": "TrigUntap",
-        "Affected": "Card.EnchantedBy",
-        "Description": "Enchanted creature gets +2/+2 and has \"Whenever this creature attacks, untap all lands you control.\"",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

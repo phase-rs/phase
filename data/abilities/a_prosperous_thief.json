@@ -1,20 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more Ninja or Rogue creatures you control deal combat damage to a player, create a Treasure token.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidSource": "Creature.Ninja+YouCtrl,Creature.Rogue+YouCtrl",
-        "ValidTarget": "Player",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever one or more Ninja or Rogue creatures you control deal combat damage to a player, create a Treasure token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Ninja"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Creature.Rogue"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

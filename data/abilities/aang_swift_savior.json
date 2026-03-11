@@ -1,64 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Mode": "Transform",
-              "SpellDescription": "Transform NICKNAME.",
-              "Defined": "Self"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "Waterbend<8>"
+            "cost": "Waterbend<8>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Mode": "Transform",
-            "SpellDescription": "Transform NICKNAME.",
-            "Defined": "Self"
-          }
+          "description": "Transform NICKNAME.",
+          "effect": {
+            "description": "Transform NICKNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When NICKNAME enters, airbend up to one other target creature or spell. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When NICKNAME enters, airbend up to one other target creature or spell. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "Execute": "TrigAirbend"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attack, put a +1/+1 counter on each tapped creature you control.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigPutCounterAll",
-            "TriggerDescription": "Whenever NICKNAME attack, put a +1/+1 counter on each tapped creature you control."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

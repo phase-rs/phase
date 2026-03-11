@@ -1,30 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "CheckSVar": "X",
-        "SVarCompare": "LT4",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When NICKNAME enters, if you have fewer than four cards in hand, draw cards equal to the difference."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "Z",
-        "Description": "NICKNAME gets +1/+0 for each other artifact you control.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "NICKNAME gets +1/+0 for each other artifact you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, if you have fewer than four cards in hand, draw cards equal to the difference.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

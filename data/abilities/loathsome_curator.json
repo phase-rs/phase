@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, destroy target creature you don't control with mana value 3 or less.",
       "mode": "Exploited",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When CARDNAME exploits a creature, destroy target creature you don't control with mana value 3 or less."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

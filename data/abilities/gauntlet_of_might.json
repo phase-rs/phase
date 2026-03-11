@@ -1,29 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "TapsForMana",
-      "params": {
-        "TriggerDescription": "Whenever a Mountain is tapped for mana, its controller adds an additional {R}.",
-        "Execute": "TrigMana",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Mountain",
-        "Static": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Red"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Red creatures get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Red creatures get +1/+1.",
-        "Affected": "Creature.Red",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Mountain is tapped for mana, its controller adds an additional {R}.",
+      "mode": "TapsForMana",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Mountain",
+        "type": "Typed"
+      }
+    }
+  ]
 }

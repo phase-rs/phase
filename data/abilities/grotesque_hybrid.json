@@ -2,42 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains flying and protection from green and from white until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBProtect",
-        "Defined": "Self",
-        "KW": "Flying",
-        "SpellDescription": "CARDNAME gains flying and protection from green and from white until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
       "mode": "DamageDone",
-      "params": {
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Creature",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigDestroy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

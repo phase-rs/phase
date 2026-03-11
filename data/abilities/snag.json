@@ -2,38 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Prevent all combat damage that would be dealt by unblocked creatures this turn.",
-          "AILogic": "Fog",
-          "ReplacementEffects": "RPrevent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all combat damage that would be dealt by unblocked creatures this turn.",
-        "AILogic": "Fog",
-        "ReplacementEffects": "RPrevent"
-      }
+      "description": "Prevent all combat damage that would be dealt by unblocked creatures this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may discard a Forest card rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "Discard<1/Forest>",
-        "EffectZone": "All",
-        "Description": "You may discard a Forest card rather than pay this spell's mana cost.",
-        "ValidSA": "Spell.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

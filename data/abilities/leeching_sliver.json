@@ -1,26 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a Sliver you control attacks, defending player loses 1 life.",
-        "ValidCard": "Sliver.YouCtrl",
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AE",
-        "Affected": "Sliver.YouCtrl"
-      }
+      "affected": {
+        "card_type": "Sliver",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Sliver you control attacks, defending player loses 1 life.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Sliver",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

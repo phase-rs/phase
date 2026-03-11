@@ -2,50 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U R"
+        "cost": "1 U R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDiscard",
-        "SpellDescription": "Draw a card, then discard a card."
-      }
+      "description": "Draw a card, then discard a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-          "TargetType": "Spell",
-          "AILogic": "Once",
-          "MayChooseTarget": "True",
-          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U R"
+        "cost": "2 U R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "TargetType": "Spell",
-        "AILogic": "Once",
-        "MayChooseTarget": "True",
-        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy."
-      }
+      "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this creature enters, if you cast it, return all non-Elemental creatures to their owners' hands.",
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Destination": "Battlefield",
-        "Execute": "TrigChangeZoneAll"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Amount": "X",
-        "EffectZone": "All",
-        "Description": "This spell costs {X} less to cast, where X is the greatest mana value among Elementals you control."
-      }
+      "description": "This spell costs {X} less to cast, where X is the greatest mana value among Elementals you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this creature enters, if you cast it, return all non-Elemental creatures to their owners' hands.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

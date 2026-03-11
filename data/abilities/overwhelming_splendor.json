@@ -1,27 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "EnchantedPlayerCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures enchanted player controls lose all abilities and have base power and toughness 1/1.",
       "mode": "Continuous",
-      "params": {
-        "RemoveAllAbilities": "True",
-        "Description": "Creatures enchanted player controls lose all abilities and have base power and toughness 1/1.",
-        "SetToughness": "1",
-        "Affected": "Creature.EnchantedPlayerCtrl",
-        "SetPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "type": "RemoveAllAbilities"
+        }
+      ]
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "Activator": "Player.EnchantedBy",
-        "ValidSA": "Activated.!ManaAbility+!Loyalty",
-        "Description": "Enchanted player can't activate abilities that aren't mana abilities or loyalty abilities."
-      }
+      "description": "Enchanted player can't activate abilities that aren't mana abilities or loyalty abilities.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

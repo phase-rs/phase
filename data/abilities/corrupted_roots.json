@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted land becomes tapped, its controller loses 2 life.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "Execute": "TrigLose",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted land becomes tapped, its controller loses 2 life."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

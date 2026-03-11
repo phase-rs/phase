@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted permanent can't attack, block, or crew Vehicles, and its activated abilities can't be activated unless they're mana abilities.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantCrew,CantBeActivated"
-      },
-      "params": {
-        "ValidCard": "Card.EnchantedBy",
-        "Description": "Enchanted permanent can't attack, block, or crew Vehicles, and its activated abilities can't be activated unless they're mana abilities.",
-        "ValidSA": "Activated.!ManaAbility"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

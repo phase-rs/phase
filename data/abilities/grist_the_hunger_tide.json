@@ -2,99 +2,72 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "RepeatCheckSVar": "MilledInsect",
-          "Planeswalker": "True",
-          "RepeatSVarCompare": "EQ1",
-          "SpellDescription": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
-          "SubAbility": "DBCleanup",
-          "StackDescription": "SpellDescription",
-          "RepeatSubAbility": "CleanupBegin"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatCheckSVar": "MilledInsect",
-        "Planeswalker": "True",
-        "RepeatSVarCompare": "EQ1",
-        "SpellDescription": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
-        "SubAbility": "DBCleanup",
-        "StackDescription": "SpellDescription",
-        "RepeatSubAbility": "CleanupBegin"
-      }
+      "description": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
+      "effect": {
+        "description": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ImmediateTrigger",
-        "params": {
-          "Execute": "TrigDestroy",
-          "Planeswalker": "True",
-          "UnlessCost": "Sac<1/Creature>",
-          "UnlessSwitched": "True",
-          "AILogic": "WeakerCreature",
-          "SpellDescription": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
-          "UnlessPayer": "You"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Execute": "TrigDestroy",
-        "Planeswalker": "True",
-        "UnlessCost": "Sac<1/Creature>",
-        "UnlessSwitched": "True",
-        "AILogic": "WeakerCreature",
-        "SpellDescription": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
-        "UnlessPayer": "You"
-      }
+      "description": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
+      "effect": {
+        "description": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
+        "name": "ImmediateTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Each opponent loses life equal to the number of creature cards in your graveyard.",
-        "Defined": "Player.Opponent",
-        "Ultimate": "True"
-      }
+      "description": "Each opponent loses life equal to the number of creature cards in your graveyard.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "As long as CARDNAME isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Creature & Insect",
-        "ExcludeZone": "Battlefield",
-        "SetPower": "1",
-        "Affected": "Card.Self",
-        "SetToughness": "1",
-        "Description": "As long as CARDNAME isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
-        "CharacteristicDefining": "True"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Creature & Insect",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

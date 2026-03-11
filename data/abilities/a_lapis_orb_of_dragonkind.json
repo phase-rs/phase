@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "TriggersWhenSpent": "TrigSpent",
-          "SpellDescription": "Add one mana of any color. When you spend this mana to cast a Dragon creature spell, scry 2."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TriggersWhenSpent": "TrigSpent",
-        "SpellDescription": "Add one mana of any color. When you spend this mana to cast a Dragon creature spell, scry 2."
-      }
+      "description": "Add one mana of any color. When you spend this mana to cast a Dragon creature spell, scry 2.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

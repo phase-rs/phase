@@ -2,77 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top four cards of your library. You may reveal an enchantment card from among them and put that card into your hand. Put the rest on the bottom of your library in a random order.",
       "effect": {
-        "type": "Dig",
         "count": 4,
-        "destination": ""
+        "destination": "",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top four cards of your library. You may reveal an enchantment card from among them and put that card into your hand. Put the rest on the bottom of your library in a random order.",
-        "ForceRevealToController": "True",
-        "ChangeNum": "1",
-        "ChangeValid": "Enchantment",
-        "RestRandomOrder": "True",
-        "Planeswalker": "True",
-        "Optional": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Exile target creature or enchantment you don't control until target enchantment you control leaves the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouDontCtrl,Enchantment.YouDontCtrl"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouDontCtrl,Enchantment.YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target creature or enchantment you don't control",
-        "SpellDescription": "Exile target creature or enchantment you don't control until target enchantment you control leaves the battlefield.",
-        "RememberChanged": "True"
-      }
+      "target_prompt": "Select target creature or enchantment you don't control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "ChangeType": "Enchantment.YouOwn",
-        "SpellDescription": "Return all enchantment cards from your graveyard to the battlefield."
-      }
+      "description": "Return all enchantment cards from your graveyard to the battlefield.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

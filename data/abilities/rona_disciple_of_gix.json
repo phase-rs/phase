@@ -2,56 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 1,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "All",
-        "Defined": "You",
-        "SpellDescription": "Exile the top card of your library."
-      }
+      "description": "Exile the top card of your library.",
+      "effect": {
+        "count": 1,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may cast spells from among cards exiled with NICKNAME.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may exile target historic card from your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "HistoricExile",
-        "TriggerDescription": "When CARDNAME enters, you may exile target historic card from your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
-        "Origin": "Any",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.nonLand+ExiledWithSource",
-        "MayPlay": "True",
-        "AffectedZone": "Exile",
-        "Description": "You may cast spells from among cards exiled with NICKNAME."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, CARDNAME has hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Description": "During your turn, CARDNAME has hexproof.",
-        "AddKeyword": "Hexproof",
-        "Affected": "Card.Self",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "CARDNAME can't be blocked by creatures that don't have a name.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by creatures that don't have a name.",
-        "ValidBlocker": "Creature.noName",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

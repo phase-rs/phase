@@ -1,33 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "OptionalDecider": "EnchantedController",
-        "TriggerZones": "Battlefield",
-        "Execute": "ApathyDiscard",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player may discard a card at random. If the player does, untap that creature.",
-        "ValidPlayer": "Player.EnchantedController"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidCard": "Creature.EnchantedBy",
-        "ValidStepTurnToController": "You"
-      }
+      "description": "At the beginning of the upkeep of enchanted creature's controller, that player may discard a card at random. If the player does, untap that creature.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

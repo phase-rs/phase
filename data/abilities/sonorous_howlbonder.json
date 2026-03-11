@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control with menace can't be blocked except by three or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Min": "3",
-        "Description": "Each creature you control with menace can't be blocked except by three or more creatures.",
-        "ValidCard": "Creature.YouCtrl+withMenace"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

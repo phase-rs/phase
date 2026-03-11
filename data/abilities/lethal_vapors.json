@@ -2,40 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "0",
+        "type": "Mana"
+      },
+      "description": "Destroy CARDNAME. You skip your next turn. Any player may activate this ability.",
       "effect": {
-        "type": "Destroy",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Destroy"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "0"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "WillSkipTurn",
-        "Activator": "Player",
-        "SubAbility": "DBSkipTurn",
-        "SpellDescription": "Destroy CARDNAME. You skip your next turn. Any player may activate this ability.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature enters, destroy it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature",
-        "Execute": "TrigDestroy",
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever a creature enters, destroy it."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

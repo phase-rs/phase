@@ -1,29 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Human you control enters, tap target creature an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Creature.YouCtrl+Other+Human",
-        "Origin": "Any",
-        "Execute": "TrigTap",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Human you control enters, tap target creature an opponent controls."
+      "origin": "Battlefield",
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.YouCtrl"
+              },
+              {
+                "type": "Other",
+                "value": "Human"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "At the beginning of your upkeep, create a 1/1 white Human Soldier creature token.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, create a 1/1 white Human Soldier creature token."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

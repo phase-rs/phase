@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player chooses a land they control of each basic land type. Return those lands to their owners' hands.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "Each player chooses a land they control of each basic land type. Return those lands to their owners' hands.",
-        "Defined": "Player",
-        "ControlledByPlayer": "Chooser",
-        "EachBasicType": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

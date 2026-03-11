@@ -2,43 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "DamageAll",
-        "amount": {
-          "type": "Variable",
-          "value": "X"
-        },
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "each creature and each player.",
-        "ValidPlayers": "Player",
-        "ValidCards": "Creature",
-        "SpellDescription": "CARDNAME deals 1 damage to each creature and each player. If you control a snow Swamp, CARDNAME deals 2 damage instead."
-      }
+      "description": "CARDNAME deals 1 damage to each creature and each player. If you control a snow Swamp, CARDNAME deals 2 damage instead.",
+      "effect": {
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        },
+        "type": "DamageAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

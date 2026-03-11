@@ -1,30 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Pirate.Other+YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME or another Pirate you control enters, create a tapped Treasure token.",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Treasure",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Treasures you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0,\" equip Pirate {1}, and equip {3}.",
       "mode": "Continuous",
-      "params": {
-        "AddStaticAbility": "TreasureEquip",
-        "Affected": "Treasure.YouCtrl",
-        "Description": "Treasures you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0,\" equip Pirate {1}, and equip {3}.",
-        "AddType": "Equipment",
-        "AddKeyword": "Equip:3 & Equip:1:Creature.Pirate+YouCtrl:Pirate"
-      }
+      "modifications": [
+        {
+          "keyword": "Equip:3",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Equip:1:Creature.Pirate+YouCtrl:Pirate",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Equipment",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another Pirate you control enters, create a tapped Treasure token.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Pirate.Other"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

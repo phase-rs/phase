@@ -2,42 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Exile target card from a graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Choose target card in a graveyard",
-        "SpellDescription": "Exile target card from a graveyard."
-      }
+      "target_prompt": "Choose target card in a graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE4",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are four or more card types among cards exiled with CARDNAME, it gets +4/+4 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SVarCompare": "GE4",
-        "CheckSVar": "X",
-        "Description": "As long as there are four or more card types among cards exiled with CARDNAME, it gets +4/+4 and has trample.",
-        "AddToughness": "4",
-        "AddKeyword": "Trample",
-        "AddPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 4
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

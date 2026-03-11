@@ -2,73 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U B",
-        "params": {
-          "SpellDescription": "Add {U} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U} or {B}."
-      }
+      "description": "Add {U} or {B}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 U B",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a 4/4 blue and black Shark creature with deathtouch until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Shark"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 U B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Blue,Black",
-        "Keywords": "Deathtouch",
-        "OverwriteColors": "True",
-        "SpellDescription": "CARDNAME becomes a 4/4 blue and black Shark creature with deathtouch until end of turn. It's still a land.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME attacks, target player mills 4 cards.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigMill"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped."
+      "description": "Whenever CARDNAME attacks, target player mills 4 cards.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

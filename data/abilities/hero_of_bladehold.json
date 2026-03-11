@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, create two 1/1 white Soldier creature tokens that are tapped and attacking.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever CARDNAME attacks, create two 1/1 white Soldier creature tokens that are tapped and attacking.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

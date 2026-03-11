@@ -2,31 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": "Hand"
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestRandomOrder": "True",
-        "SpellDescription": "Look at the top four cards of your library. You may reveal a creature card with power 2 or less from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "LibraryPosition": "-1",
-        "ForceRevealToController": "True",
-        "ChangeNum": "1",
-        "DestinationZone2": "Library",
-        "ChangeValid": "Creature.powerLE2",
-        "Optional": "True"
-      }
+      "description": "Look at the top four cards of your library. You may reveal a creature card with power 2 or less from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 4,
+        "destination": "Hand",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

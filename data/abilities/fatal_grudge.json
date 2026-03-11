@@ -2,40 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B R"
+            "cost": "B R",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Opponent",
-        "SpellDescription": "Each opponent chooses a permanent they control that shares a type with the sacrificed permanent and sacrifices it.",
-        "SacValid": "Permanent.sharesCardTypeWith Sacrificed",
-        "SacMessage": "permanent that shares a type with the sacrificed permanent",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Each opponent chooses a permanent they control that shares a type with the sacrificed permanent and sacrifices it.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

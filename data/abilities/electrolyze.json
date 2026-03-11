@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage divided as you choose among one or two targets. Draw a card.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "1",
-        "DividedAsYouChoose": "2",
-        "SpellDescription": "CARDNAME deals 2 damage divided as you choose among one or two targets. Draw a card.",
-        "TargetMax": "2",
-        "TgtPrompt": "Select any target to distribute damage to",
-        "SubAbility": "DBDraw"
-      }
+      "target_prompt": "Select any target to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,43 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield,Stack",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Card.inZoneStack"
-        }
-      },
       "cost": null,
+      "description": "The owner of target spell or creature puts it on their choice of the top or bottom of their library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield,Stack",
+        "target": {
+          "card_type": "Creature,Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "DestinationAlternative": "Library",
-        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
-        "TgtPrompt": "Select target spell or nonland permanent",
-        "AlternativeDecider": "TargetedOwner",
-        "LibraryPositionAlternative": "-1",
-        "SpellDescription": "The owner of target spell or creature puts it on their choice of the top or bottom of their library."
-      }
+      "target_prompt": "Select target spell or nonland permanent"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {2} less to cast if a creature is attacking you.",
-        "CheckSVar": "X",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "SVarCompare": "GE1",
-        "EffectZone": "All",
-        "Amount": "2"
-      }
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "This spell costs {2} less to cast if a creature is attacking you.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

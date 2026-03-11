@@ -1,30 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever you cast a colorless spell, until end of turn, CARDNAME gains trample and gets +X/+X, where X is that spell's mana value.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.Colorless",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Caster": "You",
-        "Description": "You may cast colorless spells as though they had flash.",
-        "ValidCard": "Card.Colorless",
-        "ValidSA": "Spell"
-      }
+      "description": "You may cast colorless spells as though they had flash.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a colorless spell, until end of turn, CARDNAME gains trample and gets +X/+X, where X is that spell's mana value.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Colorless"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When an opponent casts an instant spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Ape creature.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When an opponent casts an instant spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Ape creature.",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Instant",
-        "ValidActivatingPlayer": "Opponent",
-        "IsPresent": "Card.Self+Enchantment",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

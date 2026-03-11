@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "SpellDescription": "Put X -1/-1 counters on each creature. Shuffle CARDNAME into its owner's library.",
-          "ValidCards": "Creature",
-          "CounterType": "M1M1",
-          "SubAbility": "DBShuffle",
-          "IsCurse": "True",
-          "CounterNum": "X"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put X -1/-1 counters on each creature. Shuffle CARDNAME into its owner's library.",
-        "ValidCards": "Creature",
-        "CounterType": "M1M1",
-        "SubAbility": "DBShuffle",
-        "IsCurse": "True",
-        "CounterNum": "X"
-      }
+      "description": "Put X -1/-1 counters on each creature. Shuffle CARDNAME into its owner's library.",
+      "effect": {
+        "description": "Put X -1/-1 counters on each creature. Shuffle CARDNAME into its owner's library.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

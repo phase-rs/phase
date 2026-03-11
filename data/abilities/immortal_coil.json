@@ -2,55 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<2/Card>"
+            "cost": "ExileFromGrave<2/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{T}, Exile two cards from your graveyard:",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Always",
-      "params": {
-        "IsPresent": "Card.YouCtrl",
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "When there are no cards in your graveyard, you lose the game.",
-        "Execute": "TrigLoseGame",
-        "TriggerZones": "Battlefield",
-        "PresentZone": "Graveyard"
-      }
+      "description": "If damage would be dealt to you, prevent that damage. Exile a card from your graveyard for each 1 damage prevented this way.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "You",
-        "ActiveZones": "Battlefield",
-        "PreventionEffect": "True",
-        "Description": "If damage would be dealt to you, prevent that damage. Exile a card from your graveyard for each 1 damage prevented this way.",
-        "ReplaceWith": "ChangeZone"
-      }
+      "description": "When there are no cards in your graveyard, you lose the game.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

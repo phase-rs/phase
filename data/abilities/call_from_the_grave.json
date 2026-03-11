@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Put a random creature from a random graveyard into play under your control. CARDNAME deals to you an amount of damage equal to that creature's casting cost.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDealDamage",
-        "ChangeNum": "1",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Put a random creature from a random graveyard into play under your control. CARDNAME deals to you an amount of damage equal to that creature's casting cost.",
-        "GainControl": "True",
-        "Hidden": "True",
-        "AtRandom": "True",
-        "RememberChanged": "True",
-        "ChangeType": "Creature"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Delirium — Whenever CARDNAME attacks, if there are four or more card types among cards in your graveyard, CARDNAME deals 1 damage to each creature defending player controls.",
       "mode": "Attacks",
-      "params": {
-        "Delirium": "True",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDamageAll",
-        "TriggerDescription": "Delirium — Whenever CARDNAME attacks, if there are four or more card types among cards in your graveyard, CARDNAME deals 1 damage to each creature defending player controls."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

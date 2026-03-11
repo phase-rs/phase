@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you control two or more tapped creatures, you may discard your hand. If you do, draw two cards.",
       "mode": "Phase",
-      "params": {
-        "IsPresent": "Creature.YouCtrl+tapped",
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw",
-        "PresentCompare": "GE2",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, you may discard your hand. If you do, draw two cards."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

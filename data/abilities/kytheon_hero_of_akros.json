@@ -1,149 +1,102 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "2 W",
+            "type": "Mana"
+          },
+          "description": "NICKNAME gains indestructible until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 0,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "2 W"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "KW": "Indestructible",
-            "SpellDescription": "NICKNAME gains indestructible until end of turn."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At end of combat, if CARDNAME and at least two other creatures attacked this combat, exile NICKNAME, then return him to the battlefield transformed under his owner's control.",
           "mode": "Phase",
-          "params": {
-            "Phase": "EndCombat",
-            "IsPresent": "Card.Self+attackedThisCombat GE3",
-            "Execute": "TrigExile",
-            "TriggerDescription": "At end of combat, if CARDNAME and at least two other creatures attacked this combat, exile NICKNAME, then return him to the battlefield transformed under his owner's control."
-          }
+          "phase": "EndCombat"
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "DelayedTrigger",
-            "params": {
-              "UpcomingTurn": "True",
-              "TgtPrompt": "Select target creature an opponent controls",
-              "Static": "True",
-              "SpellDescription": "Up to one target creature an opponent controls attacks CARDNAME during its controller's next turn if able.",
-              "TargetMin": "0",
-              "TargetMax": "1",
-              "Mode": "Phase",
-              "ValidTgts": "Creature.OppCtrl",
-              "Phase": "Upkeep->",
-              "ValidPlayer": "Player.controlsCard.IsTriggerRemembered",
-              "RememberObjects": "Targeted",
-              "Execute": "TrigEffect",
-              "Planeswalker": "True"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 2
+            "amount": 2,
+            "type": "Loyalty"
           },
+          "description": "Up to one target creature an opponent controls attacks CARDNAME during its controller's next turn if able.",
+          "effect": {
+            "description": "Up to one target creature an opponent controls attacks CARDNAME during its controller's next turn if able.",
+            "name": "DelayedTrigger",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "UpcomingTurn": "True",
-            "TgtPrompt": "Select target creature an opponent controls",
-            "Static": "True",
-            "SpellDescription": "Up to one target creature an opponent controls attacks CARDNAME during its controller's next turn if able.",
-            "TargetMin": "0",
-            "TargetMax": "1",
-            "Mode": "Phase",
-            "ValidTgts": "Creature.OppCtrl",
-            "Phase": "Upkeep->",
-            "ValidPlayer": "Player.controlsCard.IsTriggerRemembered",
-            "RememberObjects": "Targeted",
-            "Execute": "TrigEffect",
-            "Planeswalker": "True"
-          }
+          "target_prompt": "Select target creature an opponent controls"
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 1,
+            "type": "Loyalty"
+          },
+          "description": "Until your next turn, target creature gains indestructible. Untap that creature.",
+          "duration": "UntilYourNextTurn",
           "effect": {
-            "type": "Pump",
             "power": 0,
-            "toughness": 0,
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Duration": "UntilYourNextTurn",
-            "KW": "Indestructible",
-            "Planeswalker": "True",
-            "SubAbility": "DBUntap",
-            "SpellDescription": "Until your next turn, target creature gains indestructible. Untap that creature."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 0,
+            "type": "Loyalty"
+          },
+          "description": "Until end of turn, CARDNAME becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
           "effect": {
-            "type": "Animate",
             "power": 4,
+            "target": {
+              "type": "Any"
+            },
             "toughness": 4,
+            "type": "Animate",
             "types": [
               "Creature",
               "Human",
               "Soldier"
-            ],
-            "target": {
-              "type": "Any"
-            }
+            ]
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Keywords": "Indestructible",
-            "SubAbility": "DBPrevent",
-            "Ultimate": "True",
-            "SpellDescription": "Until end of turn, CARDNAME becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have protection from the chosen color.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Sliver",
-        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
-        "Description": "All Slivers have protection from the chosen color."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.ChosenColor:chosenColor",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

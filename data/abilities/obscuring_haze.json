@@ -2,41 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Prevent all damage that would be dealt this turn by creatures your opponents control.",
-          "ReplacementEffects": "RPrevent",
-          "AILogic": "Fog"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all damage that would be dealt this turn by creatures your opponents control.",
-        "ReplacementEffects": "RPrevent",
-        "AILogic": "Fog"
-      }
+      "description": "Prevent all damage that would be dealt this turn by creatures your opponents control.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "IsCommander"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a commander, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "0",
-        "Description": "If you control a commander, you may cast this spell without paying its mana cost.",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Card.IsCommander+YouCtrl",
-        "ValidSA": "Spell",
-        "ValidPlayer": "You",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

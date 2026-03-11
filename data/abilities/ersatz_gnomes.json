@@ -2,57 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target spell becomes colorless.",
+      "duration": "Permanent",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "SpellDescription": "Target spell becomes colorless.",
-        "TgtZone": "Stack",
-        "Duration": "Permanent",
-        "TgtPrompt": "Select target spell to make colorless",
-        "OverwriteColors": "True",
-        "Colors": "Colorless"
-      }
+      "target_prompt": "Select target spell to make colorless"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [],
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target permanent becomes colorless until end of turn.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target permanent becomes colorless until end of turn.",
-        "Colors": "Colorless",
-        "OverwriteColors": "True",
-        "TgtPrompt": "Select target permanent to make colorless"
-      }
+      "target_prompt": "Select target permanent to make colorless"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

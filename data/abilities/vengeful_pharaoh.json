@@ -1,22 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever combat damage is dealt to you or a planeswalker you control, if CARDNAME is in your graveyard, destroy target attacking creature, then put CARDNAME on top of your library.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigDestroy",
-        "ValidSource": "Card",
-        "TriggerDescription": "Whenever combat damage is dealt to you or a planeswalker you control, if CARDNAME is in your graveyard, destroy target attacking creature, then put CARDNAME on top of your library.",
-        "ValidTarget": "You,Planeswalker.YouCtrl",
-        "CombatDamage": "True",
-        "TriggerZones": "Graveyard",
-        "PresentZone": "Graveyard",
-        "IsPresent": "Card.StrictlySelf"
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You,Planeswalker",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

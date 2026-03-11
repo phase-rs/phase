@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by Knights or Walls.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.Knight,Creature.Wall",
-        "ValidAttacker": "Creature.Self",
-        "Description": "CARDNAME can't be blocked by Knights or Walls."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

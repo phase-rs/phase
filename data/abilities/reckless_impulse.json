@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 2,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "ChangeNum": "All",
-        "Imprint": "True",
-        "Defined": "You",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Exile the top two cards of your library."
-      }
+      "description": "Exile the top two cards of your library.",
+      "effect": {
+        "count": 2,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

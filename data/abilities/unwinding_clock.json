@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap all artifacts you control during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "ValidCard": "Artifact.YouCtrl",
-        "Description": "Untap all artifacts you control during each other player's untap step."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

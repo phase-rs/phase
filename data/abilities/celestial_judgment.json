@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "For each different power among creatures on the battlefield, choose a creature with that power. Destroy each creature not chosen this way.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "EachDifferentPower": "True",
-        "SubAbility": "DBDestroy",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "For each different power among creatures on the battlefield, choose a creature with that power. Destroy each creature not chosen this way."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

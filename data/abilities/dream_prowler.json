@@ -1,20 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Attacking"
+                }
+              ],
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't be blocked as long as it's attacking alone.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "PresentCompare": "EQ0",
-        "Description": "CARDNAME can't be blocked as long as it's attacking alone.",
-        "ValidAttacker": "Card.Self+attacking",
-        "IsPresent": "Card.Other+attacking"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

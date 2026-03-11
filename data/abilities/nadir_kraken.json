@@ -1,19 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw a card, you may pay {1}. If you do, put a +1/+1 counter on CARDNAME and create a 1/1 blue Tentacle creature token.",
       "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever you draw a card, you may pay {1}. If you do, put a +1/+1 counter on CARDNAME and create a 1/1 blue Tentacle creature token.",
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

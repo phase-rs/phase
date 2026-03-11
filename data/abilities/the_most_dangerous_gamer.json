@@ -1,48 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, open an Attraction.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, open an Attraction.",
-        "Origin": "Any",
-        "Execute": "DBOpen",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, open an Attraction.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "DBOpen",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, open an Attraction.",
-        "ValidCard": "Card.Self",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you open an Attraction, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever you open an Attraction, put a +1/+1 counter on CARDNAME.",
-        "Origin": "AttractionDeck",
-        "Execute": "DBCounter",
-        "Destination": "Battlefield",
-        "ValidCard": "Attraction.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "origin": "AttractionDeck",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Attraction",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you claim the prize of an Attraction, destroy target permanent.",
       "mode": "ClaimPrize",
-      "params": {
-        "ValidCard": "Attraction.YouCtrl",
-        "TriggerDescription": "Whenever you claim the prize of an Attraction, destroy target permanent.",
-        "Execute": "DBDestroy",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Attraction",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,28 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Type": "Spell",
-        "ValidCard": "Enchantment",
-        "Amount": "1",
-        "Description": "Enchantment spells you cast cost {1} less to cast."
-      }
+      "description": "Enchantment spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Unlock costs you pay cost {1} less.",
-        "Activator": "You",
-        "ValidSpell": "Static.Unlock",
-        "Amount": "1"
-      }
+      "description": "Unlock costs you pay cost {1} less.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

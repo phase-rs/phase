@@ -2,75 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Create two 0/1 black Thrull creature tokens.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "b_0_1_thrull",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create two 0/1 black Thrull creature tokens.",
-        "Planeswalker": "True",
-        "TokenAmount": "2"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "You may sacrifice another creature or planeswalker. If you do, draw two cards, then draw another card if the sacrificed permanent was a commander.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SacMessage": "creature or planeswalker",
-        "RememberSacrificed": "True",
-        "Planeswalker": "True",
-        "Optional": "True",
-        "SubAbility": "DBDraw",
-        "SacValid": "Creature.Other,Planeswalker.Other",
-        "SpellDescription": "You may sacrifice another creature or planeswalker. If you do, draw two cards, then draw another card if the sacrificed permanent was a commander."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -10,
+        "type": "Loyalty"
+      },
+      "description": "Gain control of all commanders. Put all commanders from the commander zone onto the battlefield under your control.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -10
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Gain control of all commanders. Put all commanders from the commander zone onto the battlefield under your control.",
-        "NewController": "You",
-        "SubAbility": "DBChangeZone",
-        "Ultimate": "True",
-        "AllValid": "Card.IsCommander"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

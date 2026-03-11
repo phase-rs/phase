@@ -2,53 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo W U",
-        "params": {
-          "Amount": "1",
-          "SpellDescription": "Add {W} or {U}. Put a depletion counter on CARDNAME.",
-          "SubAbility": "AddCounter"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Add {W} or {U}. Put a depletion counter on CARDNAME.",
-        "SubAbility": "AddCounter"
-      }
+      "description": "Add {W} or {U}. Put a depletion counter on CARDNAME.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigSubCounter",
-        "TriggerDescription": "At the beginning of your upkeep, remove a depletion counter from CARDNAME.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
+      "description": "CARDNAME doesn't untap during your untap step if it has a depletion counter on it.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "CARDNAME doesn't untap during your untap step if it has a depletion counter on it.",
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self+counters_GE1_DEPLETION",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "At the beginning of your upkeep, remove a depletion counter from CARDNAME.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

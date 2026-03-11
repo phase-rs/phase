@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this artifact enters, conjure a card named Hangarback Walker onto the battlefield, then put a +1/+1 counter on it.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigConjure"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddTrigger": "PhaseTrig",
-        "Condition": "MaxSpeed",
-        "Description": "Max speed — At the beginning of your end step, put a +1/+1 counter on each artifact creature and/or Vehicle you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — At the beginning of your end step, put a +1/+1 counter on each artifact creature and/or Vehicle you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this artifact enters, conjure a card named Hangarback Walker onto the battlefield, then put a +1/+1 counter on it.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

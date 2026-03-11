@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Coven — At the beginning of combat on your turn, if you control three or more creatures with different powers, CARDNAME can't be blocked by creatures with power 2 or less this turn.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "SVarCompare": "GE3",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Coven — At the beginning of combat on your turn, if you control three or more creatures with different powers, CARDNAME can't be blocked by creatures with power 2 or less this turn.",
-        "Phase": "BeginCombat",
-        "Execute": "TrigEffect",
-        "CheckSVar": "X"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

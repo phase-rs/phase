@@ -1,21 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Battlefield",
+      "condition": {
+        "compare": "EQY",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Nonartifact creatures get +2/+2 as long as they all share a color.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "CheckSVar": "X",
-        "Description": "Nonartifact creatures get +2/+2 as long as they all share a color.",
-        "Affected": "Creature.nonArtifact",
-        "AddPower": "2",
-        "SVarCompare": "EQY",
-        "AffectedZone": "Battlefield"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

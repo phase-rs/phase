@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "SpellDescription": "Discard a card at random. If you do, CARDNAME deals damage equal to that card's mana value to each creature. You may repeat this process any number of times.",
-          "StackDescription": "SpellDescription",
-          "RepeatSubAbility": "DBDiscard",
-          "RepeatOptional": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Discard a card at random. If you do, CARDNAME deals damage equal to that card's mana value to each creature. You may repeat this process any number of times.",
-        "StackDescription": "SpellDescription",
-        "RepeatSubAbility": "DBDiscard",
-        "RepeatOptional": "True"
-      }
+      "description": "Discard a card at random. If you do, CARDNAME deals damage equal to that card's mana value to each creature. You may repeat this process any number of times.",
+      "effect": {
+        "description": "Discard a card at random. If you do, CARDNAME deals damage equal to that card's mana value to each creature. You may repeat this process any number of times.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

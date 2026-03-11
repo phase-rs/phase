@@ -2,36 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME."
-      }
+      "description": "Regenerate CARDNAME.",
+      "effect": {
+        "description": "Regenerate CARDNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
-      "mode": "Phase",
-      "params": {
-        "CheckSVar": "X",
-        "TriggerDescription": "At the beginning of each end step, if CARDNAME regenerated this turn, create a 0/1 blue Starfish creature token for each time it regenerated this turn.",
-        "Execute": "TrigToken",
-        "Phase": "End of Turn"
-      }
+      "description": "At the beginning of each end step, if CARDNAME regenerated this turn, create a 0/1 blue Starfish creature token for each time it regenerated this turn.",
+      "mode": "Phase"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

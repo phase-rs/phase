@@ -2,26 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Graveyard"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DestinationZone2": "Hand",
-        "ChangeValid": "Card",
-        "ChangeNum": "1",
-        "Reveal": "True",
-        "Choser": "Player.Opponent",
-        "SpellDescription": "Reveal the top three cards of your library. An opponent chooses one of them. Put that card into your graveyard and the rest into your hand."
-      }
+      "description": "Reveal the top three cards of your library. An opponent chooses one of them. Put that card into your graveyard and the rest into your hand.",
+      "effect": {
+        "count": 3,
+        "destination": "Graveyard",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

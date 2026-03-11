@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "ValidDescription": "nonland",
-          "Valid": "Card.nonLand",
-          "RevealedDestination": "Hand",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "nonland",
-        "Valid": "Card.nonLand",
-        "RevealedDestination": "Hand",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand."
-      }
+      "description": "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

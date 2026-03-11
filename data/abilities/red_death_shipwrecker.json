@@ -2,33 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Goad",
-        "params": {
-          "TgtPrompt": "Select target creature an opponent controls",
-          "ValidTgts": "Creature.OppCtrl",
-          "SubAbility": "DBDraw",
-          "PrecostDesc": "Alluring Eyes —",
-          "SpellDescription": "Goad target creature an opponent controls. That player draws a card. You add {R}. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Goad target creature an opponent controls. That player draws a card. You add {R}. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+      "effect": {
+        "description": "Goad target creature an opponent controls. That player draws a card. You add {R}. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+        "name": "Goad",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature an opponent controls",
-        "ValidTgts": "Creature.OppCtrl",
-        "SubAbility": "DBDraw",
-        "PrecostDesc": "Alluring Eyes —",
-        "SpellDescription": "Goad target creature an opponent controls. That player draws a card. You add {R}. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
-      }
+      "target_prompt": "Select target creature an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.nonCreature",
-        "Activator": "You",
-        "Amount": "1",
-        "Description": "Noncreature spells you cast cost {1} less to cast.",
-        "Type": "Spell"
-      }
+      "description": "Noncreature spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've cast two or more noncreature spells this turn, CARDNAME has double strike.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "AddKeyword": "Double Strike",
-        "SVarCompare": "GE2",
-        "Description": "As long as you've cast two or more noncreature spells this turn, CARDNAME has double strike.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

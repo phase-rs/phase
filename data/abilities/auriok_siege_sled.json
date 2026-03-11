@@ -2,63 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MustBlock",
-        "params": {
-          "SpellDescription": "Target artifact creature blocks CARDNAME this turn if able.",
-          "TgtPrompt": "Select target artifact creature to block this creature",
-          "ValidTgts": "Creature.Artifact"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Target artifact creature blocks CARDNAME this turn if able.",
+      "effect": {
+        "description": "Target artifact creature blocks CARDNAME this turn if able.",
+        "name": "MustBlock",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target artifact creature blocks CARDNAME this turn if able.",
-        "TgtPrompt": "Select target artifact creature to block this creature",
-        "ValidTgts": "Creature.Artifact"
-      }
+      "target_prompt": "Select target artifact creature to block this creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
-          "TgtPrompt": "Select target artifact creature that can't block this creature this turn",
-          "IsCurse": "True",
-          "ValidTgts": "Creature.Artifact",
-          "RememberObjects": "ThisTargetedCard",
-          "ForgetOnMoved": "Battlefield",
-          "StaticAbilities": "KWPump",
-          "Duration": "UntilHostLeavesPlayOrEOT",
-          "SpellDescription": "Target artifact creature can't block CARDNAME this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
+      "description": "Target artifact creature can't block CARDNAME this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
-        "TgtPrompt": "Select target artifact creature that can't block this creature this turn",
-        "IsCurse": "True",
-        "ValidTgts": "Creature.Artifact",
-        "RememberObjects": "ThisTargetedCard",
-        "ForgetOnMoved": "Battlefield",
-        "StaticAbilities": "KWPump",
-        "Duration": "UntilHostLeavesPlayOrEOT",
-        "SpellDescription": "Target artifact creature can't block CARDNAME this turn."
-      }
+      "target_prompt": "Select target artifact creature that can't block this creature this turn"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

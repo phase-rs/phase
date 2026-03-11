@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a Goblin deals combat damage to a player, that player discards a card.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever a Goblin deals combat damage to a player, that player discards a card.",
-        "ValidSource": "Goblin",
-        "CombatDamage": "True",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDiscard"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Goblin",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

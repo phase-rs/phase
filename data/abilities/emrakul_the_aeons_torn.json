@@ -1,37 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Any",
-        "Execute": "TrigShuffle",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigAddTurn",
-        "TriggerDescription": "When you cast CARDNAME, take an extra turn after this one.",
-        "ValidCard": "Card.Self"
+      "description": "This spell can't be countered.",
+      "event": "Counter",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Counter",
-      "params": {
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "Layer": "CantHappen"
+      "description": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "When you cast CARDNAME, take an extra turn after this one.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

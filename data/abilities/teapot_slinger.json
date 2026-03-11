@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you expend 4, CARDNAME deals 2 damage to each opponent. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
       "mode": "ManaExpend",
-      "params": {
-        "Player": "You",
-        "Amount": "4",
-        "Execute": "DealDamage",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you expend 4, CARDNAME deals 2 damage to each opponent. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

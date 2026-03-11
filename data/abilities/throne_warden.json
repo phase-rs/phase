@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you're the monarch, put a +1/+1 counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you're the monarch, put a +1/+1 counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "CheckDefinedPlayer": "You.isMonarch"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

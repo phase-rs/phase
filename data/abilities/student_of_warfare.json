@@ -1,31 +1,85 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 2-6 3/3 First strike",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "3",
-        "Affected": "Card.Self",
-        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE6_LEVEL",
-        "SetPower": "3",
-        "AddKeyword": "First Strike",
-        "Description": "LEVEL 2-6 3/3 First strike"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 7+ 4/4 Double strike",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "4",
-        "IsPresent": "Card.Self+counters_GE7_LEVEL",
-        "Description": "LEVEL 7+ 4/4 Double strike",
-        "AddKeyword": "Double Strike",
-        "SetPower": "4",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

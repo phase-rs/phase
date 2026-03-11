@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, look at the top two cards of your library. Put one into your hand and the other into your graveyard.",
       "mode": "TurnFaceUp",
-      "params": {
-        "Execute": "TrigDig",
-        "TriggerDescription": "When CARDNAME is turned face up, look at the top two cards of your library. Put one into your hand and the other into your graveyard.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,32 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDealtOnce",
-      "params": {
-        "CombatDamage": "True",
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever a creature you control deals combat damage during your turn, put that many +1/+1 counters on it. (It must survive to get the counters.)",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "PlayerTurn": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "Affected": "Card.Self",
-        "AffectedZone": "Graveyard",
-        "RaiseCost": "RemoveAnyCounter<6/Any/Creature>",
-        "MayPlay": "True",
-        "Description": "You may cast this card from your graveyard by removing six counters from among creatures you control in addition to paying its other costs."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast this card from your graveyard by removing six counters from among creatures you control in addition to paying its other costs.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage during your turn, put that many +1/+1 counters on it. (It must survive to get the counters.)",
+      "mode": "DamageDealtOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

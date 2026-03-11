@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ExchangeControl",
-        "params": {
-          "ValidTgts": "Creature",
-          "TargetMin": "2",
-          "SpellDescription": "Exchange control of two target creatures.",
-          "TargetMax": "2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "TargetMin": "2",
-        "SpellDescription": "Exchange control of two target creatures.",
-        "TargetMax": "2"
-      }
+      "description": "Exchange control of two target creatures.",
+      "effect": {
+        "description": "Exchange control of two target creatures.",
+        "name": "ExchangeControl",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

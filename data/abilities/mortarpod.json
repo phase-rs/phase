@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+1 and has \"Sacrifice this creature: This creature deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "AddToughness": "1",
-        "AddAbility": "Damage",
-        "Description": "Equipped creature gets +0/+1 and has \"Sacrifice this creature: This creature deals 1 damage to any target.\""
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

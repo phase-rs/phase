@@ -1,25 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Snake"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Snake creatures you control get +0/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "Description": "Other Snake creatures you control get +0/+1.",
-        "Affected": "Creature.Snake+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Shaman"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Shamans you control have \"{T}: Add {G}{G}.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Shaman+YouCtrl",
-        "AddAbility": "Mana",
-        "Description": "Shamans you control have \"{T}: Add {G}{G}.\""
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

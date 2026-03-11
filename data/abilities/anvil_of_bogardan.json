@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each player's draw step, that player draws an additional card, then discards a card.",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Phase": "Draw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetMaxHandSize": "Unlimited",
-        "Description": "Players have no maximum hand size.",
-        "Affected": "Player"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Players have no maximum hand size.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's draw step, that player draws an additional card, then discards a card.",
+      "mode": "Phase",
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

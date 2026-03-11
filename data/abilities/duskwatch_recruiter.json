@@ -1,74 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "count": 3,
-            "destination": ""
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "2 G"
+            "cost": "2 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeNum": "1",
-            "ChangeValid": "Creature",
-            "SpellDescription": "Look at the top three cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
-            "Optional": "True"
-          }
+          "description": "Look at the top three cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+          "effect": {
+            "count": 3,
+            "destination": "",
+            "type": "Dig"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "WerewolfTransformCondition": "True",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "Execute": "TrigTransform"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
-            "Execute": "TrigTransform",
-            "WerewolfUntransformCondition": "True",
-            "Phase": "Upkeep",
-            "TriggerZones": "Battlefield"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "ValidCard": "Creature",
-            "Activator": "You",
-            "Amount": "1",
-            "Description": "Creature spells you cast cost {1} less to cast.",
-            "Type": "Spell"
-          }
+          "description": "Creature spells you cast cost {1} less to cast.",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

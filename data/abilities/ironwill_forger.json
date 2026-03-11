@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Lieutenant — At the beginning of combat on your turn, if your control your commander, target nonlegendary creature you control gains myriad until end of turn.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
-        "TriggerDescription": "Lieutenant — At the beginning of combat on your turn, if your control your commander, target nonlegendary creature you control gains myriad until end of turn."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

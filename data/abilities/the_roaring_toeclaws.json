@@ -1,18 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another creature you control with mana value five or greater becomes untapped, put +1/+1 counters on it equal to its power.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever CARDNAME or another creature you control with mana value five or greater becomes untapped, put +1/+1 counters on it equal to its power.",
-        "ValidCard": "Card.Self,Creature.Other+YouCtrl+cmcGE5",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

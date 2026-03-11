@@ -2,42 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other+!token+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R W"
+        "cost": "1 R W",
+        "type": "Mana"
       },
+      "description": "Another target nontoken creature you control gains first strike and double team until end of turn. Activate only as a sorcery and only once.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "KW": "First Strike & Double team",
-        "SpellDescription": "Another target nontoken creature you control gains first strike and double team until end of turn. Activate only as a sorcery and only once.",
-        "GameActivationLimit": "1",
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Select another target nontoken creature you control"
-      }
+      "target_prompt": "Select another target nontoken creature you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each combat, each creature you control gets +1/+1 until end of turn if it has the same name as another creature you control or a creature card in your graveyard.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigRepeatEach",
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of each combat, each creature you control gets +1/+1 until end of turn if it has the same name as another creature you control or a creature card in your graveyard.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

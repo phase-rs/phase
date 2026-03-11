@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.",
       "event": {
         "Other": "CreateToken"
-      },
-      "params": {
-        "EffectOnly": "True",
-        "ActiveZones": "Battlefield",
-        "ValidToken": "Card.YouCtrl",
-        "ReplaceWith": "DoubleToken",
-        "Description": "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead."
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

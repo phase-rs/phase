@@ -1,27 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "2",
-        "AddPower": "2",
-        "Description": "Equipped creature gets +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "description": "As long as equipped creature has defender, it can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "ValidCard": "Card.EquippedBy+withDefender",
-        "Description": "As long as equipped creature has defender, it can attack as though it didn't have defender."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

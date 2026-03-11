@@ -2,44 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Animate",
-        "power": null,
-        "toughness": null,
-        "types": [
-          "Goat"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonGoat"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target non-Goat creature perpetually becomes a Goat in addition to its other types. Then conjure a card named Goatnap into your hand. Activate only as a sorcery.",
+      "effect": {
+        "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": [
+          "Goat"
+        ]
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Perpetual",
-        "SpellDescription": "Target non-Goat creature perpetually becomes a Goat in addition to its other types. Then conjure a card named Goatnap into your hand. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "SubAbility": "DBConjure",
-        "TgtPrompt": "Select target non-Goat creature"
-      }
+      "target_prompt": "Select target non-Goat creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Spells you cast have affinity for Goats.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.wasCastByYou",
-        "AffectedZone": "Stack",
-        "AddKeyword": "Affinity:Goat",
-        "Description": "Spells you cast have affinity for Goats."
-      }
+      "modifications": [
+        {
+          "keyword": "Affinity:Goat",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

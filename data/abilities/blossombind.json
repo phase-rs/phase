@@ -1,42 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "TriggerDescription": "When this Aura enters, tap enchanted creature.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "description": "Enchanted creature can't become untapped and can't have counters put on it.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
+      "description": "Enchanted creature can't become untapped and can't have counters put on it.",
       "mode": {
         "Other": "CantPutCounter"
-      },
-      "params": {
-        "ValidCard": "Card.EnchantedBy",
-        "Description": "Enchanted creature can't become untapped and can't have counters put on it.",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Card.EnchantedBy",
-        "ActiveZones": "Battlefield",
-        "Description": "Enchanted creature can't become untapped and can't have counters put on it."
+      "description": "When this Aura enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Nitro-9 — Whenever CARDNAME attacks, you may sacrifice an artifact. When you do, put a +1/+1 counter on CARDNAME, then it fights up to one target creature defending player controls.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Nitro-9 — Whenever CARDNAME attacks, you may sacrifice an artifact. When you do, put a +1/+1 counter on CARDNAME, then it fights up to one target creature defending player controls.",
-        "Execute": "TrigImmediateTrig",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

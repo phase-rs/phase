@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Frenzied Rampage — At the beginning of combat on your turn, choose an opponent at random. CARDNAME attacks that player this combat if able.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Frenzied Rampage — At the beginning of combat on your turn, choose an opponent at random. CARDNAME attacks that player this combat if able.",
-        "ValidPlayer": "You",
-        "Execute": "TrigChoose"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME dies, it deals 4 damage to target opponent chosen at random.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChooseBis",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, it deals 4 damage to target opponent chosen at random.",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, equipped creatures you control have indestructible.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+equipped",
-        "AddKeyword": "Indestructible",
-        "Description": "During your turn, equipped creatures you control have indestructible.",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

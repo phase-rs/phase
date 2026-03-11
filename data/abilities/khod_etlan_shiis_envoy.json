@@ -1,26 +1,71 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "All lands are Islands in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Island",
-        "Description": "All lands are Islands in addition to their other types.",
-        "Affected": "Land"
-      }
+      "modifications": [
+        {
+          "core_type": "Island",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Homarid",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Camarid.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Octopus.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Nautilid.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Merfolk.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Homarids, Camarids, Octopuses, Nautilids, and Merfolk you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Homarid.Other+YouCtrl,Camarid.Other+YouCtrl,Octopus.Other+YouCtrl,Nautilid.Other+YouCtrl,Merfolk.Other+YouCtrl",
-        "AddToughness": "1",
-        "Description": "Other Homarids, Camarids, Octopuses, Nautilids, and Merfolk you control get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

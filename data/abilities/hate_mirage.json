@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "SpellDescription": "Choose up to two target creatures you don't control. For each of those creatures, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.",
-          "AtEOT": "Exile",
-          "ValidTgts": "Creature.YouDontCtrl",
-          "PumpKeywords": "Haste",
-          "TargetMax": "2",
-          "TgtPrompt": "Select up to two target creatures you don't control",
-          "TargetMin": "0"
-        }
-      },
       "cost": null,
+      "description": "Choose up to two target creatures you don't control. For each of those creatures, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.",
+      "effect": {
+        "description": "Choose up to two target creatures you don't control. For each of those creatures, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose up to two target creatures you don't control. For each of those creatures, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.",
-        "AtEOT": "Exile",
-        "ValidTgts": "Creature.YouDontCtrl",
-        "PumpKeywords": "Haste",
-        "TargetMax": "2",
-        "TgtPrompt": "Select up to two target creatures you don't control",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select up to two target creatures you don't control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

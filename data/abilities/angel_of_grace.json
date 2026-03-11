@@ -2,52 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "Defined": "You",
-          "ActivationZone": "Graveyard",
-          "LifeAmount": "10",
-          "SpellDescription": "Your life total becomes 10."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 W W"
+            "cost": "4 W W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "ActivationZone": "Graveyard",
-        "LifeAmount": "10",
-        "SpellDescription": "Your life total becomes 10."
-      }
+      "description": "Your life total becomes 10.",
+      "effect": {
+        "description": "Your life total becomes 10.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, until end of turn, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, until end of turn, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigEffect"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

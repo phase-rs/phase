@@ -2,36 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select X target creatures",
-          "TargetMin": "X",
-          "TargetMax": "X",
-          "ValidTgts": "Creature",
-          "RememberObjects": "Targeted",
-          "ReplacementEffects": "RPrevent",
-          "ForgetOnMoved": "Battlefield",
-          "SpellDescription": "Prevent all combat damage X target creatures would deal this turn."
-        }
-      },
       "cost": null,
+      "description": "Prevent all combat damage X target creatures would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select X target creatures",
-        "TargetMin": "X",
-        "TargetMax": "X",
-        "ValidTgts": "Creature",
-        "RememberObjects": "Targeted",
-        "ReplacementEffects": "RPrevent",
-        "ForgetOnMoved": "Battlefield",
-        "SpellDescription": "Prevent all combat damage X target creatures would deal this turn."
-      }
+      "target_prompt": "Select X target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

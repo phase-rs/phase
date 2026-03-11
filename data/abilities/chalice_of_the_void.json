@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player casts a spell with mana value equal to the number of charge counters on CARDNAME, counter that spell.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.cmcEQY",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounter",
-        "TriggerDescription": "Whenever a player casts a spell with mana value equal to the number of charge counters on CARDNAME, counter that spell.",
-        "ValidActivatingPlayer": "Player"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

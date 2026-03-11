@@ -1,29 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Chef's Knife — During your turn, this creature has first strike and deathtouch.",
-        "Affected": "Card.Self",
-        "AddKeyword": "First Strike & Deathtouch",
-        "Condition": "PlayerTurn"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This creature enters tapped with a stun counter on it. (If it would become untapped, remove a stun counter from it instad.)",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplaceWith": "EntersTapped",
-        "ReplacementResult": "Updated",
-        "Description": "This creature enters tapped with a stun counter on it. (If it would become untapped, remove a stun counter from it instad.)"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Chef's Knife — During your turn, this creature has first strike and deathtouch.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

@@ -1,40 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "NICKNAME has lifelink and haste as long as an opponent controls no creatures.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When NICKNAME enters, you may pay 1 life. When you do, each player discards a card and sacrifices a creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME enters, you may pay 1 life. When you do, each player discards a card and sacrifices a creature.",
-        "Execute": "DBTrigger"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a player discards a card, NICKNAME perpetually gets +1/+0.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player discards a card, NICKNAME perpetually gets +1/+0.",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "Description": "NICKNAME has lifelink and haste as long as an opponent controls no creatures.",
-        "EffectZone": "Battlefield",
-        "Affected": "Card.Self",
-        "AddKeyword": "Lifelink & Haste",
-        "SVarCompare": "EQ0"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

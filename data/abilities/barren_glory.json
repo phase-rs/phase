@@ -1,27 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control no permanents other than CARDNAME and have no cards in hand, you win the game.",
       "mode": "Phase",
-      "params": {
-        "IsPresent2": "Card",
-        "IsPresent": "Card.Other",
-        "ValidPlayer": "You",
-        "PresentCompare": "EQ0",
-        "PresentPlayer": "You",
-        "PresentZone2": "Hand",
-        "Execute": "TrigWin",
-        "TriggerDescription": "At the beginning of your upkeep, if you control no permanents other than CARDNAME and have no cards in hand, you win the game.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "PresentCompare2": "EQ0",
-        "PresentZone": "Battlefield",
-        "PresentPlayer2": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

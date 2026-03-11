@@ -2,83 +2,78 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Scry",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 1.",
-        "Planeswalker": "True"
-      }
+      "description": "Scry 1.",
+      "effect": {
+        "count": 1,
+        "type": "Scry"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "gu_0_0_fractal",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBPutCounter",
-        "SpellDescription": "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it.",
-        "RememberTokens": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -8,
+        "type": "Loyalty"
+      },
+      "description": "Search your library for an instant or sorcery card that shares a color with this planeswalker, exile that card, then shuffle. You may cast that card without paying its mana cost.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Exile",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -8
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPlay",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "ChangeType": "Instant.SharesColorWith,Sorcery.SharesColorWith",
-        "SpellDescription": "Search your library for an instant or sorcery card that shares a color with this planeswalker, exile that card, then shuffle. You may cast that card without paying its mana cost.",
-        "ChangeNum": "1",
-        "RememberChanged": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Affected": "Planeswalker.Other+YouCtrl",
-        "GainsAbilitiesOfDefined": "Self",
-        "GainsValidAbilities": "Activated.Loyalty",
-        "Description": "Each other planeswalker you control has the loyalty abilities of CARDNAME."
-      }
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Planeswalker",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other planeswalker you control has the loyalty abilities of CARDNAME.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,17 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Artifact",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Creature"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Protector — Other artifact creatures you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Affected": "Artifact.Creature+YouCtrl+Other",
-        "Description": "Protector — Other artifact creatures you control have hexproof."
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

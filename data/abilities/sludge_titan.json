@@ -1,29 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, mill five cards. You may put a creature card and/or a land card from among them into your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigMill",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill five cards. You may put a creature card and/or a land card from among them into your hand.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, mill five cards. You may put a creature card and/or a land card from among them into your hand.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigMill",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill five cards. You may put a creature card and/or a land card from among them into your hand."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

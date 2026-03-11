@@ -1,43 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a Wicked Role token attached to target creature you control. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "role_wicked",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "ValidTgts": "Creature.YouCtrl",
-            "TgtPrompt": "Select target creature you control",
-            "TokenOwner": "You",
-            "SpellDescription": "Create a Wicked Role token attached to target creature you control. (Then exile this card. You may cast the creature later from exile.)",
-            "AttachedTo": "Targeted"
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

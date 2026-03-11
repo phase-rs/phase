@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes plotted, target creature gets +3/+2 and gains trample until end of turn.",
       "mode": "BecomesPlotted",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME becomes plotted, target creature gets +3/+2 and gains trample until end of turn.",
-        "TriggerZones": "Exile",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

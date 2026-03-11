@@ -1,40 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "When CARDNAME deals combat damage to an opponent, exile the top card of that player's library. You may cast that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "When CARDNAME deals combat damage to an opponent, exile the top card of that player's library. You may cast that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDig",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever you cast a spell or play a land you don't own, copy it.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.YouDontOwn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopySpell",
-        "TriggerDescription": "Whenever you cast a spell or play a land you don't own, copy it.",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a spell or play a land you don't own, copy it.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.YouCtrl+YouDontOwn",
-        "Execute": "TrigCopyLand",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever you cast a spell or play a land you don't own, copy it."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouDontOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

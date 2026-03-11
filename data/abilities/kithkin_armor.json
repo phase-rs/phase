@@ -2,45 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card,Emblem",
-          "SubAbility": "DBEffect",
-          "AILogic": "NeedsPrevention",
-          "SpellDescription": "The next time a source of your choice would deal damage to enchanted creature this turn, prevent that damage."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card,Emblem",
-        "SubAbility": "DBEffect",
-        "AILogic": "NeedsPrevention",
-        "SpellDescription": "The next time a source of your choice would deal damage to enchanted creature this turn, prevent that damage."
-      }
+      "description": "The next time a source of your choice would deal damage to enchanted creature this turn, prevent that damage.",
+      "effect": {
+        "description": "The next time a source of your choice would deal damage to enchanted creature this turn, prevent that damage.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't be blocked by creatures with power 3 or greater.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.powerGE3",
-        "ValidAttacker": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't be blocked by creatures with power 3 or greater."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

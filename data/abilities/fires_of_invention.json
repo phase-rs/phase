@@ -1,36 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "You.NonActive",
-        "Description": "You can cast spells only during your turn and you can cast no more than two spells each turn."
-      }
+      "description": "You can cast spells only during your turn and you can cast no more than two spells each turn.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "You",
-        "NumLimitEachTurn": "2",
-        "Secondary": "True",
-        "Description": "You can cast spells only during your turn and you can cast no more than two spells each turn."
-      }
+      "description": "You can cast spells only during your turn and you can cast no more than two spells each turn.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Hand,Graveyard,Exile,Command,Library",
-        "MayPlayDontGrantZonePermissions": "True",
-        "MayPlay": "True",
-        "Affected": "Card.nonLand+cmcLEX",
-        "MayPlayWithoutManaCost": "True",
-        "Description": "You may cast spells with mana value less than or equal to the number of lands you control without paying their mana costs."
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Command,Library",
+      "description": "You may cast spells with mana value less than or equal to the number of lands you control without paying their mana costs.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

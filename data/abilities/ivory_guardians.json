@@ -1,19 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Red"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Creatures named Ivory Guardians get +1/+1 as long as an opponent controls a nontoken red permanent.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "IsPresent": "Permanent.Red+!token+OppCtrl",
-        "Affected": "Creature.namedIvory Guardians",
-        "Description": "Creatures named Ivory Guardians get +1/+1 as long as an opponent controls a nontoken red permanent."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

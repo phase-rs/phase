@@ -1,53 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigReturn",
-            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under its owner's control.",
-            "Destination": "Graveyard",
-            "Origin": "Battlefield",
-            "ValidCard": "Card.Self"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Vampire"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other Vampires you control get +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "1",
-            "AddToughness": "1",
-            "Description": "Other Vampires you control get +1/+1.",
-            "Affected": "Creature.Vampire+Other+YouCtrl"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "When CARDNAME dies, return it to the battlefield transformed under its owner's control.",
+          "destination": "Graveyard",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, create a 1/1 white and black Vampire creature token with lifelink and put a bloodline counter on CARDNAME. Then if there are three or more bloodline counters on it, remove those counters and transform it.",
           "mode": "Phase",
-          "params": {
-            "ValidPlayer": "You",
-            "Execute": "TrigToken",
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "TriggerDescription": "At the beginning of your upkeep, create a 1/1 white and black Vampire creature token with lifelink and put a bloodline counter on CARDNAME. Then if there are three or more bloodline counters on it, remove those counters and transform it."
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

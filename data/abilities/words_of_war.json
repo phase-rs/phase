@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ImprintCards": "Self",
-          "ValidTgts": "Any",
-          "RememberObjects": "Targeted",
-          "ReplacementEffects": "DrawReplace",
-          "SpellDescription": "The next time you would draw a card this turn, CARDNAME deals 2 damage to any target instead."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ImprintCards": "Self",
-        "ValidTgts": "Any",
-        "RememberObjects": "Targeted",
-        "ReplacementEffects": "DrawReplace",
-        "SpellDescription": "The next time you would draw a card this turn, CARDNAME deals 2 damage to any target instead."
-      }
+      "description": "The next time you would draw a card this turn, CARDNAME deals 2 damage to any target instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

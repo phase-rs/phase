@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As long as CARDNAME's power is 5 or greater, it can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "ValidCard": "Card.Self+powerGE5",
-        "Description": "As long as CARDNAME's power is 5 or greater, it can attack as though it didn't have defender."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,47 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
-          "Toughness": "X",
-          "XMin": "1",
-          "PlayerTurn": "True",
-          "Power": "X"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Waterbend<X>"
+        "cost": "Waterbend<X>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
-        "Toughness": "X",
-        "XMin": "1",
-        "PlayerTurn": "True",
-        "Power": "X"
-      }
+      "description": "Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
+      "effect": {
+        "description": "Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create a 1/1 white Ally creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME enters, create a 1/1 white Ally creature token."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

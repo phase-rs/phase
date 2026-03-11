@@ -2,37 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "ChooseCounters,ChooseFlying,ChooseFirstStrike,ChooseTrample",
-          "SpellDescription": "Put a +1/+1 counter on CARDNAME or CARDNAME gains flying, first strike, or trample. (This effect lasts indefinitely.)"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "ChooseCounters,ChooseFlying,ChooseFirstStrike,ChooseTrample",
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME or CARDNAME gains flying, first strike, or trample. (This effect lasts indefinitely.)"
-      }
+      "description": "Put a +1/+1 counter on CARDNAME or CARDNAME gains flying, first strike, or trample. (This effect lasts indefinitely.)",
+      "effect": {
+        "description": "Put a +1/+1 counter on CARDNAME or CARDNAME gains flying, first strike, or trample. (This effect lasts indefinitely.)",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

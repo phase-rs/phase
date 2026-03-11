@@ -2,31 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player reveals their hand. You choose a nonland card from it. That player puts that card into their library third from the top.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Library",
+        "origin": "Hand",
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player reveals their hand. You choose a nonland card from it. That player puts that card into their library third from the top.",
-        "LibraryPosition": "2",
-        "IsCurse": "True",
-        "Mandatory": "True",
-        "DefinedPlayer": "Targeted",
-        "ChangeNum": "1",
-        "Chooser": "You",
-        "ChangeType": "Card.nonLand"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

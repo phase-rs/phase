@@ -2,37 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Defined": "Self",
-          "SpellDescription": "Create a token that's a copy of this Equipment."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "4 R"
+        "cost": "4 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "SpellDescription": "Create a token that's a copy of this Equipment."
-      }
+      "description": "Create a token that's a copy of this Equipment.",
+      "effect": {
+        "description": "Create a token that's a copy of this Equipment.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +1/+0 for each artifact you control.",
-        "AddPower": "X",
-        "Affected": "Card.EquippedBy"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 for each artifact you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

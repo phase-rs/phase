@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control seven or more permanents, return CARDNAME to its owner's hand.",
       "mode": "Phase",
-      "params": {
-        "PresentCompare": "GE7",
-        "ValidPlayer": "You",
-        "Execute": "TrigBounce",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "IsPresent": "Permanent.YouCtrl",
-        "TriggerDescription": "At the beginning of your upkeep, if you control seven or more permanents, return CARDNAME to its owner's hand."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

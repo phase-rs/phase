@@ -2,29 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+YouDontCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Wizard>"
+        "cost": "tapXType<1/Wizard>",
+        "type": "Mana"
       },
+      "description": "Return target nonland permanent you don't control to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            },
+            {
+              "type": "Other",
+              "value": "YouDontCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target nonland permanent you don't control to its owner's hand.",
-        "TgtPrompt": "Select target nonland permanent you don't control"
-      }
+      "target_prompt": "Select target nonland permanent you don't control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

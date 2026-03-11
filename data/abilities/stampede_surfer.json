@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, for each opponent, you create a 2/2 green Boar creature token that's tapped and attacking that opponent.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "DBRepeat",
-        "TriggerDescription": "Whenever CARDNAME attacks, for each opponent, you create a 2/2 green Boar creature token that's tapped and attacking that opponent."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

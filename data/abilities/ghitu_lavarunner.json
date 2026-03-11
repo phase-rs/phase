@@ -1,21 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there are two or more instant and/or sorcery cards in your graveyard, CARDNAME gets +1/+0 and has haste.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Haste",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "AddPower": "1",
-        "PresentCompare": "GE2",
-        "PresentZone": "Graveyard",
-        "Description": "As long as there are two or more instant and/or sorcery cards in your graveyard, CARDNAME gets +1/+0 and has haste."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

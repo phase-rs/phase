@@ -1,31 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature an opponent controls dies, you may gain 3 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.OppCtrl",
-        "OptionalDecider": "You",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature an opponent controls dies, you may gain 3 life.",
-        "Destination": "Graveyard",
-        "Execute": "TrigGainLife",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent discards a card, you may gain 3 life.",
       "mode": "Discarded",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "ValidPlayer": "Opponent",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever an opponent discards a card, you may gain 3 life."
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

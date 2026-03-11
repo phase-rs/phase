@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Giant creature with protection from each of that spell's colors.",
       "mode": "SpellCast",
-      "params": {
-        "IsPresent": "Card.Self+Enchantment",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Giant creature with protection from each of that spell's colors.",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "DamageAmount": "LE3",
-        "Prevent": "True",
-        "Description": "If a source would deal 3 or less damage to CARDNAME, prevent that damage."
-      }
+      "description": "If a source would deal 3 or less damage to CARDNAME, prevent that damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

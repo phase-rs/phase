@@ -2,32 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
+      },
+      "description": "If the discarded card was a land card, CARDNAME deals 2 damage to target player or planeswalker. Any player may activate this ability.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Player,Planeswalker"
-        }
+          "card_type": "Player,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If the discarded card was a land card, CARDNAME deals 2 damage to target player or planeswalker. Any player may activate this ability.",
-        "Activator": "Player",
-        "AILogic": "DiscardLands"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

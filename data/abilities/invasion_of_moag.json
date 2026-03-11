@@ -1,43 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigPutCounters",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each creature you control."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, put a +1/+1 counter on target creature you control.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigPutCounter",
-            "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on target creature you control.",
-            "TriggerZones": "Battlefield",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked by a creature, that creature perpetually gets -2/-0.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "PrecostDesc": "Psionic Adept —",
-        "ValidBlocker": "Creature",
-        "Execute": "TrigEffect",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, that creature perpetually gets -2/-0."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

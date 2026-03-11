@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "SpellDescription": "Look at target player's hand. Draw a card at the beginning of next turn's upkeep.",
-          "SubAbility": "DelTrigSlowtrip",
-          "ValidTgts": "Player",
-          "Look": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at target player's hand. Draw a card at the beginning of next turn's upkeep.",
-        "SubAbility": "DelTrigSlowtrip",
-        "ValidTgts": "Player",
-        "Look": "True"
-      }
+      "description": "Look at target player's hand. Draw a card at the beginning of next turn's upkeep.",
+      "effect": {
+        "description": "Look at target player's hand. Draw a card at the beginning of next turn's upkeep.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

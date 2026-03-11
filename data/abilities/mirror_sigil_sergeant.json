@@ -1,21 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control a blue permanent, you may create a token that's a copy of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigCopyPermanent",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, if you control a blue permanent, you may create a token that's a copy of CARDNAME.",
-        "IsPresent": "Permanent.YouCtrl+Blue",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

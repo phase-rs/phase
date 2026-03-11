@@ -2,43 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "DamageEvent",
-          "SpellDescription": "All damage that would be dealt to you this turn by target attacking creature is dealt to CARDNAME instead.",
-          "ImprintCards": "Targeted",
-          "TgtPrompt": "Select target attacking creature",
-          "ValidTgts": "Creature.attacking",
-          "AILogic": "Fog"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B"
+            "cost": "B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "All damage that would be dealt to you this turn by target attacking creature is dealt to CARDNAME instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "DamageEvent",
-        "SpellDescription": "All damage that would be dealt to you this turn by target attacking creature is dealt to CARDNAME instead.",
-        "ImprintCards": "Targeted",
-        "TgtPrompt": "Select target attacking creature",
-        "ValidTgts": "Creature.attacking",
-        "AILogic": "Fog"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

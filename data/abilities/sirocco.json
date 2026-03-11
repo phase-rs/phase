@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RevealHand",
-        "params": {
-          "ValidTgts": "Player",
-          "SubAbility": "DBRepeatDiscard",
-          "SpellDescription": "Target player reveals their hand. For each blue instant card revealed this way, that player discards that card unless they pay 4 life.",
-          "RememberRevealed": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "SubAbility": "DBRepeatDiscard",
-        "SpellDescription": "Target player reveals their hand. For each blue instant card revealed this way, that player discards that card unless they pay 4 life.",
-        "RememberRevealed": "True"
-      }
+      "description": "Target player reveals their hand. For each blue instant card revealed this way, that player discards that card unless they pay 4 life.",
+      "effect": {
+        "description": "Target player reveals their hand. For each blue instant card revealed this way, that player discards that card unless they pay 4 life.",
+        "name": "RevealHand",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,41 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigOpenAttraction",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, open an Attraction."
-      }
-    },
-    {
-      "mode": "RolledDie",
-      "params": {
-        "TriggerDescription": "Whenever you roll to visit your Attractions, if you roll a 6, you may return CARDNAME from your graveyard to the battlefield.",
-        "ValidPlayer": "You",
-        "RolledToVisitAttractions": "True",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigReturn",
-        "ValidResult": "6"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME enters tapped.",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped"
+      "description": "When CARDNAME dies, open an Attraction.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
+    },
+    {
+      "description": "Whenever you roll to visit your Attractions, if you roll a 6, you may return CARDNAME from your graveyard to the battlefield.",
+      "mode": "RolledDie",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

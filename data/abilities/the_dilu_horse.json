@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Commanders you control have horsemanship.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Horsemanship",
-        "Affected": "Card.YouCtrl+IsCommander",
-        "Description": "Commanders you control have horsemanship."
-      }
+      "modifications": [
+        {
+          "keyword": "Horsemanship",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

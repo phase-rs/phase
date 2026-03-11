@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, each opponent loses 1 life.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDrain",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you gain life, each opponent loses 1 life."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

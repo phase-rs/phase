@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact you control enters, put a +1/+1 counter on CARDNAME and it can't be blocked this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "Whenever an artifact you control enters, put a +1/+1 counter on CARDNAME and it can't be blocked this turn.",
-        "Destination": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self",
-        "ValidCard": "Artifact.YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

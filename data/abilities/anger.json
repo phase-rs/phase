@@ -1,19 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Mountain",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is in your graveyard and you control a Mountain, creatures you control have haste.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is in your graveyard and you control a Mountain, creatures you control have haste.",
-        "AddKeyword": "Haste",
-        "IsPresent": "Mountain.YouCtrl",
-        "Affected": "Creature.YouCtrl",
-        "EffectZone": "Graveyard"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

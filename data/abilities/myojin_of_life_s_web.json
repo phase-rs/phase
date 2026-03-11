@@ -2,38 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<1/DIVINITY>",
+        "type": "Mana"
+      },
+      "description": "Put any number of creature cards from your hand onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/DIVINITY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put any number of creature cards from your hand onto the battlefield.",
-        "ChangeNum": "X",
-        "ChangeType": "Creature"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has indestructible as long as it has a divinity counter on it.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE1_DIVINITY",
-        "AddKeyword": "Indestructible",
-        "Description": "CARDNAME has indestructible as long as it has a divinity counter on it."
-      }
+      "modifications": [
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

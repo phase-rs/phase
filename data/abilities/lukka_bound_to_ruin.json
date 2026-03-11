@@ -2,81 +2,63 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R G",
-        "params": {
-          "RestrictValid": "Spell.Creature,Activated.Creature+inZoneBattlefield",
-          "SpellDescription": "Add {R}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
-          "Planeswalker": "True",
-          "Amount": "1"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "Spell.Creature,Activated.Creature+inZoneBattlefield",
-        "SpellDescription": "Add {R}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
-        "Planeswalker": "True",
-        "Amount": "1"
-      }
+      "description": "Add {R}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 3/3 green Phyrexian Beast creature token with toxic 1.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_phyrexian_beast_toxic",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 3/3 green Phyrexian Beast creature token with toxic 1.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -4,
+        "type": "Loyalty"
+      },
+      "description": "NICKNAME deals X damage divided as you choose among any number of target creatures and/or planeswalkers, where X is the greatest power among creatures you controlled as you activated this ability.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "OrigPower"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -4
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "OrigPower",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "DividedAsYouChoose": "OrigPower",
-        "TgtPrompt": "Select any number of creatures and planeswalkers to distribute damage to",
-        "SpellDescription": "NICKNAME deals X damage divided as you choose among any number of target creatures and/or planeswalkers, where X is the greatest power among creatures you controlled as you activated this ability.",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select any number of creatures and planeswalkers to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

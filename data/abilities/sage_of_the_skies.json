@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, if you've cast another spell this turn, copy this spell. (The copy becomes a token.)",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopy",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you cast this spell, if you've cast another spell this turn, copy this spell. (The copy becomes a token.)",
-        "CheckSVar": "X"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

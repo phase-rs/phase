@@ -2,43 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "ICE",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 S"
+        "cost": "2 S",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SubAbility": "DBTap",
-        "SpellDescription": "Put an ice counter on target creature. Tap that creature."
-      }
+      "description": "Put an ice counter on target creature. Tap that creature.",
+      "effect": {
+        "count": 1,
+        "counter_type": "ICE",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Creatures with ice counters on them don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "Creatures with ice counters on them don't untap during their controllers' untap steps.",
-        "ValidCard": "Creature.counters_GE1_ICE",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

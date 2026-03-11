@@ -1,32 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerDescription": "Whenever NICKNAME or another Elf or Faerie you control enters, exile the top two cards of target opponent's library.",
-        "ValidCard": "Card.Self,Elf.Other+YouCtrl,Faerie.Other+YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Once each turn, you may cast a spell with mana value less than or equal to the number of Elves and Faeries you control from among cards exiled with NICKNAME this turn without paying its mana cost.",
-        "MayPlay": "True",
-        "MayPlayWithoutManaCost": "True",
-        "MayPlayLimit": "1",
-        "AffectedZone": "Exile",
-        "Affected": "Card.nonLand+cmcLEX+ExiledWithSource+ThisTurnEntered",
-        "EffectZone": "Battlefield"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          },
+          {
+            "type": "Other",
+            "value": "ThisTurnEntered"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "Once each turn, you may cast a spell with mana value less than or equal to the number of Elves and Faeries you control from among cards exiled with NICKNAME this turn without paying its mana cost.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever NICKNAME or another Elf or Faerie you control enters, exile the top two cards of target opponent's library.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Elf.Other"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Faerie.Other"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

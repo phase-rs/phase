@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "Amount": "4",
-          "AILogic": "BlackLotus",
-          "SubAbility": "DBTearUpAndRemove",
-          "SpellDescription": "Tear CARDNAME into pieces. Add four mana of any one color. Remove the pieces from the game."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "4",
-        "AILogic": "BlackLotus",
-        "SubAbility": "DBTearUpAndRemove",
-        "SpellDescription": "Tear CARDNAME into pieces. Add four mana of any one color. Remove the pieces from the game."
-      }
+      "description": "Tear CARDNAME into pieces. Add four mana of any one color. Remove the pieces from the game.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

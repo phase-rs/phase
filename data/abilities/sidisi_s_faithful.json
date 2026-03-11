@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME exploits a creature, return target creature to its owner's hand.",
       "mode": "Exploited",
-      "params": {
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "When CARDNAME exploits a creature, return target creature to its owner's hand.",
-        "Execute": "TrigChangeZone"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

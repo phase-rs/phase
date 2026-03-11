@@ -2,53 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U B"
+        "cost": "2 U B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "TheScarabGod",
-        "SpellDescription": "Exile target creature card from a graveyard. Create a token that's a copy of it, except it's a 4/4 black Zombie.",
-        "ChangeNum": "1",
-        "RememberLKI": "True",
-        "SubAbility": "DBCopy"
-      }
+      "description": "Exile target creature card from a graveyard. Create a token that's a copy of it, except it's a 4/4 black Zombie.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigDrain",
-        "TriggerDescription": "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When CARDNAME dies, return it to its owner's hand at the beginning of the next end step.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "Execute": "TrigDelay",
-        "TriggerDescription": "When CARDNAME dies, return it to its owner's hand at the beginning of the next end step."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enlists a creature, you get a boon with \"When you cast your next creature spell, that creature enters with a +1/+1 counter on it.\"",
       "mode": "Enlisted",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBoon",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME enlists a creature, you get a boon with \"When you cast your next creature spell, that creature enters with a +1/+1 counter on it.\""
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

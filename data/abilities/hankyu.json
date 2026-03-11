@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{T}: Put an aim counter on CARDNAME\" and \"{T}, Remove all aim counters from CARDNAME: This creature deals damage to any target equal to the number of aim counters removed this way.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature has \"{T}: Put an aim counter on CARDNAME\" and \"{T}, Remove all aim counters from CARDNAME: This creature deals damage to any target equal to the number of aim counters removed this way.\"",
-        "AddSVar": "HankyuX",
-        "AddAbility": "HankyuPutCounter & HankyuDmg"
-      }
+      "modifications": [
+        {
+          "ability": "HankyuPutCounter & HankyuDmg",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

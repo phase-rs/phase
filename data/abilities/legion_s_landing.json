@@ -1,92 +1,79 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create a 1/1 white Vampire creature token with lifelink.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken",
-            "TriggerDescription": "When CARDNAME enters, create a 1/1 white Vampire creature token with lifelink.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "When you attack with three or more creatures, transform CARDNAME.",
           "mode": "AttackersDeclared",
-          "params": {
-            "TriggerDescription": "When you attack with three or more creatures, transform CARDNAME.",
-            "Execute": "DBTransform",
-            "ValidAttackersAmount": "GE3",
-            "TriggerZones": "Battlefield",
-            "AttackingPlayer": "You",
-            "ValidAttackers": "Creature"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "W",
-            "params": {
-              "SpellDescription": "Add {W}.",
-              "Amount": "1"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {W}.",
-            "Amount": "1"
-          }
+          "description": "Add {W}.",
+          "effect": {
+            "produced": [
+              "White"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "w_1_1_vampire_lifelink",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 W"
+                "cost": "2 W",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 1/1 white Vampire creature token with lifelink.",
-            "TokenOwner": "You"
-          }
+          "description": "Create a 1/1 white Vampire creature token with lifelink.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "w_1_1_vampire_lifelink",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

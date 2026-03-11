@@ -2,82 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Untap target Mountain. It becomes a 4/4 red Elemental creature until end of turn. It's still a land.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Mountain"
-        }
+          "card_type": "Mountain",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Mountain",
-        "Planeswalker": "True",
-        "SubAbility": "DBAnimate",
-        "SpellDescription": "Untap target Mountain. It becomes a 4/4 red Elemental creature until end of turn. It's still a land."
-      }
+      "target_prompt": "Select target Mountain"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R} for each Mountain you control.",
-          "Planeswalker": "True",
-          "Amount": "X"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R} for each Mountain you control.",
-        "Planeswalker": "True",
-        "Amount": "X"
-      }
+      "description": "Add {R} for each Mountain you control.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Name": "Emblem — Koth of the Hammer",
-          "SpellDescription": "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
-          "Stackable": "False",
-          "Image": "emblem_koth_of_the_hammer",
-          "Duration": "Permanent",
-          "StaticAbilities": "STDamage",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Name": "Emblem — Koth of the Hammer",
-        "SpellDescription": "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
-        "Stackable": "False",
-        "Image": "emblem_koth_of_the_hammer",
-        "Duration": "Permanent",
-        "StaticAbilities": "STDamage",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

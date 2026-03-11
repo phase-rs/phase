@@ -2,38 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell or ability that targets a permanent you control.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell or ability that targets a permanent you control",
-        "TargetValidTargeting": "Permanent.YouCtrl+inRealZoneBattlefield",
-        "TargetType": "Spell,Activated,Triggered",
-        "SpellDescription": "Counter target spell or ability that targets a permanent you control."
-      }
+      "target_prompt": "Select target spell or ability that targets a permanent you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "EffectZone": "All",
-        "Description": "This spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater.",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Amount": "CostReduction",
-        "Relative": "True"
-      }
+      "description": "This spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

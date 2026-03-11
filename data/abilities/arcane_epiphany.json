@@ -2,32 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw three cards."
-      }
+      "description": "Draw three cards.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "IsPresent": "Wizard.YouCtrl",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Amount": "1",
-        "Description": "This spell costs {1} less to cast if you control a Wizard."
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Wizard",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control a Wizard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

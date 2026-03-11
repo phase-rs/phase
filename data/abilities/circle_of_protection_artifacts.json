@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "SpellDescription": "The next time an artifact source of your choice would deal damage to you this turn, prevent that damage.",
-          "Choices": "Artifact",
-          "AILogic": "NeedsPrevention",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The next time an artifact source of your choice would deal damage to you this turn, prevent that damage.",
-        "Choices": "Artifact",
-        "AILogic": "NeedsPrevention",
-        "SubAbility": "DBEffect"
-      }
+      "description": "The next time an artifact source of your choice would deal damage to you this turn, prevent that damage.",
+      "effect": {
+        "description": "The next time an artifact source of your choice would deal damage to you this turn, prevent that damage.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

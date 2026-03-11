@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Mountain an opponent controls becomes tapped, you gain 1 life.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever a Mountain an opponent controls becomes tapped, you gain 1 life.",
-        "ValidCard": "Mountain.OppCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Mountain",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

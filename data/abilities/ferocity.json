@@ -1,28 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature blocks or becomes blocked, you may put a +1/+1 counter on it.",
       "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked, you may put a +1/+1 counter on it.",
-        "ValidCard": "Card.AttachedBy"
+      "optional": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever enchanted creature blocks or becomes blocked, you may put a +1/+1 counter on it.",
       "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked, you may put a +1/+1 counter on it.",
-        "Execute": "TrigPutCounter2",
-        "Secondary": "True",
-        "OptionalDecider": "You"
+      "optional": true,
+      "secondary": true,
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

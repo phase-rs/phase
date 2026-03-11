@@ -2,47 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "TgtPrompt": "Select target Ninja",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "SpellDescription": "Target Ninja can't be blocked this turn.",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Ninja",
-          "AILogic": "Pump",
-          "StaticAbilities": "Unblockable"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 U"
+        "cost": "1 U",
+        "type": "Mana"
       },
+      "description": "Target Ninja can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "TgtPrompt": "Select target Ninja",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "SpellDescription": "Target Ninja can't be blocked this turn.",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Ninja",
-        "AILogic": "Pump",
-        "StaticAbilities": "Unblockable"
-      }
+      "target_prompt": "Select target Ninja"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "Description": "If an ability of a Ninja creature you control triggers, that ability triggers an additional time.",
-        "ValidCard": "Creature.Ninja+YouCtrl"
-      }
+      "description": "If an ability of a Ninja creature you control triggers, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

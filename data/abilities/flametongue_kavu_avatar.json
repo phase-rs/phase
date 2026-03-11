@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nontoken creature you control enters, that creature deals X damage to target creature, where X is a number chosen at random from 0 to 4.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.!token+YouCtrl",
-        "Destination": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever a nontoken creature you control enters, that creature deals X damage to target creature, where X is a number chosen at random from 0 to 4.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,73 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U B",
-        "params": {
-          "SpellDescription": "Add {U} or {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U} or {B}."
-      }
+      "description": "Add {U} or {B}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U B",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes an Equipment artifact with equip {2}.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Equipment"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Equip:2",
-        "SpellDescription": "Until end of turn, CARDNAME becomes an Equipment artifact with equip {2}.",
-        "Defined": "Self",
-        "RemoveCardTypes": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "Execute": "TrigDraw",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, draw a card.",
-        "ValidSource": "Creature.EquippedBy"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield"
+      "combat_damage": true,
+      "description": "Whenever equipped creature deals combat damage to a player, draw a card.",
+      "mode": "DamageDone",
+      "valid_source": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "faces": []
+  ]
 }

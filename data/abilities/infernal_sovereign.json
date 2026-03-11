@@ -1,42 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
-        "Execute": "TrigDraw",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card"
-      }
-    },
-    {
-      "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
-        "Execute": "TrigDraw",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "Phase": "Draw",
-        "Description": "Skip your draw step.",
-        "ActiveZones": "Battlefield",
-        "Skip": "True",
-        "ValidPlayer": "You"
+      "description": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
+      "mode": "LandPlayed",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

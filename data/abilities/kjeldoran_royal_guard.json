@@ -2,28 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "DamageEvent",
-          "SpellDescription": "All combat damage that would be dealt to you by unblocked creatures this turn is dealt to CARDNAME instead.",
-          "AILogic": "Fog"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "DamageEvent",
-        "SpellDescription": "All combat damage that would be dealt to you by unblocked creatures this turn is dealt to CARDNAME instead.",
-        "AILogic": "Fog"
-      }
+      "description": "All combat damage that would be dealt to you by unblocked creatures this turn is dealt to CARDNAME instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Cost": "Reveal<1/Dragon>",
-        "EffectZone": "All",
-        "ValidSA": "Spell",
-        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the upkeep of enchanted enchantment's controller, that player loses 2 life unless they pay {2}.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Player.EnchantedController",
-        "Phase": "Upkeep",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "At the beginning of the upkeep of enchanted enchantment's controller, that player loses 2 life unless they pay {2}."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

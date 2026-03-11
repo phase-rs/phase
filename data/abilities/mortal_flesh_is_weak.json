@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, each opponent's life total becomes the lowest life total among your opponents.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerDescription": "When you set this scheme in motion, each opponent's life total becomes the lowest life total among your opponents.",
-        "Execute": "ShowTheWeakness",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

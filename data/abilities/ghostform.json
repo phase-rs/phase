@@ -2,40 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Creature",
-          "TargetMin": "0",
-          "TargetMax": "2",
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "Unblockable",
-          "StackDescription": "SpellDescription",
-          "ForgetOnMoved": "Battlefield",
-          "AILogic": "Pump",
-          "TgtPrompt": "Select up to two target creatures",
-          "SpellDescription": "Up to two target creatures can't be blocked this turn."
-        }
-      },
       "cost": null,
+      "description": "Up to two target creatures can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "TargetMin": "0",
-        "TargetMax": "2",
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "Unblockable",
-        "StackDescription": "SpellDescription",
-        "ForgetOnMoved": "Battlefield",
-        "AILogic": "Pump",
-        "TgtPrompt": "Select up to two target creatures",
-        "SpellDescription": "Up to two target creatures can't be blocked this turn."
-      }
+      "target_prompt": "Select up to two target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

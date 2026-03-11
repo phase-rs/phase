@@ -2,41 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "SacrificeAll",
-        "params": {
-          "SubAbility": "DBDraw",
-          "Defined": "Self",
-          "SpellDescription": "CARDNAME's controller sacrifices it, then draws two cards. Only your opponents may activate this ability.",
-          "Activator": "Player.Opponent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<2/Card>"
+        "cost": "Discard<2/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "Defined": "Self",
-        "SpellDescription": "CARDNAME's controller sacrifices it, then draws two cards. Only your opponents may activate this ability.",
-        "Activator": "Player.Opponent"
-      }
+      "description": "CARDNAME's controller sacrifices it, then draws two cards. Only your opponents may activate this ability.",
+      "effect": {
+        "description": "CARDNAME's controller sacrifices it, then draws two cards. Only your opponents may activate this ability.",
+        "name": "SacrificeAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.EnchantedBy",
-        "Description": "You control enchanted creature.",
-        "GainControl": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "You control enchanted creature.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "StackDescription": "Conjure a card named Suntail Hawk into your hand.",
-          "Name": "Suntail Hawk",
-          "SubAbility": "DBRepeat",
-          "Conjure": "True",
-          "Zone": "Hand",
-          "SpellDescription": "Conjure a card named Suntail Hawk into your hand. If you have fewer than 7 cards in hand, repeat this process."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "Conjure a card named Suntail Hawk into your hand.",
-        "Name": "Suntail Hawk",
-        "SubAbility": "DBRepeat",
-        "Conjure": "True",
-        "Zone": "Hand",
-        "SpellDescription": "Conjure a card named Suntail Hawk into your hand. If you have fewer than 7 cards in hand, repeat this process."
-      }
+      "description": "Conjure a card named Suntail Hawk into your hand. If you have fewer than 7 cards in hand, repeat this process.",
+      "effect": {
+        "description": "Conjure a card named Suntail Hawk into your hand. If you have fewer than 7 cards in hand, repeat this process.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,84 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever one or more creatures you control deal combat damage to a player this turn, create a Treasure token.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "ValidSource": "Creature.YouCtrl",
-            "Execute": "DBToken",
-            "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player this turn, create a Treasure token.",
-            "TriggerZones": "Battlefield",
-            "ValidTarget": "Player",
-            "CombatDamage": "True"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         },
         {
+          "description": "At the beginning of your end step, if you control five or more artifacts, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "PresentCompare": "GE5",
-            "TriggerDescription": "At the beginning of your end step, if you control five or more artifacts, transform CARDNAME.",
-            "IsPresent": "Artifact.YouCtrl",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "Amount": "1",
-              "SpellDescription": "Add one mana of any color."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "SpellDescription": "Add one mana of any color."
-          }
+          "description": "Add one mana of any color.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "U",
-            "params": {
-              "Amount": "X",
-              "SpellDescription": "Add {U} for each artifact you control."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "X",
-            "SpellDescription": "Add {U} for each artifact you control."
-          }
+          "description": "Add {U} for each artifact you control.",
+          "effect": {
+            "produced": [
+              "Blue"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

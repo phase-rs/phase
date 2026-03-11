@@ -1,27 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Blood.token+YouCtrl",
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "ActivationLimit": "1",
-        "TriggerDescription": "Whenever you sacrifice one or more Blood tokens, target creature can't block this turn. This ability triggers only once each turn."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you sacrifice one or more Blood tokens, target creature can't block this turn. This ability triggers only once each turn.",
+      "mode": "Sacrificed",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Blood",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

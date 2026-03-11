@@ -2,68 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Main2",
-          "StaticAbilities": "STPlay",
-          "Planeswalker": "True",
-          "SpellDescription": "Until your next turn, you may cast sorcery spells as though they had flash.",
-          "Duration": "UntilYourNextTurn"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Main2",
-        "StaticAbilities": "STPlay",
-        "Planeswalker": "True",
-        "SpellDescription": "Until your next turn, you may cast sorcery spells as though they had flash.",
-        "Duration": "UntilYourNextTurn"
-      }
+      "description": "Until your next turn, you may cast sorcery spells as though they had flash.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature,Enchantment"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
+      "description": "Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Artifact,Creature,Enchantment",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "Planeswalker": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
-        "TargetMax": "1",
-        "TgtPrompt": "Select target artifact, creature, or enchantment"
-      }
+      "target_prompt": "Select target artifact, creature, or enchantment"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Your opponents can't cast spells during your turn.",
-        "Caster": "Opponent",
-        "ValidCard": "Card",
-        "Condition": "PlayerTurn"
-      }
+      "description": "Your opponents can't cast spells during your turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

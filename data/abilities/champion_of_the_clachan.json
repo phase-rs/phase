@@ -1,40 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "EffectZone": "All",
-        "Cost": "BeholdExile<1/Kithkin>",
-        "Description": "As an additional cost to cast this spell, behold a Kithkin and exile it. (Exile a Kithkin you control or a Kithkin card from your hand.)",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Activator": "You"
-      }
+      "description": "As an additional cost to cast this spell, behold a Kithkin and exile it. (Exile a Kithkin you control or a Kithkin card from your hand.)",
+      "effect_zone": "Battlefield",
+      "mode": "RaiseCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Kithkin",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Kithkin you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Kithkin.Other+YouCtrl",
-        "AddToughness": "1",
-        "Description": "Other Kithkin you control get +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

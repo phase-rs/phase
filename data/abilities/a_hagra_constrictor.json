@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Each creature you control with a +1/+1 counter on it has menace.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature you control with a +1/+1 counter on it has menace.",
-        "AddKeyword": "Menace",
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

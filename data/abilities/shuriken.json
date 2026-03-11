@@ -1,18 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has \"{T}, Unattach CARDNAME: CARDNAME deals 2 damage to target creature. That creature's controller gains control of CARDNAME unless it was unattached from a Ninja.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature has \"{T}, Unattach CARDNAME: CARDNAME deals 2 damage to target creature. That creature's controller gains control of CARDNAME unless it was unattached from a Ninja.\"",
-        "Affected": "Creature.EquippedBy",
-        "AddAbility": "ShurikenDamage",
-        "AddSVar": "ShurikenGainCtrl & ShurikenForget"
-      }
+      "modifications": [
+        {
+          "ability": "ShurikenDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent gets -3/-0.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.EnchantedBy",
-        "Description": "Enchanted permanent gets -3/-0.",
-        "AddPower": "-3"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent casts their second spell each turn, you create a Treasure token.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "ActivatorThisTurnCast": "EQ2",
-        "ValidActivatingPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent casts their second spell each turn, you create a Treasure token."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

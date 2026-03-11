@@ -2,61 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChoosePlayer",
-        "params": {
-          "Random": "True",
-          "Choices": "Player",
-          "PrecostDesc": "Grenades! —",
-          "SubAbility": "DBImmediateTrig",
-          "SpellDescription": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Random": "True",
-        "Choices": "Player",
-        "PrecostDesc": "Grenades! —",
-        "SubAbility": "DBImmediateTrig",
-        "SpellDescription": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
-        "Defined": "You"
-      }
+      "description": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
+      "effect": {
+        "description": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
+        "name": "ChoosePlayer",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Glory of Battle — Whenever NICKNAME deals damage to a creature, put a +1/+1 counter on NICKNAME.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Glory of Battle — Whenever NICKNAME deals damage to a creature, put a +1/+1 counter on NICKNAME.",
-        "ValidTarget": "Creature",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

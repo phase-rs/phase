@@ -1,30 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.cmcEQX",
-        "Execute": "DBPutCounter",
-        "TriggerDescription": "Whenever you cast a spell, if its mana value is equal to 1 plus the number of soul counters on CARDNAME, put a soul counter on CARDNAME, then create a 2/2 white Spirit creature token with flying.",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Spirit",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as there are five or more soul counters on CARDNAME, Spirits you control get +3/+3.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "3",
-        "AddToughness": "3",
-        "IsPresent": "Card.Self+counters_GE5_SOUL",
-        "Description": "As long as there are five or more soul counters on CARDNAME, Spirits you control get +3/+3.",
-        "Affected": "Spirit.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a spell, if its mana value is equal to 1 plus the number of soul counters on CARDNAME, put a soul counter on CARDNAME, then create a 2/2 white Spirit creature token with flying.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

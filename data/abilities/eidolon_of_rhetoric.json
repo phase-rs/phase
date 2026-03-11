@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Each player can't cast more than one spell each turn.",
-        "Caster": "Player",
-        "NumLimitEachTurn": "1",
-        "ValidCard": "Card"
-      }
+      "description": "Each player can't cast more than one spell each turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

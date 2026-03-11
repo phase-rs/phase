@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent is dealt noncombat damage, creatures you control get +1/+0 until end of turn.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "TriggerDescription": "Whenever an opponent is dealt noncombat damage, creatures you control get +1/+0 until end of turn.",
-        "ValidSource": "Card",
-        "CombatDamage": "False",
-        "ValidTarget": "Opponent",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

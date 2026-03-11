@@ -1,58 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Triggers": "CreatureEntered",
-              "SpellDescription": "Whenever a creature enters this turn, you may draw a card."
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Triggers": "CreatureEntered",
-            "SpellDescription": "Whenever a creature enters this turn, you may draw a card."
-          }
+          "description": "Whenever a creature enters this turn, you may draw a card.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create four 1/1 white Bird creature tokens with flying.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "w_1_1_bird_flying",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create four 1/1 white Bird creature tokens with flying.",
-            "TokenAmount": "4"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

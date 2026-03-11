@@ -1,31 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "CARDNAME gets +1/+1 for each land you control.",
-            "AddToughness": "X",
-            "AddPower": "X",
-            "Affected": "Card.Self"
-          }
+          "affected": {
+            "type": "SelfRef"
+          },
+          "description": "CARDNAME gets +1/+1 for each land you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

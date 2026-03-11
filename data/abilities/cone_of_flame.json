@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamageTwo",
-        "TgtPrompt": "Select any target to deal 1 damage to",
-        "DamageMap": "True",
-        "SpellDescription": "CARDNAME deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target."
-      }
+      "target_prompt": "Select any target to deal 1 damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

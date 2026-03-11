@@ -1,31 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "Destination": "Battlefield",
-        "ActivationLimit": "1",
-        "TriggerDescription": "Whenever one or more artifact creatures you control enter, draw a card. This ability triggers only once each turn.",
-        "ValidCards": "Creature.Artifact+YouCtrl"
-      }
+      "description": "Prevent all combat damage that would be dealt to attacking artifact creatures you control.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "Prevent all combat damage that would be dealt to attacking artifact creatures you control.",
-        "ValidTarget": "Creature.Artifact+attacking+YouCtrl",
-        "ActiveZones": "Battlefield",
-        "Prevent": "True",
-        "IsCombat": "True"
-      }
+      "description": "Whenever one or more artifact creatures you control enter, draw a card. This ability triggers only once each turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZoneAll",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

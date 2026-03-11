@@ -2,47 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Chosen",
-        "params": {
-          "SpellDescription": "Add one mana of the chosen color."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add one mana of the chosen color."
-      }
+      "description": "Add one mana of the chosen color.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, scry 1. If you weren't the starting player, you may untap CARDNAME instead.",
-        "Execute": "TrigBranch",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ReplaceWith": "ETBTapped",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self"
+      "description": "When CARDNAME enters, scry 1. If you weren't the starting player, you may untap CARDNAME instead.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

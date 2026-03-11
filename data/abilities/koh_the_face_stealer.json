@@ -2,68 +2,70 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayLife<1>",
+        "type": "Mana"
+      },
+      "description": "Choose a creature card exiled with Koh.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.ExiledWithSource"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayLife<1>"
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a creature card exiled with Koh.",
-        "Mandatory": "True",
-        "Defined": "You",
-        "Amount": "1",
-        "ChoiceTitle": "Choose an exiled card exiled with NICKNAME",
-        "ChoiceZone": "Exile"
-      }
+      "description": "NICKNAME has all activated and triggered abilities of the last chosen card.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "When NICKNAME enters, exile up to one other target creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile1",
-        "TriggerDescription": "When NICKNAME enters, exile up to one other target creature.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever another nontoken creature dies, you may exile it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigExile2",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever another nontoken creature dies, you may exile it.",
-        "ValidCard": "Creature.!token+Other"
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "NICKNAME has all activated and triggered abilities of the last chosen card.",
-        "GainsTriggerAbsOf": "Card.ChosenCard",
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield",
-        "GainsAbilitiesOf": "Card.ChosenCard",
-        "GainsAbilitiesOfZones": "Exile"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

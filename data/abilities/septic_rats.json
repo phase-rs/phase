@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "When CARDNAME attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
-        "ValidCard": "Creature.Self",
-        "DefendingPlayerPoisoned": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapOrUntap",
-        "params": {
-          "ValidTgts": "Artifact,Creature,Land",
-          "TgtPrompt": "Select target artifact, creature, or land",
-          "SpellDescription": "You may tap or untap target artifact, creature, or land."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
+      "description": "You may tap or untap target artifact, creature, or land.",
+      "effect": {
+        "description": "You may tap or untap target artifact, creature, or land.",
+        "name": "TapOrUntap",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Artifact,Creature,Land",
-        "TgtPrompt": "Select target artifact, creature, or land",
-        "SpellDescription": "You may tap or untap target artifact, creature, or land."
-      }
+      "target_prompt": "Select target artifact, creature, or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

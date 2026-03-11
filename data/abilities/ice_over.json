@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Enchanted permanent doesn't untap during its controller's untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
-        "ValidCard": "Card.EnchantedBy",
-        "ValidStepTurnToController": "You",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

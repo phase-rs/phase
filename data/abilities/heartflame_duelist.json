@@ -1,50 +1,60 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Instant",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Sorcery.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Stack",
+          "description": "Instant and sorcery spells you control have lifelink.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Instant and sorcery spells you control have lifelink.",
-            "AffectedZone": "Stack",
-            "Affected": "Instant.YouCtrl,Sorcery.YouCtrl",
-            "AddKeyword": "Lifelink"
-          }
+          "modifications": [
+            {
+              "keyword": "Lifelink",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 3 damage to any target. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 3 damage to any target. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,27 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberSacrificed": "True",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Target opponent sacrifices a creature.",
-        "Amount": "1",
-        "SacValid": "Creature"
-      }
+      "description": "Target opponent sacrifices a creature.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

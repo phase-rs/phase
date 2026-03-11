@@ -2,26 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "DestroyAll",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberDestroyed": "True",
-        "ValidCards": "Artifact,Enchantment",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Destroy all artifacts and enchantments. You gain 2 life for each permanent destroyed this way."
-      }
+      "description": "Destroy all artifacts and enchantments. You gain 2 life for each permanent destroyed this way.",
+      "effect": {
+        "target": {
+          "type": "Any"
+        },
+        "type": "DestroyAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

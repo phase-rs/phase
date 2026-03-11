@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 13,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "All",
-        "SpellDescription": "Exile the top thirteen cards of your library, then search your library for a card. Put that card into your hand, then shuffle.",
-        "Defined": "You",
-        "SubAbility": "DBChangeZone",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Exile the top thirteen cards of your library, then search your library for a card. Put that card into your hand, then shuffle.",
+      "effect": {
+        "count": 13,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

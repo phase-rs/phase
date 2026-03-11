@@ -1,117 +1,131 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
                 "type": "Tap"
               },
               {
-                "type": "Mana",
-                "cost": "Discard<1/Card>"
+                "cost": "Discard<1/Card>",
+                "type": "Mana"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "You",
-            "SpellDescription": "Draw a card."
-          }
+          "description": "Draw a card.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "DigUntil",
-            "params": {
-              "Amount": "1",
-              "RememberFound": "True",
-              "SubAbility": "CascadeCast",
-              "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
-              "NoMoveRevealed": "True",
-              "Defined": "You",
-              "StackDescription": "SpellDescription",
-              "Valid": "Card.nonLand+nonLegendary+cmcLE3",
-              "RevealRandomOrder": "True",
-              "ImprintRevealed": "True"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4 R"
+                "cost": "4 R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "RememberFound": "True",
-            "SubAbility": "CascadeCast",
-            "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
-            "NoMoveRevealed": "True",
-            "Defined": "You",
-            "StackDescription": "SpellDescription",
-            "Valid": "Card.nonLand+nonLegendary+cmcLE3",
-            "RevealRandomOrder": "True",
-            "ImprintRevealed": "True"
-          }
+          "description": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
+          "effect": {
+            "description": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
+            "name": "DigUntil",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "AttackersDeclared",
-          "params": {
-            "TriggerDescription": "Whenever you attack, untap each creature you control, then tap any number of creatures you control.",
-            "Execute": "DBUnTapAll",
-            "TriggerZones": "Battlefield",
-            "AttackingPlayer": "You"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Tapped"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other tapped creatures you control get +1/+0.",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.tapped+YouCtrl+Other",
-            "AddPower": "1",
-            "Description": "Other tapped creatures you control get +1/+0."
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            }
+          ]
         },
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other untapped creatures you control get +0/+1.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Other untapped creatures you control get +0/+1.",
-            "AddToughness": "1",
-            "Affected": "Creature.untapped+YouCtrl+Other"
-          }
+          "modifications": [
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever you attack, untap each creature you control, then tap any number of creatures you control.",
+          "mode": "AttackersDeclared",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

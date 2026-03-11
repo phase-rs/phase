@@ -2,52 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouOwn"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 G G"
+        "cost": "3 G G",
+        "type": "Mana"
       },
+      "description": "Return this card and target land card from your graveyard to the battlefield tapped.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target land card in your graveyard",
-        "Tapped": "True",
-        "ActivationZone": "Graveyard",
-        "ThisDefinedAndTgts": "Self",
-        "SpellDescription": "Return this card and target land card from your graveyard to the battlefield tapped."
-      }
+      "target_prompt": "Select target land card in your graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Description": "NICKNAME's power and toughness are each equal to the number of lands you control."
-      }
+      "characteristic_defining": true,
+      "description": "NICKNAME's power and toughness are each equal to the number of lands you control.",
+      "mode": "Continuous"
     },
     {
+      "description": "CARDNAME can't be blocked by creatures with power 2 or less.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
-        "ValidBlocker": "Creature.powerLE2",
-        "ValidAttacker": "Creature.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

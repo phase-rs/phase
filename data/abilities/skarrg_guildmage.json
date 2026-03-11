@@ -2,55 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R G"
+        "cost": "R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Trample",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Creatures you control gain trample until end of turn."
-      }
+      "description": "Creatures you control gain trample until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R G",
+        "type": "Mana"
+      },
+      "description": "Target land you control becomes a 4/4 Elemental creature until end of turn. It's still a land.",
       "effect": {
-        "type": "Animate",
         "power": 4,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 4,
+        "type": "Animate",
         "types": [
           "Creature",
           "Elemental"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R G"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target land you control becomes a 4/4 Elemental creature until end of turn. It's still a land.",
-        "TgtPrompt": "Select target land you control"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

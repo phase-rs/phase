@@ -1,77 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Exile",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent.nonLand"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "7"
+                "cost": "7",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Exile target nonland permanent. Transform NICKNAME. Activate only as a sorcery.",
+          "effect": {
+            "destination": "Exile",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Land"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
           "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "PrecostDesc": "Hero's Sundering —",
-            "SubAbility": "DBTransform",
-            "SpellDescription": "Exile target nonland permanent. Transform NICKNAME. Activate only as a sorcery.",
-            "TgtPrompt": "Select target nonland permanent"
-          }
+          "target_prompt": "Select target nonland permanent"
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a legendary spell, draw a card. This ability triggers only once each turn.",
           "mode": "SpellCast",
-          "params": {
-            "ValidCard": "Legendary",
-            "TriggerDescription": "Whenever you cast a legendary spell, draw a card. This ability triggers only once each turn.",
-            "Execute": "TrigDraw",
-            "ActivationLimit": "1",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Legendary",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Blessing of Light — At the beginning of combat on your turn, put a +1/+1 counter on another target creature you control. Until your next turn, it gains indestructible. If that creature is legendary, draw a card.",
           "mode": "Phase",
-          "params": {
-            "TriggerDescription": "Blessing of Light — At the beginning of combat on your turn, put a +1/+1 counter on another target creature you control. Until your next turn, it gains indestructible. If that creature is legendary, draw a card.",
-            "Execute": "TrigPutCounter",
-            "Phase": "BeginCombat",
-            "TriggerZones": "Battlefield",
-            "ValidPlayer": "You"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

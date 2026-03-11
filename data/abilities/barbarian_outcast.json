@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you control no Swamps, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "IsPresent": "Swamp.YouCtrl",
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "When you control no Swamps, sacrifice CARDNAME.",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

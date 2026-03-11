@@ -2,25 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "ChangeIntoTurtle,ChangeIntoSpider,ChangeIntoElephant",
-          "AdditionalDescription": ". Until end of turn, target creature you control has that base power and toughness, becomes that creature type, and gains that ability."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "ChangeIntoTurtle,ChangeIntoSpider,ChangeIntoElephant",
-        "AdditionalDescription": ". Until end of turn, target creature you control has that base power and toughness, becomes that creature type, and gains that ability."
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

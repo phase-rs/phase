@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage to target player and each creature that player controls.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
-          "type": "All",
-          "filter": "Player"
-        }
+          "type": "Player"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidDescription": "target player and each creature that player controls.",
-        "SubAbility": "DBSearch",
-        "SpellDescription": "CARDNAME deals 2 damage to target player and each creature that player controls.",
-        "ValidCards": "Creature.TargetedPlayerCtrl",
-        "ValidPlayers": "Targeted"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDig",
-        "TriggerDescription": "Whenever CARDNAME attacks, look at the top four cards of your library. You may put any number of artifact cards with mana value less than or equal to NICKNAME's power from among them onto the battlefield tapped. Put the rest on the bottom of your library in a random order.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "DefenderCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "NICKNAME can't be blocked as long as defending player controls three or more artifacts.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "NICKNAME can't be blocked as long as defending player controls three or more artifacts.",
-        "IsPresent": "Artifact.DefenderCtrl",
-        "ValidAttacker": "Card.Self",
-        "PresentCompare": "GE3"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME attacks, look at the top four cards of your library. You may put any number of artifact cards with mana value less than or equal to NICKNAME's power from among them onto the battlefield tapped. Put the rest on the bottom of your library in a random order.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

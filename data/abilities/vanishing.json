@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "Defined": "Enchanted",
-          "SpellDescription": "Enchanted creature phases out."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U U"
+        "cost": "U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Enchanted",
-        "SpellDescription": "Enchanted creature phases out."
-      }
+      "description": "Enchanted creature phases out.",
+      "effect": {
+        "description": "Enchanted creature phases out.",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

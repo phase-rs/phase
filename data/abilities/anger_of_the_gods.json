@@ -2,32 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
       "effect": {
-        "type": "DamageAll",
         "amount": {
           "type": "Fixed",
           "value": 3
         },
         "target": {
-          "type": "All",
-          "filter": ""
-        }
+          "type": "Any"
+        },
+        "type": "DamageAll"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "RememberDamaged": "True",
-        "ValidCards": "Creature",
-        "ReplaceDyingDefined": "Remembered",
-        "SubAbility": "DBCleanup",
-        "SpellDescription": "CARDNAME deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

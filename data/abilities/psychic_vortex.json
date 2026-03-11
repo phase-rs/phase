@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, sacrifice a land and discard your hand.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, sacrifice a land and discard your hand.",
-        "ValidPlayer": "You",
-        "Execute": "TrigSac",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,41 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, scry 3, then reveal the top card of your library. If it's a land or double-faced card, draw a card.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigScry",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, scry 3, then reveal the top card of your library. If it's a land or double-faced card, draw a card.",
-            "Origin": "Any",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Permanent",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Transformed"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other transformed permanents you control have trample and ward {2}.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Trample & Ward:2",
-            "Description": "Other transformed permanents you control have trample and ward {2}.",
-            "Affected": "Permanent.Transformed+Other+YouCtrl"
-          }
+          "modifications": [
+            {
+              "keyword": "Trample",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "&",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Ward:2",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

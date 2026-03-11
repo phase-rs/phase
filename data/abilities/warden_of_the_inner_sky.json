@@ -2,40 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<3/Artifact;Creature/artifacts and/or creatures>",
+        "type": "Mana"
+      },
+      "description": "Put a +1/+1 counter on CARDNAME. Scry 1. Activate only as a sorcery.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<3/Artifact;Creature/artifacts and/or creatures>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SubAbility": "DBScry",
-        "SpellDescription": "Put a +1/+1 counter on CARDNAME. Scry 1. Activate only as a sorcery."
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as CARDNAME has three or more counters on it, it has flying and vigilance.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME has three or more counters on it, it has flying and vigilance.",
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying & Vigilance",
-        "SVarCompare": "GE3"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

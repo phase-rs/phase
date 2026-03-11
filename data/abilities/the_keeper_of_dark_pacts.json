@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you lose 1 life and draw a card. Then, double the amount of life you lose and cards you draw for the rest of the game from this ability. (This is true even if this leaves the battlefield and returns.)",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, you lose 1 life and draw a card. Then, double the amount of life you lose and cards you draw for the rest of the game from this ability. (This is true even if this leaves the battlefield and returns.)"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

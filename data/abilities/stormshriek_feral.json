@@ -1,61 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          "description": "This creature gets +1/+0 until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 1,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "SpellDescription": "This creature gets +1/+0 until end of turn."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Discard a card. If you do, draw two cards. (Then shuffle this card into its owner's library.)",
           "effect": {
-            "type": "Discard",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Discard a card. If you do, draw two cards. (Then shuffle this card into its owner's library.)",
-            "RememberDiscarded": "True",
-            "Mode": "TgtChoose",
-            "SubAbility": "DBDraw"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

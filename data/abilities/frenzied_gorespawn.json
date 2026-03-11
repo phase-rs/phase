@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, for each opponent, goad target creature that player controls. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigGoad",
-        "TriggerDescription": "When CARDNAME enters, for each opponent, goad target creature that player controls. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more creatures attack one of your opponents, those creatures gain menace until end of turn.",
       "mode": "AttackersDeclaredOneTarget",
-      "params": {
-        "Execute": "TrigPumpAll",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more creatures attack one of your opponents, those creatures gain menace until end of turn.",
-        "ValidAttackers": "Creature",
-        "AttackedTarget": "Opponent"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

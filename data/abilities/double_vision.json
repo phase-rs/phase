@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your first instant or sorcery spell each turn, copy that spell. You may choose new targets for the copy.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Instant,Sorcery",
-        "TriggerDescription": "Whenever you cast your first instant or sorcery spell each turn, copy that spell. You may choose new targets for the copy.",
-        "ActivatorThisTurnCast": "EQ1",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopy",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

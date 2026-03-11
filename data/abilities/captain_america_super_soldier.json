@@ -1,18 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "You,Hero",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as NICKNAME has a shield counter on him, you and other Heroes you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "IsPresent": "Card.Self+counters_GE1_SHIELD",
-        "Affected": "You,Hero.Other+YouCtrl",
-        "Description": "As long as NICKNAME has a shield counter on him, you and other Heroes you control have hexproof."
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

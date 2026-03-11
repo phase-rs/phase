@@ -2,33 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains indestructible until end of turn. If the sacrificed creature was a Human, put a +1/+1 counter on CARDNAME.",
-        "Defined": "Self",
-        "SubAbility": "DBPutCounter",
-        "KW": "Indestructible",
-        "AILogic": "AristocratCounters.Human"
-      }
+      "description": "CARDNAME gains indestructible until end of turn. If the sacrificed creature was a Human, put a +1/+1 counter on CARDNAME.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

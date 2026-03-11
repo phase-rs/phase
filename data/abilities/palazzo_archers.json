@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature with flying attacks you or a planeswalker you control, CARDNAME deals damage equal to its power to that creature.",
       "mode": "Attacks",
-      "params": {
-        "Attacked": "You,Planeswalker.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.withFlying",
-        "TriggerDescription": "Whenever a creature with flying attacks you or a planeswalker you control, CARDNAME deals damage equal to its power to that creature.",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

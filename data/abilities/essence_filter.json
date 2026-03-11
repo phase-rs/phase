@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "DBKillAllEnch,DBKillNonWEnch",
-          "Defined": "You",
-          "AILogic": "BestOption",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Destroy all enchantments or all nonwhite enchantments."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DBKillAllEnch,DBKillNonWEnch",
-        "Defined": "You",
-        "AILogic": "BestOption",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Destroy all enchantments or all nonwhite enchantments."
-      }
+      "description": "Destroy all enchantments or all nonwhite enchantments.",
+      "effect": {
+        "description": "Destroy all enchantments or all nonwhite enchantments.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

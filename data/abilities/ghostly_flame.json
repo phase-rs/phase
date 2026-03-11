@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Black and/or red permanents and spells are colorless sources of damage.",
       "mode": {
         "Other": "ColorlessDamageSource"
-      },
-      "params": {
-        "ValidCard": "Permanent.Black+inZoneBattlefield,Permanent.Red+inZoneBattlefield,Spell.Black+inZoneStack,Spell.Red+inZoneStack",
-        "Description": "Black and/or red permanents and spells are colorless sources of damage."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

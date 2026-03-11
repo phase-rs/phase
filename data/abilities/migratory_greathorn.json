@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature mutates, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
       "mode": "Mutates",
-      "params": {
-        "TriggerDescription": "Whenever this creature mutates, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChange",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

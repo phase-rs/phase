@@ -1,19 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an Aura becomes attached to CARDNAME, create two 1/1 green Saproling creature tokens.",
       "mode": "Attached",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "ValidSource": "Aura",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever an Aura becomes attached to CARDNAME, create two 1/1 green Saproling creature tokens."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Aura",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

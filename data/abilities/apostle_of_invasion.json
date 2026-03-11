@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Corrupted — As long as an opponent has three or more poison counters, CARDNAME has double strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "SVarCompare": "GE3",
-        "CheckSVar": "X",
-        "AddKeyword": "Double Strike",
-        "Description": "Corrupted — As long as an opponent has three or more poison counters, CARDNAME has double strike."
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

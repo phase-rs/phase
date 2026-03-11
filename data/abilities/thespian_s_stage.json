@@ -2,57 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Clone",
-        "params": {
-          "TgtPrompt": "Select target land to copy.",
-          "GainThisAbility": "True",
-          "ValidTgts": "Land",
-          "SpellDescription": "CARDNAME becomes a copy of target land, except it has this ability."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "CARDNAME becomes a copy of target land, except it has this ability.",
+      "effect": {
+        "description": "CARDNAME becomes a copy of target land, except it has this ability.",
+        "name": "Clone",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target land to copy.",
-        "GainThisAbility": "True",
-        "ValidTgts": "Land",
-        "SpellDescription": "CARDNAME becomes a copy of target land, except it has this ability."
-      }
+      "target_prompt": "Select target land to copy."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "DBDamage",
-        "TriggerZones": "Battlefield",
-        "ValidAttackers": "Creature.Artifact+YouCtrl",
-        "TriggerDescription": "Whenever one or more artifact creatures you control attack, CARDNAME deals X damage to any target and you scry X, where X is the number of tapped artifacts you control."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Artifact"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other artifact creatures you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other artifact creatures you control have haste.",
-        "AddKeyword": "Haste",
-        "Affected": "Creature.Artifact+Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more artifact creatures you control attack, CARDNAME deals X damage to any target and you scry X, where X is the number of tapped artifacts you control.",
+      "mode": "AttackersDeclared",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

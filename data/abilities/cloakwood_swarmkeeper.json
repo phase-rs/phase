@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Gathered Swarm — Whenever one or more tokens you control enter, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Gathered Swarm — Whenever one or more tokens you control enter, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Card.token+YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

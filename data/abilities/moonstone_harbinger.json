@@ -1,32 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
-        "ActivationLimit": "1",
-        "PlayerTurn": "True",
-        "ValidPlayer": "You",
-        "Execute": "TrigPump"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
       "mode": "LifeLost",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
-        "Execute": "TrigPump",
-        "PlayerTurn": "True",
-        "ActivationLimit": "1",
-        "ValidPlayer": "You",
-        "Secondary": "True"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

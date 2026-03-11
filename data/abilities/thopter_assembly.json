@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you control no Thopters other than CARDNAME, return CARDNAME to its owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Thopter.Other+YouCtrl",
-        "PresentCompare": "EQ0",
-        "Execute": "TrigChange",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, if you control no Thopters other than CARDNAME, return CARDNAME to its owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

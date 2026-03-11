@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "UpTo": "True",
-        "Amount": "2",
-        "ValidCard": "Creature",
-        "Description": "Creature spells you cast cost up to {2} less to cast.",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Creature spells you cast cost up to {2} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

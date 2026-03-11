@@ -1,20 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Angel spells you cast cost {2} less to cast.",
-        "Amount": "2",
-        "ValidCard": "Angel",
-        "EffectZone": "Battlefield",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Angel spells you cast cost {2} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

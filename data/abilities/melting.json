@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "All lands are no longer snow.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land",
-        "Description": "All lands are no longer snow.",
-        "RemoveType": "Snow"
-      }
+      "modifications": [
+        {
+          "core_type": "Snow",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

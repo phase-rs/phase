@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack, create a 5/5 black Demon creature token with flying that's tapped and attacking.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever you attack, create a 5/5 black Demon creature token with flying that's tapped and attacking.",
-        "Execute": "TrigToken",
-        "AttackingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "At the beginning of each end step, if two or more creatures died under your control this turn, abandon this scheme.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "Execute": "TrigAbandon",
-        "SVarCompare": "GE2",
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of each end step, if two or more creatures died under your control this turn, abandon this scheme."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

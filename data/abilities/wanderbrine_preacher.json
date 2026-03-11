@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped, you gain 2 life.",
       "mode": "Taps",
-      "params": {
-        "TriggerDescription": "Whenever this creature becomes tapped, you gain 2 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

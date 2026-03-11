@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature.EquippedBy",
-        "PreventionEffect": "True",
-        "Description": "If a source would deal damage to equipped creature, prevent 2 of that damage.",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DBReplace"
-      }
+      "description": "If a source would deal damage to equipped creature, prevent 2 of that damage.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

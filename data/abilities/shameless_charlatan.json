@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Commander creatures you own have \"{2}{U}: This creature becomes a copy of another target creature.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Copy",
-        "Description": "Commander creatures you own have \"{2}{U}: This creature becomes a copy of another target creature.\"",
-        "Affected": "Creature.IsCommander+YouOwn"
-      }
+      "modifications": [
+        {
+          "ability": "Copy",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

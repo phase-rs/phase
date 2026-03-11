@@ -1,48 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Imprint — When CARDNAME enters, search your library for a land card, exile it, then shuffle.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "Destination": "Battlefield"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "ValidCard": "Card.Self",
-        "Static": "True",
-        "Execute": "DBCleanup",
-        "Origin": "Battlefield"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
-        "Origin": "Exile",
-        "Execute": "DBForget",
-        "Static": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.EquippedBy",
-        "Description": "Equipped creature gets +1/+1 for each land on the battlefield with the same name as the exiled card.",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1 for each land on the battlefield with the same name as the exiled card.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Imprint — When CARDNAME enters, search your library for a land card, exile it, then shuffle.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSourceLKI"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

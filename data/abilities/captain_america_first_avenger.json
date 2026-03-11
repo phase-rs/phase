@@ -2,56 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "3",
+            "type": "Mana"
+          },
+          {
+            "cost": "Unattach<Equipment.Attached+cmcEQX/an Equipment attached to NICKNAME>",
+            "type": "Mana"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "He deals damage equal to that Equipment's mana value divided as you choose among one, two, or three targets.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "3"
-          },
-          {
-            "type": "Mana",
-            "cost": "Unattach<Equipment.Attached+cmcEQX/an Equipment attached to NICKNAME>"
-          }
-        ]
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Throw . . . —",
-        "TargetMin": "1",
-        "TargetMax": "3",
-        "TgtPrompt": "Select any target to distribute damage to",
-        "XAnnounceTitle": "mana value of Equipment to unattach",
-        "SpellDescription": "He deals damage equal to that Equipment's mana value divided as you choose among one, two, or three targets.",
-        "DividedAsYouChoose": "X",
-        "Announce": "X"
-      }
+      "target_prompt": "Select any target to distribute damage to"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": ". . . Catch — At the beginning of combat on your turn, attach up one target Equipment you control to NICKNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "DBAttach",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": ". . . Catch — At the beginning of combat on your turn, attach up one target Equipment you control to NICKNAME."
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

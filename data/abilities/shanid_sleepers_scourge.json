@@ -1,39 +1,79 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other legendary creatures you control have menace.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land.Legendary+YouCtrl",
-        "TriggerDescription": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
       "mode": "SpellCast",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card.Legendary+YouCtrl",
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Legendary+Other+YouCtrl",
-        "AddKeyword": "Menace",
-        "Description": "Other legendary creatures you control have menace."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

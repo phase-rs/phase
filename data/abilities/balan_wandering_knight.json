@@ -2,43 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatCards": "Equipment.YouCtrl",
-          "AILogic": "EquipAll",
-          "SpellDescription": "Attach all Equipment you control to NICKNAME.",
-          "RepeatSubAbility": "DBAttach"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 W"
+        "cost": "1 W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatCards": "Equipment.YouCtrl",
-        "AILogic": "EquipAll",
-        "SpellDescription": "Attach all Equipment you control to NICKNAME.",
-        "RepeatSubAbility": "DBAttach"
-      }
+      "description": "Attach all Equipment you control to NICKNAME.",
+      "effect": {
+        "description": "Attach all Equipment you control to NICKNAME.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Equipment",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Attached"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has double strike as long as two or more Equipment are attached to it.",
       "mode": "Continuous",
-      "params": {
-        "PresentCompare": "GE2",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has double strike as long as two or more Equipment are attached to it.",
-        "AddKeyword": "Double Strike",
-        "IsPresent": "Equipment.Attached"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, change CARDNAME's base toughness to 1 plus the number of creature cards in your graveyard. (This effect lasts indefinitely.)",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, change CARDNAME's base toughness to 1 plus the number of creature cards in your graveyard. (This effect lasts indefinitely.)",
-        "ValidPlayer": "You",
-        "Execute": "TrigTough",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

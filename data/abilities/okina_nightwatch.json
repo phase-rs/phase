@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GTY",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have more cards in hand than each opponent, CARDNAME gets +3/+3.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "SVarCompare": "GTY",
-        "Description": "As long as you have more cards in hand than each opponent, CARDNAME gets +3/+3.",
-        "AddPower": "3",
-        "CheckSVar": "X",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,35 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME, each player creates a Food token.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "TriggerDescription": "When you planeswalk to CARDNAME, each player creates a Food token.",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Sixty-Six Seconds — At the beginning of your upkeep, sacrifice a creature with the least toughness among creatures you control. Then investigate.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigChoose",
-        "TriggerDescription": "Sixty-Six Seconds — At the beginning of your upkeep, sacrifice a creature with the least toughness among creatures you control. Then investigate.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Command"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, activated abilities of artifact tokens you control cost {2} less to activate this turn.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Whenever chaos ensues, activated abilities of artifact tokens you control cost {2} less to activate this turn.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

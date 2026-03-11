@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
-      "mode": "Phase",
-      "params": {
-        "PhaseCount": "2",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, CARDNAME and the top creature card in your library without flying perpetually gain flying.",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.tapped",
-        "Execute": "TrigPerpetual",
-        "Phase": "Main",
-        "PresentDefined": "Self"
-      }
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, CARDNAME and the top creature card in your library without flying perpetually gain flying.",
+      "mode": "Phase"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap each creature you control with a +1/+1 counter on it during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "Description": "Untap each creature you control with a +1/+1 counter on it during each other player's untap step.",
-        "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

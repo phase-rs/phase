@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When a player casts a spell, sacrifice CARDNAME. If you do, each of that player's opponents draws three cards.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When a player casts a spell, sacrifice CARDNAME. If you do, each of that player's opponents draws three cards.",
-        "Execute": "TrigSac",
-        "ValidActivatingPlayer": "Player",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

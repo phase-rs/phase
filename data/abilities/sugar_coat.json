@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is a colorless Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life\" and loses all other card types and abilities.",
       "mode": "Continuous",
-      "params": {
-        "RemoveAllAbilities": "True",
-        "SetColor": "Colorless",
-        "Description": "Enchanted permanent is a colorless Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life\" and loses all other card types and abilities.",
-        "AddType": "Food & Artifact",
-        "AddAbility": "FoodSac",
-        "Affected": "Permanent.EnchantedBy",
-        "RemoveCardTypes": "True"
-      }
+      "modifications": [
+        {
+          "ability": "FoodSac",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Food & Artifact",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

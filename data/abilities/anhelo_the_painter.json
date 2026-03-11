@@ -1,20 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Sorcery.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "condition": {
+        "compare": "EQ0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "The first instant or sorcery spell you cast each turn has casualty 2. (As you cast that spell, you may sacrifice a creature with power 2 or greater. When you do, copy the spell and you may choose new targets for the copy.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Casualty:2",
-        "SVarCompare": "EQ0",
-        "Description": "The first instant or sorcery spell you cast each turn has casualty 2. (As you cast that spell, you may sacrifice a creature with power 2 or greater. When you do, copy the spell and you may choose new targets for the copy.)",
-        "AffectedZone": "Stack",
-        "Affected": "Instant.YouCtrl,Sorcery.YouCtrl",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Casualty:2",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

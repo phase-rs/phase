@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature becomes tapped, target creature an opponent controls gets -3/-0 until end of turn.",
       "mode": "Taps",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever this creature becomes tapped, target creature an opponent controls gets -3/-0 until end of turn.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "OpenAttraction",
-        "params": {
-          "SpellDescription": "Open two Attractions. (Put the top two cards of your Attraction deck onto the battlefield.)",
-          "Amount": "2"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Open two Attractions. (Put the top two cards of your Attraction deck onto the battlefield.)",
-        "Amount": "2"
-      }
+      "description": "Open two Attractions. (Put the top two cards of your Attraction deck onto the battlefield.)",
+      "effect": {
+        "description": "Open two Attractions. (Put the top two cards of your Attraction deck onto the battlefield.)",
+        "name": "OpenAttraction",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

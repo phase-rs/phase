@@ -2,27 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.nonCreature+cmcEQX"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X X 1"
+        "cost": "X X 1",
+        "type": "Mana"
       },
+      "description": "Destroy target noncreature artifact with mana value X.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target noncreature artifact",
-        "SpellDescription": "Destroy target noncreature artifact with mana value X."
-      }
+      "target_prompt": "Select target noncreature artifact"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

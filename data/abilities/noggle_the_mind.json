@@ -1,22 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature loses all abilities and is a colorless Noggle with base power and toughness 1/1. (It loses all colors and all other creature types.)",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "1",
-        "RemoveCreatureTypes": "True",
-        "SetToughness": "1",
-        "Affected": "Creature.EnchantedBy",
-        "AddType": "Noggle",
-        "Description": "Enchanted creature loses all abilities and is a colorless Noggle with base power and toughness 1/1. (It loses all colors and all other creature types.)",
-        "SetColor": "Colorless",
-        "RemoveAllAbilities": "True"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Noggle",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

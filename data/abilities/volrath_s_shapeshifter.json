@@ -2,40 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Discard a card.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "VolrathsShapeshifter",
-        "SpellDescription": "Discard a card.",
-        "Mode": "TgtChoose",
-        "Defined": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "EffectZone": "Battlefield",
-        "GainTextOf": "TopOfGraveyard.Creature",
-        "GainTextAbilities": "VolrathDiscard",
-        "Description": "As long as the top card of your graveyard is a creature card, CARDNAME has the full text of that card and has the text \"{2}: Discard a card.\" (CARDNAME has that card's name, mana cost, color, types, abilities, power, and toughness.)"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as the top card of your graveyard is a creature card, CARDNAME has the full text of that card and has the text \"{2}: Discard a card.\" (CARDNAME has that card's name, mana cost, color, types, abilities, power, and toughness.)",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

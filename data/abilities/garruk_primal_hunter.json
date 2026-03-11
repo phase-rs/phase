@@ -2,71 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 3/3 green Beast creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_3_3_beast",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 3/3 green Beast creature token.",
-        "Planeswalker": "True"
-      }
-    },
-    {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw cards equal to the greatest power among creatures you control.",
-        "Planeswalker": "True",
-        "Defined": "You"
-      }
-    },
-    {
-      "kind": "Activated",
-      "effect": {
         "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Draw cards equal to the greatest power among creatures you control.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    },
+    {
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "Create a 6/6 green Wurm creature token for each land you control.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
         "name": "g_6_6_wurm",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "Y",
-        "TokenOwner": "You",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Create a 6/6 green Wurm creature token for each land you control."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

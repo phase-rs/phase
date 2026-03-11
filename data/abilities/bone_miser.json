@@ -1,36 +1,55 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you discard a creature card, create a 2/2 black Zombie creature token.",
       "mode": "Discarded",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerDescription": "Whenever you discard a creature card, create a 2/2 black Zombie creature token.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you discard a land card, add {B}{B}.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Land.YouCtrl",
-        "TriggerDescription": "Whenever you discard a land card, add {B}{B}.",
-        "Execute": "TrigMana",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you discard a noncreature, nonland card, draw a card.",
       "mode": "Discarded",
-      "params": {
-        "TriggerDescription": "Whenever you discard a noncreature, nonland card, draw a card.",
-        "ValidCard": "Card.nonLand+nonCreature+YouCtrl",
-        "Execute": "TrigDraw",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

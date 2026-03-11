@@ -2,51 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
-        "destination": "Hand",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W W"
+            "cost": "3 W W",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Search your library for a Dinosaur card, reveal it, put it into your hand, then shuffle.",
-        "ChangeType": "Dinosaur"
-      }
+      "description": "Search your library for a Dinosaur card, reveal it, put it into your hand, then shuffle.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Library",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may reveal a Dinosaur card from your hand. If you do, you gain 2 life.",
       "mode": "Phase",
-      "params": {
-        "Execute": "ABGainLife",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, you may reveal a Dinosaur card from your hand. If you do, you gain 2 life.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

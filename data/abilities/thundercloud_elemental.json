@@ -2,50 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature.toughnessLE2",
-          "SpellDescription": "Tap all creatures with toughness 2 or less."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.toughnessLE2",
-        "SpellDescription": "Tap all creatures with toughness 2 or less."
-      }
+      "description": "Tap all creatures with toughness 2 or less.",
+      "effect": {
+        "description": "Tap all creatures with toughness 2 or less.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "RemoveKeywords": "Flying",
-          "SpellDescription": "All other creatures lose flying until end of turn.",
-          "ValidCards": "Creature.StrictlyOther"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U"
+        "cost": "3 U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveKeywords": "Flying",
-        "SpellDescription": "All other creatures lose flying until end of turn.",
-        "ValidCards": "Creature.StrictlyOther"
-      }
+      "description": "All other creatures lose flying until end of turn.",
+      "effect": {
+        "description": "All other creatures lose flying until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

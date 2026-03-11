@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, put two +1/+1 counters on CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put two +1/+1 counters on CARDNAME.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TargetsValid": "Card.Self",
-        "Execute": "TrigPutCounter"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each end step, each player gains control of all nontoken permanents they own.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigGainControl",
-        "TriggerDescription": "At the beginning of each end step, each player gains control of all nontoken permanents they own.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

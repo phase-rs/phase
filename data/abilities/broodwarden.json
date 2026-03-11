@@ -1,18 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Eldrazi"
+          },
+          {
+            "type": "Other",
+            "value": "Spawn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Eldrazi Spawn creatures you control get +2/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Eldrazi Spawn creatures you control get +2/+1.",
-        "Affected": "Creature.Eldrazi+Spawn+YouCtrl",
-        "AddPower": "2",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

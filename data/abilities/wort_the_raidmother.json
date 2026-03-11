@@ -1,30 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "WortETB",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, create two 1/1 red and green Goblin Warrior creature tokens.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Each red or green instant or sorcery spell you cast has conspire. (As you cast the spell, you may tap two untapped creatures you control that share a color with it. When you do, copy it and you may choose new targets for the copy.)",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "AffectedZone": "Stack",
-        "Description": "Each red or green instant or sorcery spell you cast has conspire. (As you cast the spell, you may tap two untapped creatures you control that share a color with it. When you do, copy it and you may choose new targets for the copy.)",
-        "AddKeyword": "Conspire",
-        "Affected": "Instant.Green+YouCtrl+wasCast,Instant.Red+YouCtrl+wasCast,Sorcery.Red+YouCtrl+wasCast,Sorcery.Green+YouCtrl+wasCast"
-      }
+      "modifications": [
+        {
+          "keyword": "Conspire",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, create two 1/1 red and green Goblin Warrior creature tokens.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

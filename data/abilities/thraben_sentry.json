@@ -1,34 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever another creature you control dies, you may transform CARDNAME.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigTransform",
-            "OptionalDecider": "You",
-            "TriggerZones": "Battlefield",
-            "Origin": "Battlefield",
-            "TriggerDescription": "Whenever another creature you control dies, you may transform CARDNAME.",
-            "ValidCard": "Creature.Other+YouCtrl",
-            "Destination": "Graveyard"
+          "optional": true,
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

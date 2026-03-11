@@ -1,56 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "3 RW RW",
+            "type": "Mana"
+          },
+          "description": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Exile",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "3 RW RW"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberChanged": "True",
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
-            "SorcerySpeed": "True",
-            "SubAbility": "DBReturn"
-          }
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Origin": "Any",
-            "Execute": "TrigChange",
-            "TriggerDescription": "When CARDNAME enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

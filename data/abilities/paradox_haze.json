@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted player's first upkeep each turn, that player gets an additional upkeep step after this step.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.EnchantedBy",
-        "Execute": "AddUpkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of enchanted player's first upkeep each turn, that player gets an additional upkeep step after this step.",
-        "FirstUpkeep": "True"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

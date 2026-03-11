@@ -1,87 +1,84 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "1"
+                "cost": "1",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBExile",
-            "SpellDescription": "Draw a card, then exile a card from your hand. If cards with five or more different mana values are exiled with CARDNAME, you gain 5 life, untap CARDNAME, and transform it."
-          }
+          "description": "Draw a card, then exile a card from your hand. If cards with five or more different mana values are exiled with CARDNAME, you gain 5 life, untap CARDNAME, and transform it.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Static": "True",
-            "Origin": "Exile",
-            "ValidCard": "Card.IsRemembered+ExiledWithSource",
-            "Execute": "DBForget",
-            "Destination": "Any"
+          "origin": "Exile",
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "IsRemembered"
+              },
+              {
+                "type": "Other",
+                "value": "ExiledWithSource"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "DBCleanup",
-            "Destination": "Any",
-            "Origin": "Battlefield",
-            "Static": "True"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "SpellDescription": "Add X mana of any one color, where X is your life total.",
-              "Amount": "X"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add X mana of any one color, where X is your life total.",
-            "Amount": "X"
-          }
+          "description": "Add X mana of any one color, where X is your life total.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 2 life.",
       "mode": "AttackerUnblocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 2 life.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBNoCombatDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

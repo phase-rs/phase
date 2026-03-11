@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "BeginningOfOppTurn",
-          "SpellDescription": "Your opponents can't cast spells this turn.",
-          "StaticAbilities": "STCantBeCast"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "BeginningOfOppTurn",
-        "SpellDescription": "Your opponents can't cast spells this turn.",
-        "StaticAbilities": "STCantBeCast"
-      }
+      "description": "Your opponents can't cast spells this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

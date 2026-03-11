@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "ResultSubAbilities": "1-9:DBTapAll,10-19:TapAndLock,20:TapLockETBEffect",
-          "SpellDescription": "Roll a d20.",
-          "Sides": "20"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ResultSubAbilities": "1-9:DBTapAll,10-19:TapAndLock,20:TapLockETBEffect",
-        "SpellDescription": "Roll a d20.",
-        "Sides": "20"
-      }
+      "description": "Roll a d20.",
+      "effect": {
+        "description": "Roll a d20.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,86 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME gains \"{T}: Add {G}\" until your next turn.",
+      "duration": "UntilYourNextTurn",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Defined": "Self",
-        "Duration": "UntilYourNextTurn",
-        "SpellDescription": "CARDNAME gains \"{T}: Add {G}\" until your next turn.",
-        "Abilities": "ABMana",
-        "StackDescription": "SpellDescription"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 green Squirrel creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_squirrel",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "StackDescription": "REP Create_{p:You} creates",
-        "SpellDescription": "Create a 1/1 green Squirrel creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "SpellDescription": "You get an emblem with \"At the beginning of your precombat main phase, add {G} for each creature you control.\"",
-          "Name": "Emblem — Wrenn and One",
-          "Duration": "Permanent",
-          "StackDescription": "REP You get_{p:You} gets",
-          "Triggers": "TrigCradle",
-          "Image": "emblem_wrenn_and_one"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "You get an emblem with \"At the beginning of your precombat main phase, add {G} for each creature you control.\"",
-        "Name": "Emblem — Wrenn and One",
-        "Duration": "Permanent",
-        "StackDescription": "REP You get_{p:You} gets",
-        "Triggers": "TrigCradle",
-        "Image": "emblem_wrenn_and_one"
-      }
+      "description": "You get an emblem with \"At the beginning of your precombat main phase, add {G} for each creature you control.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

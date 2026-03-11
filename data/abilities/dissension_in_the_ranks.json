@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Fight",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.blocking"
-        }
-      },
       "cost": null,
+      "description": "Target blocking creature fights another target blocking creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Fight"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TgtPrompt": "Select two target blocking creatures",
-        "SpellDescription": "Target blocking creature fights another target blocking creature.",
-        "TargetMax": "2"
-      }
+      "target_prompt": "Select two target blocking creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,107 +2,86 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "Untap CARDNAME.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MustBlock",
-        "params": {
-          "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
-        "ValidTgts": "Creature"
-      }
+      "description": "Target creature blocks CARDNAME this turn if able.",
+      "effect": {
+        "description": "Target creature blocks CARDNAME this turn if able.",
+        "name": "MustBlock",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TgtPrompt": "Select target spell that targets only CARDNAME",
-          "TargetType": "Spell.numTargets EQ1+IsTargeting Self",
-          "ValidTgts": "Card",
-          "SpellDescription": "Change the target of target spell that targets only CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Change the target of target spell that targets only CARDNAME.",
+      "effect": {
+        "description": "Change the target of target spell that targets only CARDNAME.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell that targets only CARDNAME",
-        "TargetType": "Spell.numTargets EQ1+IsTargeting Self",
-        "ValidTgts": "Card",
-        "SpellDescription": "Change the target of target spell that targets only CARDNAME."
-      }
+      "target_prompt": "Select target spell that targets only CARDNAME"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +1/-1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 1,
-        "toughness": -1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets -1/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": -1,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets -1/+1 until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

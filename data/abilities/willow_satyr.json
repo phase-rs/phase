@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Legendary"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Gain control of target legendary creature for as long as you control CARDNAME and CARDNAME remains tapped.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target legendary creature.",
-        "LoseControl": "Untap,LeavesPlay,LoseControl",
-        "SpellDescription": "Gain control of target legendary creature for as long as you control CARDNAME and CARDNAME remains tapped."
-      }
+      "target_prompt": "Select target legendary creature."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

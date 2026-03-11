@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{G}{U}, {T}: Create a 2/2 green and blue Drake creature token with flying.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted land has \"{G}{U}, {T}: Create a 2/2 green and blue Drake creature token with flying.\"",
-        "Affected": "Card.AttachedBy",
-        "AddAbility": "Token"
-      }
+      "modifications": [
+        {
+          "ability": "Token",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

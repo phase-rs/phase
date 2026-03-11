@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, it perpetually gets +1/+1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "When this creature enters, it perpetually gets +1/+1.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, if a creature entered and a creature died this turn, return this card from your graveyard to the battlefield tapped.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigChangeZone",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if a creature entered and a creature died this turn, return this card from your graveyard to the battlefield tapped.",
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "SVarCompare": "EQ2"
-      }
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

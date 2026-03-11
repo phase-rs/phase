@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME is turned face up, exile up to X other target creatures from the battlefield and/or creature cards from graveyards.",
       "mode": "TurnFaceUp",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME is turned face up, exile up to X other target creatures from the battlefield and/or creature cards from graveyards.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME leaves the battlefield, return the exiled cards to their owners' hands.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, return the exiled cards to their owners' hands.",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

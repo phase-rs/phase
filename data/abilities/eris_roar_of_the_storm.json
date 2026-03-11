@@ -1,31 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast your second spell each turn, create a 4/4 red Dragon Elemental creature token with flying and prowess.",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigToken",
-        "ActivatorThisTurnCast": "EQ2",
-        "ValidCard": "Card.YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "EffectZone": "All",
-        "Description": "This spell costs {2} less to cast for each different mana value among instant and sorcery cards in your graveyard.",
-        "Type": "Spell",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {2} less to cast for each different mana value among instant and sorcery cards in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast your second spell each turn, create a 4/4 red Dragon Elemental creature token with flying and prowess.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

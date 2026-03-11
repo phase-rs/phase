@@ -2,23 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player.Opponent",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBGainLife",
-        "SpellDescription": "Each opponent loses two times X life. You gain life equal to the life lost this way."
-      }
+      "description": "Each opponent loses two times X life. You gain life equal to the life lost this way.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

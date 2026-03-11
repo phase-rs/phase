@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player attacks you, target attacking creature gets -2/-0 until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "AttackedTarget": "You",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever a player attacks you, target attacking creature gets -2/-0 until end of turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever a player attacks, if they aren't attacking you, that player chooses an attacking creature. It gets +2/+0 until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "PresentCompare": "EQ0",
-        "TriggerDescription": "Whenever a player attacks, if they aren't attacking you, that player chooses an attacking creature. It gets +2/+0 until end of turn.",
-        "Execute": "TrigChoose",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Creature.attackingYou"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,40 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Defined": "TargetedController",
-          "AILogic": "PayUnlessCost",
-          "Choices": "PayB,Pay3",
-          "SpellDescription": "Counter target black spell unless that spell's controller pays {B} or {3}.",
-          "TargetType": "Spell",
-          "TgtZone": "Stack",
-          "TgtPrompt": "Select target black spell",
-          "ValidTgts": "Card.Black"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 B"
+        "cost": "1 B",
+        "type": "Mana"
       },
+      "description": "Counter target black spell unless that spell's controller pays {B} or {3}.",
+      "effect": {
+        "description": "Counter target black spell unless that spell's controller pays {B} or {3}.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Defined": "TargetedController",
-        "AILogic": "PayUnlessCost",
-        "Choices": "PayB,Pay3",
-        "SpellDescription": "Counter target black spell unless that spell's controller pays {B} or {3}.",
-        "TargetType": "Spell",
-        "TgtZone": "Stack",
-        "TgtPrompt": "Select target black spell",
-        "ValidTgts": "Card.Black"
-      }
+      "target_prompt": "Select target black spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,38 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, it becomes day.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigDay"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "It can't become night.",
       "mode": {
         "Other": "CantChangeDayTime"
-      },
-      "params": {
-        "Description": "It can't become night.",
-        "NewTime": "Night"
       }
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Your opponents can't cast spells with mana value greater than the number of turns they have begun.",
-        "Caster": "Opponent",
-        "cmcGT": "Turns",
-        "ValidCard": "Card"
-      }
+      "description": "Your opponents can't cast spells with mana value greater than the number of turns they have begun.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, it becomes day.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

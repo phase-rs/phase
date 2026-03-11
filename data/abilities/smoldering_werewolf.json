@@ -1,64 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME.",
-              "Defined": "Self",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "4 R R"
+            "cost": "4 R R",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME.",
-            "Defined": "Self",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, it deals 1 damage to each of up to two target creatures.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDealDamage",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, it deals 1 damage to each of up to two target creatures.",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, it deals 2 damage to any target.",
           "mode": "Attacks",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME attacks, it deals 2 damage to any target.",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigDealDamage"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card.",
       "mode": "Phase",
-      "params": {
-        "SVarCompare": "LT1",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

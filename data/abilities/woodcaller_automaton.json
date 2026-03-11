@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you cast it, untap target land you control. It becomes a Treefolk creature with haste and base power and toughness equal to CARDNAME's power and toughness. It's still a land.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self+wasCastByYou",
-        "Execute": "TrigUntap",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, if you cast it, untap target land you control. It becomes a Treefolk creature with haste and base power and toughness equal to CARDNAME's power and toughness. It's still a land."
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

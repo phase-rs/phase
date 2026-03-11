@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+2 and has \"{T}: Destroy target Equipment.\"",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "Description": "Equipped creature gets +1/+2 and has \"{T}: Destroy target Equipment.\"",
-        "AddAbility": "ABDestroy",
-        "Affected": "Card.EquippedBy",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "ability": "ABDestroy",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell",
-          "ValidTgts": "Card",
-          "Optional": "True",
-          "SpellDescription": "You may choose new targets for target spell."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell",
-        "ValidTgts": "Card",
-        "Optional": "True",
-        "SpellDescription": "You may choose new targets for target spell."
-      }
+      "description": "You may choose new targets for target spell.",
+      "effect": {
+        "description": "You may choose new targets for target spell.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Veil of Time — Whenever CARDNAME attacks, you may cast a spell with mana value X or less from your hand without paying its mana cost, where X is the number of attacking creatures.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigCast",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Veil of Time — Whenever CARDNAME attacks, you may cast a spell with mana value X or less from your hand without paying its mana cost, where X is the number of attacking creatures."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

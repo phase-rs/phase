@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Instant",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn,Sorcery.YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Instant.YouOwn,Sorcery.YouOwn",
-        "AffectedZone": "Graveyard",
-        "AddKeyword": "Flashback",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost."
-      }
+      "modifications": [
+        {
+          "keyword": "Flashback",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

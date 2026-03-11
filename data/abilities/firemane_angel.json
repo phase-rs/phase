@@ -2,58 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "6 R R W W",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield. Activate only during your upkeep.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "6 R R W W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "PlayerTurn": "True",
-        "ActivationPhases": "Upkeep",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield. Activate only during your upkeep.",
-        "ActivationZone": "Graveyard"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if CARDNAME is in your graveyard or on the battlefield, you may gain 1 life.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard or on the battlefield, you may gain 1 life.",
-        "IsPresent": "Card.Self",
-        "PresentZone": "Battlefield"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, if CARDNAME is in your graveyard or on the battlefield, you may gain 1 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard or on the battlefield, you may gain 1 life.",
-        "PresentZone": "Graveyard",
-        "TriggerZones": "Graveyard",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You",
-        "Secondary": "True",
-        "IsPresent": "Card.StrictlySelf",
-        "Execute": "TrigGainLife"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

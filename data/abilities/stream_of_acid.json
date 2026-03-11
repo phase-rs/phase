@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land,Creature.nonBlack"
-        }
-      },
       "cost": null,
+      "description": "Destroy target land or nonblack creature.",
+      "effect": {
+        "target": {
+          "card_type": "Land,Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target land or nonblack creature.",
-        "TgtPrompt": "Select target land or nonblack creature"
-      }
+      "target_prompt": "Select target land or nonblack creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,33 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw two cards."
-      }
+      "description": "Draw two cards.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "CheckSVar": "Count$Valid Creature.nonHuman+YouCtrl",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "Amount": "2",
-        "IsPresent": "Creature.Human+YouCtrl",
-        "Description": "CARDNAME costs {2} less to cast if you control a Human creature and a non-Human creature."
-      }
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "Count$Valid Creature.nonHuman+YouCtrl"
+      },
+      "description": "CARDNAME costs {2} less to cast if you control a Human creature and a non-Human creature.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

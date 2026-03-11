@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "SubAbility": "DBEffect",
-          "ValidCards": "Artifact.StrictlyOther",
-          "SpellDescription": "Tap all other artifacts. They don't untap during their controllers' untap steps for as long as CARDNAME remains tapped."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBEffect",
-        "ValidCards": "Artifact.StrictlyOther",
-        "SpellDescription": "Tap all other artifacts. They don't untap during their controllers' untap steps for as long as CARDNAME remains tapped."
-      }
+      "description": "Tap all other artifacts. They don't untap during their controllers' untap steps for as long as CARDNAME remains tapped.",
+      "effect": {
+        "description": "Tap all other artifacts. They don't untap during their controllers' untap steps for as long as CARDNAME remains tapped.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

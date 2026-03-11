@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast CARDNAME, any player may sacrifice a creature. If a player does, counter CARDNAME.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCounter",
-        "TriggerDescription": "When you cast CARDNAME, any player may sacrifice a creature. If a player does, counter CARDNAME.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

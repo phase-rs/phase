@@ -1,17 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures are black.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature",
-        "SetColor": "Black",
-        "Description": "All creatures are black."
-      }
+      "modifications": [
+        {
+          "colors": [
+            "Black"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

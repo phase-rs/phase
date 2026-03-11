@@ -2,87 +2,73 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "SubAbility": "DBPump",
-        "Planeswalker": "True",
-        "SpellDescription": "Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.",
-        "TargetMin": "0"
-      }
+      "description": "Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 white Samurai creature token with vigilance.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_2_2_samurai_vigilance",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 2/2 white Samurai creature token with vigilance."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.tapped"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -2
+        "amount": -2,
+        "type": "Loyalty"
       },
+      "description": "Exile target tapped creature. You gain 2 life.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target tapped creature. You gain 2 life.",
-        "Planeswalker": "True",
-        "TgtPrompt": "Select target tapped creature",
-        "SubAbility": "DBGainLife"
-      }
+      "target_prompt": "Select target tapped creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Activated.Loyalty",
-        "Caster": "You",
-        "Description": "As long as CARDNAME entered this turn, you may activate her loyalty abilities any time you could cast an instant.",
-        "ValidCard": "Card.Self+ThisTurnEntered"
-      }
+      "description": "As long as CARDNAME entered this turn, you may activate her loyalty abilities any time you could cast an instant.",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

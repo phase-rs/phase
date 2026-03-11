@@ -2,19 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
       "effect": {
         "type": "Proliferate"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

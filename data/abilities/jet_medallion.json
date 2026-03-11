@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "Black spells you cast cost {1} less to cast.",
-        "Activator": "You",
-        "ValidCard": "Card.Black",
-        "Type": "Spell",
-        "Amount": "1"
-      }
+      "description": "Black spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterNum": "2",
-          "IsCurse": "True",
-          "SpellDescription": "Put two -1/-1 counters on each creature.",
-          "ValidCards": "Creature",
-          "CounterType": "M1M1"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterNum": "2",
-        "IsCurse": "True",
-        "SpellDescription": "Put two -1/-1 counters on each creature.",
-        "ValidCards": "Creature",
-        "CounterType": "M1M1"
-      }
+      "description": "Put two -1/-1 counters on each creature.",
+      "effect": {
+        "description": "Put two -1/-1 counters on each creature.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.cmcLEX"
-        }
-      },
       "cost": null,
+      "description": "Gain control of target creature with mana value X or less. If X is 5 or more, create a token that's a copy of that creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBCopy",
-        "TgtPrompt": "Select target creature with mana value X or less",
-        "SpellDescription": "Gain control of target creature with mana value X or less. If X is 5 or more, create a token that's a copy of that creature."
-      }
+      "target_prompt": "Select target creature with mana value X or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever one or more Dragons you control deal combat damage to an opponent, ABILITY",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigCharm",
-        "TriggerDescription": "Whenever one or more Dragons you control deal combat damage to an opponent, ABILITY",
-        "CombatDamage": "True",
-        "ValidSource": "Dragon.YouCtrl",
-        "ValidTarget": "Opponent",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Dragon",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

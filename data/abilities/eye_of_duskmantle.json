@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.surveilledThisTurn",
-        "MayPlay": "True",
-        "MayPlayAltManaCost": "PayLife<ConvertedManaCost>",
-        "Description": "You may play lands and cast spells from among cards in your graveyard you've surveilled this turn. If you cast a spell this way, you pay life equal to its mana value rather than paying its mana cost.",
-        "AffectedZone": "Graveyard"
-      }
+      "affected": {
+        "card_type": "Card",
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may play lands and cast spells from among cards in your graveyard you've surveilled this turn. If you cast a spell this way, you pay life equal to its mana value rather than paying its mana cost.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

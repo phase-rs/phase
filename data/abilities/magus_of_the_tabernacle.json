@@ -1,17 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "UpkeepCostTrigger",
-        "Affected": "Creature",
-        "Description": "All creatures have \"At the beginning of your upkeep, sacrifice this creature unless you pay {1}.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "description": "All creatures have \"At the beginning of your upkeep, sacrifice this creature unless you pay {1}.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

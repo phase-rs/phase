@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "Description": "You may cast CARDNAME from your graveyard using its blitz ability.",
-        "Affected": "Card.Self",
-        "ValidSA": "Spell.Blitz",
-        "MayPlay": "True",
-        "AffectedZone": "Graveyard"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast CARDNAME from your graveyard using its blitz ability.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

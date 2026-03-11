@@ -2,102 +2,75 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "TgtPrompt": "Select target creature you control",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Creature.YouCtrl",
-          "ExileOnMoved": "Battlefield",
-          "SpellDescription": "Up to one target creature you control can't be blocked this turn. Whenever that creature deals damage this turn, return it to its owner's hand.",
-          "Planeswalker": "True",
-          "Triggers": "Trig",
-          "TargetMin": "0",
-          "RememberObjects": "Targeted",
-          "TargetMax": "1",
-          "StaticAbilities": "Unblockable"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Up to one target creature you control can't be blocked this turn. Whenever that creature deals damage this turn, return it to its owner's hand.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature you control",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Creature.YouCtrl",
-        "ExileOnMoved": "Battlefield",
-        "SpellDescription": "Up to one target creature you control can't be blocked this turn. Whenever that creature deals damage this turn, return it to its owner's hand.",
-        "Planeswalker": "True",
-        "Triggers": "Trig",
-        "TargetMin": "0",
-        "RememberObjects": "Targeted",
-        "TargetMax": "1",
-        "StaticAbilities": "Unblockable"
-      }
+      "target_prompt": "Select target creature you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals 2 damage to target tapped creature for each card you've drawn this turn.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "Y"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature.tapped"
-        }
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "CARDNAME deals 2 damage to target tapped creature for each card you've drawn this turn.",
-        "TgtPrompt": "Select target tapped creature"
-      }
+      "target_prompt": "Select target tapped creature"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Create a Shard token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_e_shard_draw",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a Shard token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, create X Shard tokens. (They're enchantments with \"{2}, Sacrifice this enchantment: Scry 1, then draw a card.\")",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, create X Shard tokens. (They're enchantments with \"{2}, Sacrifice this enchantment: Scry 1, then draw a card.\")",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

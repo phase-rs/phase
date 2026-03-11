@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, if that player has no cards in hand, you draw a card and you lose 1 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "SVarCompare": "EQ0",
-        "ValidPlayer": "Player",
-        "CheckSVar": "TrigCount",
-        "TriggerDescription": "At the beginning of each player's upkeep, if that player has no cards in hand, you draw a card and you lose 1 life.",
-        "Execute": "TrigDraw"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

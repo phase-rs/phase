@@ -2,65 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 B"
+            "cost": "2 B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "PayLife<2>"
+            "cost": "PayLife<2>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Return target creature card from your graveyard to the battlefield. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "TgtPrompt": "Choose target creature card in your graveyard",
-        "SpellDescription": "Return target creature card from your graveyard to the battlefield. Activate only as a sorcery."
-      }
+      "target_prompt": "Choose target creature card in your graveyard"
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME costs {2} less for each creature card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies, put it on the bottom of its owner's library.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a creature you control dies, put it on the bottom of its owner's library.",
-        "Origin": "Battlefield",
-        "Execute": "TrigChange",
-        "Destination": "Graveyard",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "EffectZone": "All",
-        "Description": "CARDNAME costs {2} less for each creature card in your graveyard.",
-        "ValidCard": "Card.Self",
-        "Type": "Spell"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

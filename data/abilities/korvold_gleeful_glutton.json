@@ -1,31 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, put X +1/+1 counters on NICKNAME and draw X cards, where X is the number of permanent types among cards in your graveyard.",
-        "ValidSource": "Card.Self",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "DBCounter",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Description": "This spell costs {1} less to cast for each card type among permanents you've sacrificed this turn.",
-        "Amount": "SacrificedPermanentsTypes",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {1} less to cast for each card type among permanents you've sacrificed this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, put X +1/+1 counters on NICKNAME and draw X cards, where X is the number of permanent types among cards in your graveyard.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

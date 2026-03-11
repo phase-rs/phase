@@ -2,33 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "AtEOT": "Sacrifice",
-          "ValidTgts": "Creature.nonLegendary+YouCtrl",
-          "SpellDescription": "Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.",
-          "TgtPrompt": "Select target nonlegendary creature you control",
-          "AddKeywords": "Haste"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.",
+      "effect": {
+        "description": "Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AtEOT": "Sacrifice",
-        "ValidTgts": "Creature.nonLegendary+YouCtrl",
-        "SpellDescription": "Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.",
-        "TgtPrompt": "Select target nonlegendary creature you control",
-        "AddKeywords": "Haste"
-      }
+      "target_prompt": "Select target nonlegendary creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

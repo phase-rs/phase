@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a spell you've cast is countered, draw a card.",
       "mode": "Countered",
-      "params": {
-        "ValidSA": "Spell",
-        "TriggerDescription": "Whenever a spell you've cast is countered, draw a card.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.wasCastByYou",
-        "Execute": "DBDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

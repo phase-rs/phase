@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you attack with three or more creatures, CARDNAME gets +2/+0 until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackersAmount": "GE3",
-        "ValidAttackers": "Creature",
-        "TriggerDescription": "Whenever you attack with three or more creatures, CARDNAME gets +2/+0 until end of turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "AttackingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

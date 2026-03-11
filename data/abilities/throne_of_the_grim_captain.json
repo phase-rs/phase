@@ -1,49 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mill",
-            "count": 2,
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Mill two cards."
-          }
+          "description": "Mill two cards.",
+          "effect": {
+            "count": 2,
+            "target": {
+              "type": "Any"
+            },
+            "type": "Mill"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, each opponent sacrifices a nonland permanent. Then you may put an exiled creature card used to craft CARDNAME onto the battlefield under your control tapped and attacking.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "DBSacrifice",
-            "TriggerDescription": "Whenever CARDNAME attacks, each opponent sacrifices a nonland permanent. Then you may put an exiled creature card used to craft CARDNAME onto the battlefield under your control tapped and attacking.",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Description": "CARDNAME costs {1} less to cast for each instant and sorcery card in your graveyard.",
-        "EffectZone": "All"
-      }
+      "description": "CARDNAME costs {1} less to cast for each instant and sorcery card in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

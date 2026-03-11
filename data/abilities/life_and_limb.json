@@ -1,20 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Forest,Saproling",
+        "type": "Typed"
+      },
+      "description": "All Forests and all Saprolings are 1/1 green Saproling creatures and Forest lands in addition to their other types. (They're affected by summoning sickness.)",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "1",
-        "Affected": "Forest,Saproling",
-        "SetColor": "Green",
-        "AddType": "Land & Creature & Forest & Saproling",
-        "Description": "All Forests and all Saprolings are 1/1 green Saproling creatures and Forest lands in addition to their other types. (They're affected by summoning sickness.)",
-        "SetPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 1
+        },
+        {
+          "core_type": "Land & Creature & Forest & Saproling",
+          "type": "AddType"
+        },
+        {
+          "colors": [
+            "Green"
+          ],
+          "type": "SetColor"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

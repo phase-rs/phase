@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBMill",
-          "RepeatPlayers": "Player.Opponent",
-          "SpellDescription": "Each opponent mills eight cards. If this spell was kicked, instead each opponent mills half their library, rounded up."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBMill",
-        "RepeatPlayers": "Player.Opponent",
-        "SpellDescription": "Each opponent mills eight cards. If this spell was kicked, instead each opponent mills half their library, rounded up."
-      }
+      "description": "Each opponent mills eight cards. If this spell was kicked, instead each opponent mills half their library, rounded up.",
+      "effect": {
+        "description": "Each opponent mills eight cards. If this spell was kicked, instead each opponent mills half their library, rounded up.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

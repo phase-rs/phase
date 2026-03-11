@@ -1,46 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell with mana value 5 or greater, put a +1/+1 counter on CARDNAME.",
           "mode": "SpellCast",
-          "params": {
-            "ValidActivatingPlayer": "You",
-            "Execute": "TrigPutCounter",
-            "ValidCard": "Card.cmcGE5",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever you cast a spell with mana value 5 or greater, put a +1/+1 counter on CARDNAME."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Draw two cards, then discard two cards. (Then exile this card. You may cast the creature later from exile.)",
-            "SubAbility": "DBDiscard"
-          }
+          "description": "Draw two cards, then discard two cards. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,55 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, if you control four or more creatures, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "PresentCompare": "GE4",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your upkeep, if you control four or more creatures, transform CARDNAME.",
-            "Phase": "Upkeep",
-            "IsPresent": "Creature.YouCtrl",
-            "ValidPlayer": "You"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "TriggerDescription": "At the beginning of your end step, create a 1/1 white and black Human Cleric creature token.",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "SetToughness": "X",
-            "CharacteristicDefining": "True",
-            "SetPower": "X",
-            "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control."
-          }
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to the number of creatures you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, create a 1/1 white and black Human Cleric creature token.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

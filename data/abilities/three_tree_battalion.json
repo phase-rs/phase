@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 6,
-        "destination": "Battlefield"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "Reveal": "False",
-        "AILogic": "AtOppEOT",
-        "RememberChanged": "True",
-        "SpellDescription": "Look at the top six cards of your library. You may put a creature card with mana value 3 or less from among them onto the battlefield, then conjure a duplicate of that card onto the battlefield. The duplicate perpetually has base power and toughness 1/1. Put the rest on the bottom of your library in a random order.",
-        "RestRandomOrder": "True",
-        "StackDescription": "REP Look at_{p:You} looks at & your library_their library & You may_{p:You} may & Put the_{p:You} puts the & your library_their library",
-        "DestinationZone2": "Library",
-        "LibraryPosition": "-1",
-        "ChangeValid": "Creature.YouCtrl+cmcLE3",
-        "SubAbility": "DBConjure",
-        "ChangeValidDesc": "creature card with mana value 3 or less",
-        "Optional": "True"
-      }
+      "description": "Look at the top six cards of your library. You may put a creature card with mana value 3 or less from among them onto the battlefield, then conjure a duplicate of that card onto the battlefield. The duplicate perpetually has base power and toughness 1/1. Put the rest on the bottom of your library in a random order.",
+      "effect": {
+        "count": 6,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,29 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent plays a land, if CARDNAME is an enchantment, CARDNAME becomes a 3/2 Elk Beast creature.",
       "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Land.OppCtrl",
-        "TriggerDescription": "Whenever an opponent plays a land, if CARDNAME is an enchantment, CARDNAME becomes a 3/2 Elk Beast creature.",
-        "IsPresent": "Card.Self+Enchantment",
-        "Execute": "TrigHiddenStagAnimateOppLand",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you play a land, if CARDNAME is a creature, CARDNAME becomes an enchantment.",
       "mode": "LandPlayed",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+Creature",
-        "TriggerDescription": "Whenever you play a land, if CARDNAME is a creature, CARDNAME becomes an enchantment.",
-        "Execute": "TrigHiddenStagAnimateYourLand",
-        "ValidCard": "Land.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

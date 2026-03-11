@@ -1,31 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, if {G}{G} was spent to cast it, exile target artifact or enchantment an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "CheckSVar": "CastSA>Count$Adamant_2.Green.2.0",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When this creature enters, if {G}{G} was spent to cast it, exile target artifact or enchantment an opponent controls.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When this creature enters, if {U}{U} was spent to cast it, draw two cards, then discard a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this creature enters, if {U}{U} was spent to cast it, draw two cards, then discard a card.",
-        "CheckSVar": "CastSA>Count$Adamant_2.Blue.2.0",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

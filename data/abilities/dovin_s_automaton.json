@@ -1,20 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Dovin"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Dovin planeswalker, CARDNAME gets +2/+2 and has vigilance. (Attacking doesn't cause it to tap.)",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Card.Self",
-        "AddToughness": "2",
-        "AddKeyword": "Vigilance",
-        "IsPresent": "Planeswalker.Dovin+YouCtrl",
-        "Description": "As long as you control a Dovin planeswalker, CARDNAME gets +2/+2 and has vigilance. (Attacking doesn't cause it to tap.)"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

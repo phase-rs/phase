@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may pay {1}{B}. If you do, target player discards a card at random.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "OptionalDecider": "TriggeredCardController",
-        "Execute": "TrigDiscard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, you may pay {1}{B}. If you do, target player discards a card at random."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

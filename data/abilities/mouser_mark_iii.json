@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "IsPresent": "Artifact.YouCtrl+Other",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "EQ0",
-        "Description": "This creature can't attack unless you control another artifact."
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Artifact",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This creature can't attack unless you control another artifact.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

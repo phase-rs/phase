@@ -2,111 +2,90 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-          "StaticAbilities": "CanAttack"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Merfolk>"
+        "cost": "tapXType<1/Merfolk>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender.",
-        "StaticAbilities": "CanAttack"
-      }
+      "description": "CARDNAME can attack this turn as though it didn't have defender.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<1/Merfolk>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+1 until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<1/Merfolk>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+1 until end of turn.",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
       "mode": "AbilityCast",
-      "params": {
-        "Static": "True",
-        "Execute": "TrigStore",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, destroy all Merfolk tapped this turn to pay for its abilities.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When CARDNAME dies, destroy all Merfolk tapped this turn to pay for its abilities."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "Phase",
-      "params": {
-        "Phase": "Cleanup",
-        "Static": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBCleanup"
+      "phase": "Cleanup",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "Forget remembered card if it goes into Exile.",
+      "destination": "Exile",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Forget remembered card if it goes into Hand.",
+      "destination": "Hand",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Secondary": "True",
-        "Execute": "DBCleanup",
-        "TriggerDescription": "Forget remembered card if it goes into Exile.",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Destination": "Exile"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Forget remembered card if it goes into Library.",
+      "destination": "Library",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Forget remembered card if it goes into Hand.",
-        "Secondary": "True",
-        "Destination": "Hand",
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Library",
-        "ValidCard": "Card.Self",
-        "Static": "True",
-        "TriggerDescription": "Forget remembered card if it goes into Library.",
-        "Secondary": "True",
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,33 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "Whenever a player draws their second card each turn, that player exiles the top card of their library.",
-        "Number": "2",
-        "ValidPlayer": "Player",
-        "Execute": "TrigDig",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Exile",
-        "MayPlayIgnoreType": "True",
-        "Description": "During each player's turn, that player may cast a spell from among the cards they don't own exiled with CARDNAME and mana of any type can be spent to cast it.",
-        "Affected": "Card.ExiledWithSource+!OwnedBy ActivePlayer",
-        "EffectZone": "Battlefield",
-        "MayPlay": "True",
-        "MayPlayPlayer": "ActivePlayer",
-        "MayPlayLimit": "1"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "During each player's turn, that player may cast a spell from among the cards they don't own exiled with CARDNAME and mana of any type can be spent to cast it.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a player draws their second card each turn, that player exiles the top card of their library.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

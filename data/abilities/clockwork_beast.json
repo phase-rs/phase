@@ -2,52 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P0",
-        "count": 1,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "PlayerTurn": "True",
-        "SpellDescription": "Put up to X +1/+0 counters on CARDNAME. This ability can't cause the total number of +1/+0 counters on CARDNAME to be greater than seven. Activate only during your upkeep.",
-        "Defined": "Self",
-        "UpTo": "True",
-        "MaxFromEffect": "7"
-      }
+      "description": "Put up to X +1/+0 counters on CARDNAME. This ability can't cause the total number of +1/+0 counters on CARDNAME to be greater than seven. Activate only during your upkeep.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P0",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At end of combat, if CARDNAME attacked or blocked this combat, remove a +1/+0 counter from it.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "Execute": "TrigSubCounter",
-        "TriggerDescription": "At end of combat, if CARDNAME attacked or blocked this combat, remove a +1/+0 counter from it.",
-        "Phase": "EndCombat",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+attackedThisCombat,Card.Self+blockedThisCombat"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

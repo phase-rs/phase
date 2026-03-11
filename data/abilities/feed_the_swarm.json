@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl,Enchantment.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or enchantment an opponent controls. You lose life equal to that permanent's mana value.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppCtrl,Enchantment.OppCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or enchantment an opponent controls",
-        "SubAbility": "DBLoseLife",
-        "SpellDescription": "Destroy target creature or enchantment an opponent controls. You lose life equal to that permanent's mana value."
-      }
+      "target_prompt": "Select target creature or enchantment an opponent controls"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

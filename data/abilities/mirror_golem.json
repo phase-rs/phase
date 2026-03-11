@@ -1,121 +1,200 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target card from a graveyard.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigExile",
-        "OptionalDecider": "You"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "ValidCard": "Card.Self"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
-        "Origin": "Exile",
-        "Static": "True",
-        "Execute": "DBForget"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "CheckCreature"
+      },
+      "description": "CARDNAME has protection from each of the exiled card's card types. (Artifact, battle, creature, enchantment, instant, kindred, land, planeswalker, and sorcery are card types.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Creature",
-        "Description": "CARDNAME has protection from each of the exiled card's card types. (Artifact, battle, creature, enchantment, instant, kindred, land, planeswalker, and sorcery are card types.)",
-        "CheckSVar": "CheckCreature"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Creature",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckLand"
+      },
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "CheckLand",
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Land",
-        "SVarCompare": "GE1"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Land",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckEnchantment"
+      },
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "CheckEnchantment",
-        "AddKeyword": "Protection:Enchantment",
-        "SVarCompare": "GE1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Enchantment",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckArtifact"
+      },
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Artifact",
-        "SVarCompare": "GE1",
-        "CheckSVar": "CheckArtifact"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Artifact",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckInstant"
+      },
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Instant",
-        "CheckSVar": "CheckInstant",
-        "SVarCompare": "GE1"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Instant",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckSorcery"
+      },
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Protection:Sorcery",
-        "SVarCompare": "GE1",
-        "CheckSVar": "CheckSorcery"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Sorcery",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckPlaneswalker"
+      },
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Protection:Planeswalker",
-        "Affected": "Card.Self",
-        "CheckSVar": "CheckPlaneswalker",
-        "SVarCompare": "GE1"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Planeswalker",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckKindred"
+      },
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE1",
-        "Affected": "Card.Self",
-        "CheckSVar": "CheckKindred",
-        "AddKeyword": "Protection:Kindred"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Kindred",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "CheckBattle"
+      },
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE1",
-        "AddKeyword": "Protection:Battle",
-        "Affected": "Card.Self",
-        "CheckSVar": "CheckBattle"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Battle",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Imprint — When CARDNAME enters, you may exile target card from a graveyard.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsImprinted"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSourceLKI"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

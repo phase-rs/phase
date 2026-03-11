@@ -1,74 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Dig",
-            "count": 7,
-            "destination": "Library"
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeValid": "Creature",
-            "RememberChanged": "True",
-            "Optional": "True",
-            "RestRandomOrder": "True",
-            "ChangeNum": "1",
-            "LibraryPosition": "0",
-            "SpellDescription": "Look at the top seven cards of your library. You may put a creature card from among them onto the battlefield. If that card has mana value 3 or less, it enters with three additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
-            "PrimaryPrompt": "You may choose a creature card to put on the battlefield",
-            "SubAbility": "DBChangeZone",
-            "StackDescription": "SpellDescription",
-            "ForceRevealToController": "True"
-          }
+          "description": "Look at the top seven cards of your library. You may put a creature card from among them onto the battlefield. If that card has mana value 3 or less, it enters with three additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+          "effect": {
+            "count": 7,
+            "destination": "Library",
+            "type": "Dig"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "G",
-            "params": {
-              "SpellDescription": "Add {G}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {G}."
+          "description": "Add {G}.",
+          "effect": {
+            "produced": [
+              "Green"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [
+        {
+          "description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
-      "triggers": [],
       "statics": [],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "ReplaceWith": "DBTap",
-            "ReplacementResult": "Updated",
-            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped."
-          }
-        }
-      ]
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

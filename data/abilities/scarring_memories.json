@@ -2,37 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Creature",
-        "SpellDescription": "Target opponent sacrifices a creature of their choice, discards a card, and loses 3 life.",
-        "SubAbility": "DBDiscard"
-      }
+      "description": "Target opponent sacrifices a creature of their choice, discards a card, and loses 3 life.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "ValidSA": "Spell",
-        "Description": "You may cast this spell as though it had flash if you control an attacking legendary creature.",
-        "Caster": "You",
-        "IsPresent": "Creature.YouCtrl+attacking+Legendary",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Attacking"
+            },
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "You may cast this spell as though it had flash if you control an attacking legendary creature.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

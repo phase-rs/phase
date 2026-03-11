@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, it deals 4 damage to target non-Dragon creature an opponent controls.",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Trigger": "TrigDealDamage",
-        "Description": "You may exert CARDNAME as it attacks. When you do, it deals 4 damage to target non-Dragon creature an opponent controls.",
-        "Cost": "Exert<1/CARDNAME>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

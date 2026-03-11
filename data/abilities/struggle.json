@@ -1,62 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals damage to target creature equal to the number of lands you control.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Variable",
               "value": "X"
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals damage to target creature equal to the number of lands you control."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Graveyard",
-            "destination": "Library",
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Each player shuffles their graveyard into their library.",
-            "ChangeType": "Card",
-            "Shuffle": "True",
-            "Defined": "Player"
-          }
+          "description": "Each player shuffles their graveyard into their library.",
+          "effect": {
+            "destination": "Library",
+            "origin": "Graveyard",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZoneAll"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

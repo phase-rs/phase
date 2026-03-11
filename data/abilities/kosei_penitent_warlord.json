@@ -1,17 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is enchanted, equipped, and has a counter on it, NICKNAME has \"Whenever CARDNAME deals combat damage to an opponent, you draw that many cards and NICKNAME deals that much damage to each other opponent.\"",
-        "AddTrigger": "DamageTrigger",
-        "Affected": "Card.Self+enchanted+equipped+HasCounters"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is enchanted, equipped, and has a counter on it, NICKNAME has \"Whenever CARDNAME deals combat damage to an opponent, you draw that many cards and NICKNAME deals that much damage to each other opponent.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

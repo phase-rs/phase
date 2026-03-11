@@ -2,40 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<7/Merfolk>"
+        "cost": "tapXType<7/Merfolk>",
+        "type": "Mana"
       },
+      "description": "Counter target spell.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target spell",
-        "SpellDescription": "Counter target spell.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a spell or ability you control counters a spell, you may create a 1/1 blue Merfolk creature token.",
       "mode": "Countered",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCause": "SpellAbility.YouCtrl",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever a spell or ability you control counters a spell, you may create a 1/1 blue Merfolk creature token.",
-        "ValidSA": "Spell",
-        "OptionalDecider": "You"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

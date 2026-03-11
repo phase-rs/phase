@@ -1,31 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control with flying enters, it gains haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump",
-        "ValidCard": "Creature.YouCtrl+withFlying",
-        "TriggerDescription": "Whenever a creature you control with flying enters, it gains haste until end of turn.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a Dragon you control enters, it deals X damage to any target, where X is the number of Dragons you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a Dragon you control enters, it deals X damage to any target, where X is the number of Dragons you control.",
-        "Destination": "Battlefield",
-        "ValidCard": "Dragon.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigDamage"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Dragon",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

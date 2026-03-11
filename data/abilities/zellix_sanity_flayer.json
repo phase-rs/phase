@@ -2,46 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mill",
-        "count": 3,
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target player mills three cards.",
+      "effect": {
+        "count": 3,
+        "target": {
+          "type": "Player"
+        },
+        "type": "Mill"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select a player",
-        "SpellDescription": "Target player mills three cards."
-      }
+      "target_prompt": "Select a player"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Hive Mind — Whenever a player mills one or more creature cards, you create a 1/1 black Horror creature token.",
       "mode": "MilledOnce",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "TriggerDescription": "Hive Mind — Whenever a player mills one or more creature cards, you create a 1/1 black Horror creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

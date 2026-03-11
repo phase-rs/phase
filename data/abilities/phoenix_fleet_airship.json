@@ -1,31 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "X",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "At the beginning of your end step, if you sacrificed a permanent this turn, create a token that's a copy of this Vehicle."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Permanent",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control eight or more permanents named Phoenix Fleet Airship, this Vehicle is an artifact creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "As long as you control eight or more permanents named Phoenix Fleet Airship, this Vehicle is an artifact creature.",
-        "PresentCompare": "GE8",
-        "AddType": "Artifact & Creature",
-        "IsPresent": "Permanent.YouCtrl+namedPhoenix Fleet Airship"
-      }
+      "modifications": [
+        {
+          "core_type": "Artifact & Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you sacrificed a permanent this turn, create a token that's a copy of this Vehicle.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

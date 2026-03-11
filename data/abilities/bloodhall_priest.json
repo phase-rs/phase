@@ -1,34 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, if you have no cards in hand, CARDNAME deals 2 damage to any target.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "PresentZone": "Hand",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Card.YouCtrl",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, if you have no cards in hand, CARDNAME deals 2 damage to any target.",
-        "Execute": "TrigDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, if you have no cards in hand, CARDNAME deals 2 damage to any target.",
       "mode": "Attacks",
-      "params": {
-        "PresentCompare": "EQ0",
-        "IsPresent": "Card.YouCtrl",
-        "Execute": "TrigDamage",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, if you have no cards in hand, CARDNAME deals 2 damage to any target.",
-        "ValidCard": "Card.Self",
-        "PresentZone": "Hand",
-        "Secondary": "True"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,21 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control with a +1/+1 counter on it deals combat damage to a player, you may draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.YouCtrl+counters_GE1_P1P1",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "ValidTarget": "Player",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it deals combat damage to a player, you may draw a card."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

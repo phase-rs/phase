@@ -1,50 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, tap target creature defending player controls.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigTap",
-            "TriggerDescription": "Whenever CARDNAME attacks, tap target creature defending player controls.",
-            "ValidCard": "Card.Self"
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.EnchantedBy",
-            "Description": "Enchanted creature has \"Whenever this creature attacks, tap target creature defending player controls.\"",
-            "AddTrigger": "AttackTrigger",
-            "AddSVar": "AE"
-          }
-        }
-      ],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self",
-            "ReplaceWith": "Exile",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Enchanted creature has \"Whenever this creature attacks, tap target creature defending player controls.\"",
+          "mode": "Continuous"
+        }
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

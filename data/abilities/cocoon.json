@@ -1,43 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "Origin": "Any",
-        "TriggerDescription": "When this Aura enters, tap enchanted creature and put three pupa counters on this Aura."
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, remove a pupa counter from this Aura. If you can't, sacrifice it, put a +1/+1 counter on enchanted creature, and that creature gains flying. (This effect lasts indefinitely.)",
-        "Phase": "Upkeep",
-        "Execute": "TrigRemoveCounter"
+      "description": "Enchanted creature doesn't untap during your untap step if this Aura has a pupa counter on it.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "Description": "Enchanted creature doesn't untap during your untap step if this Aura has a pupa counter on it.",
-        "IsPresent": "Card.Self+counters_GE1_PUPA",
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen",
-        "ValidCard": "Creature.AttachedBy"
+      "description": "When this Aura enters, tap enchanted creature and put three pupa counters on this Aura.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
+    },
+    {
+      "description": "At the beginning of your upkeep, remove a pupa counter from this Aura. If you can't, sacrifice it, put a +1/+1 counter on enchanted creature, and that creature gains flying. (This effect lasts indefinitely.)",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

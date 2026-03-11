@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature",
-          "SpellDescription": "Tap all creatures target player controls.",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "8"
+        "cost": "8",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature",
-        "SpellDescription": "Tap all creatures target player controls.",
-        "ValidTgts": "Player"
-      }
+      "description": "Tap all creatures target player controls.",
+      "effect": {
+        "description": "Tap all creatures target player controls.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

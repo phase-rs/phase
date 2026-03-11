@@ -2,76 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Put target creature on top of its owner's library.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Library",
+        "origin": "Battlefield",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "LibraryPosition": "0",
-        "SpellDescription": "Put target creature on top of its owner's library."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Phases",
-        "params": {
-          "RememberValids": "True",
-          "SpellDescription": "Each creature target opponent controls phases out.",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "ValidTgts": "Opponent",
-          "AllValid": "Creature.TargetedPlayerCtrl",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberValids": "True",
-        "SpellDescription": "Each creature target opponent controls phases out.",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "ValidTgts": "Opponent",
-        "AllValid": "Creature.TargetedPlayerCtrl",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Each creature target opponent controls phases out.",
+      "effect": {
+        "description": "Each creature target opponent controls phases out.",
+        "name": "Phases",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

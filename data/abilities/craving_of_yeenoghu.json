@@ -2,50 +2,60 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
+      "description": "Return CARDNAME from your graveyard to the battlefield attached to target creature you control. CARDNAME perpetually gains \"Enchanted creature gets -1/-1.\" Activate only as a sorcery.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP Return_{p:You} returns & your_their & target creature you control_{c:Targeted} & .\" Activate only as a sorcery._.\"",
-        "TgtPrompt": "Select target creature you control",
-        "SorcerySpeed": "True",
-        "ActivationZone": "Graveyard",
-        "SubAbility": "DBChange",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield attached to target creature you control. CARDNAME perpetually gains \"Enchanted creature gets -1/-1.\" Activate only as a sorcery."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +3/+2, has haste, and attacks each combat if able.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Haste",
-        "AddPower": "3",
-        "AddToughness": "2",
-        "Description": "Enchanted creature gets +3/+2, has haste, and attacks each combat if able."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "MustAttack",
-      "params": {
-        "ValidCreature": "Creature.EnchantedBy"
-      }
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "Description": "If a Wizard entering under your control causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "Destination": "Battlefield",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "ValidCause": "Wizard.YouCtrl"
-      }
+      "description": "If a Wizard entering under your control causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

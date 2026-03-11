@@ -1,32 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ActivationLimit": "1",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever this creature becomes tapped during your turn, untap it. This ability triggers only once each turn.",
-        "PlayerTurn": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "This creature saddles Mounts and crews Vehicles using its toughness rather than its power.",
       "mode": {
         "Other": "TapPowerValue"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This creature saddles Mounts and crews Vehicles using its toughness rather than its power.",
-        "ValidSA": "Activated.Crew+Vehicle,Activated.Saddle+Mount",
-        "Value": "Toughness"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever this creature becomes tapped during your turn, untap it. This ability triggers only once each turn.",
+      "mode": "Taps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

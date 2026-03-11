@@ -2,33 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, up to two target creatures each have base power and toughness 3/3, gain flying, and become blue Illusions in addition to their other colors and types.",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Illusion"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "SpellDescription": "Until end of turn, up to two target creatures each have base power and toughness 3/3, gain flying, and become blue Illusions in addition to their other colors and types.",
-        "Colors": "Blue",
-        "TargetMin": "0",
-        "SubAbility": "DBDraw",
-        "TargetMax": "2"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

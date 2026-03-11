@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Swamp or Forest you control enters, draft a card from CARDNAME's spellbook.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraft",
-        "Origin": "Any",
-        "ValidCard": "Forest.YouCtrl,Swamp.YouCtrl",
-        "TriggerDescription": "Whenever a Swamp or Forest you control enters, draft a card from CARDNAME's spellbook.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Forest",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Swamp.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

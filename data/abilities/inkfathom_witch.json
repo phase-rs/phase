@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Each unblocked creature has base power and toughness 4/1 until end of turn.",
-          "Toughness": "1",
-          "ValidCards": "Creature.unblocked",
-          "Power": "4"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 U B"
+        "cost": "2 U B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each unblocked creature has base power and toughness 4/1 until end of turn.",
-        "Toughness": "1",
-        "ValidCards": "Creature.unblocked",
-        "Power": "4"
-      }
+      "description": "Each unblocked creature has base power and toughness 4/1 until end of turn.",
+      "effect": {
+        "description": "Each unblocked creature has base power and toughness 4/1 until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

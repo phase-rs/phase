@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, create a number of 1/1 black Fungus Zombie creature tokens named Cordyceps Infected equal to the amount of mana spent to cast it.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken"
+      "description": "NICKNAME enters under the control of an opponent of your choice.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "NICKNAME enters under the control of an opponent of your choice.",
-        "ReplaceWith": "DBChooseOpp",
-        "ValidCard": "Card.Self",
-        "Layer": "Control",
-        "Destination": "Battlefield"
+      "description": "When you cast this spell, create a number of 1/1 black Fungus Zombie creature tokens named Cordyceps Infected equal to the amount of mana spent to cast it.",
+      "mode": "SpellCast",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

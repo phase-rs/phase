@@ -2,53 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterNum": "1",
-          "SpellDescription": "Put a +1/+1 counter on each Soldier you control.",
-          "ActivationZone": "Graveyard",
-          "ValidCards": "Soldier.YouCtrl",
-          "CounterType": "P1P1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 W W"
+            "cost": "3 W W",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterNum": "1",
-        "SpellDescription": "Put a +1/+1 counter on each Soldier you control.",
-        "ActivationZone": "Graveyard",
-        "ValidCards": "Soldier.YouCtrl",
-        "CounterType": "P1P1"
-      }
+      "description": "Put a +1/+1 counter on each Soldier you control.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each Soldier you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Soldier",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Soldiers you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "Other Soldiers you control get +1/+1.",
-        "Affected": "Soldier.Other+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

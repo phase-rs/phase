@@ -1,33 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of the end step, if you gained 3 or more life this turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "TriggerZones": "Battlefield",
-            "CheckSVar": "YouLifeGained",
-            "SVarCompare": "GE3",
-            "TriggerDescription": "At the beginning of the end step, if you gained 3 or more life this turn, transform CARDNAME.",
-            "Execute": "TrigTransform"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

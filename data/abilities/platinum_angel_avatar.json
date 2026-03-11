@@ -1,40 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you control an artifact, a creature, an enchantment, and a land, you can't lose the game and your opponents can't win the game.",
       "event": {
         "Other": "GameLoss"
-      },
-      "params": {
-        "CheckSecondSVar": "AvatarCX",
-        "CheckSVar": "AvatarAX",
-        "CheckFourthSVar": "AvatarLX",
-        "Description": "If you control an artifact, a creature, an enchantment, and a land, you can't lose the game and your opponents can't win the game.",
-        "ValidPlayer": "You",
-        "ActiveZones": "Command",
-        "Layer": "CantHappen",
-        "CheckThirdSVar": "AvatarEX"
       }
     },
     {
+      "description": "If you control an artifact, a creature, an enchantment, and a land, you can't lose the game and your opponents can't win the game.",
       "event": {
         "Other": "GameWin"
-      },
-      "params": {
-        "ActiveZones": "Command",
-        "CheckFourthSVar": "AvatarLX",
-        "Secondary": "True",
-        "CheckSecondSVar": "AvatarCX",
-        "CheckSVar": "AvatarAX",
-        "Description": "If you control an artifact, a creature, an enchantment, and a land, you can't lose the game and your opponents can't win the game.",
-        "ValidPlayer": "Opponent",
-        "CheckThirdSVar": "AvatarEX",
-        "Layer": "CantHappen"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

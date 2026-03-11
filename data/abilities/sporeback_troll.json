@@ -2,30 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Creature.counters_GE1_P1P1",
-          "SpellDescription": "Regenerate target creature with a +1/+1 counter on it.",
-          "TgtPrompt": "Select target creature with a +1/+1 counter"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
+      "description": "Regenerate target creature with a +1/+1 counter on it.",
+      "effect": {
+        "description": "Regenerate target creature with a +1/+1 counter on it.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature.counters_GE1_P1P1",
-        "SpellDescription": "Regenerate target creature with a +1/+1 counter on it.",
-        "TgtPrompt": "Select target creature with a +1/+1 counter"
-      }
+      "target_prompt": "Select target creature with a +1/+1 counter"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,40 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
       "mode": "Phase",
-      "params": {
-        "Execute": "CleanupAndRemember",
-        "Static": "True",
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "Player"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player",
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "Execute": "JustCleanup",
-        "Phase": "EndCombat"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player or planeswalker, return to your hand target creature or planeswalker card in your graveyard that wasn't put there this combat.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player,Planeswalker",
-        "CombatDamage": "True",
-        "Execute": "TrigChange",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or planeswalker, return to your hand target creature or planeswalker card in your graveyard that wasn't put there this combat."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Player,Planeswalker",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

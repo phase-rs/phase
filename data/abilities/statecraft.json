@@ -1,30 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature.YouCtrl",
-        "Prevent": "True",
-        "IsCombat": "True",
-        "ActiveZones": "Battlefield",
-        "Description": "Prevent all combat damage that would be dealt to and dealt by creatures you control."
-      }
+      "description": "Prevent all combat damage that would be dealt to and dealt by creatures you control.",
+      "event": "DamageDone"
     },
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Description": "Prevent all combat damage that would be dealt to and dealt by creatures you control.",
-        "ValidSource": "Creature.YouCtrl",
-        "Prevent": "True",
-        "Secondary": "True",
-        "IsCombat": "True"
-      }
+      "description": "Prevent all combat damage that would be dealt to and dealt by creatures you control.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

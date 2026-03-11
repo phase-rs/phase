@@ -2,49 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "W U"
+            "cost": "W U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Reveal<1/CARDNAME>"
+            "cost": "Reveal<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature. (Activate only during your upkeep and only once each turn.)",
-        "Forecast": "True"
-      }
+      "description": "Tap target creature. (Activate only during your upkeep and only once each turn.)",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Creature.EnchantedBy",
-        "ActiveZones": "Battlefield",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

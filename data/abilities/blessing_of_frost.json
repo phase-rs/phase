@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Distribute X +1/+1 counters among any number of creatures you control, where X is the amount of {S} spent to cast this spell.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "DividedAsYouChoose": "X",
-        "SpellDescription": "Distribute X +1/+1 counters among any number of creatures you control, where X is the amount of {S} spent to cast this spell.",
-        "ChoiceTitle": "Choose any number of creatures you control to distribute counters to",
-        "MinChoiceAmount": "0",
-        "ChoiceAmount": "X",
-        "Choices": "Creature.YouCtrl",
-        "SubAbility": "DBDraw"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

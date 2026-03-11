@@ -1,55 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "Commanders you control get +X/+0, where X is the number of commanders you control.",
-            "Affected": "Card.IsCommander+YouCtrl",
-            "AddPower": "+X"
-          }
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "IsCommander"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Commanders you control get +X/+0, where X is the number of commanders you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "You may put a legendary creature card from your hand into the command zone. It's also your commander.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
             "destination": "Command",
+            "origin": "Hand",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "StackDescription": "REP You_{p:You} & your hand_their hand & also your_also {p:You}'s",
-            "ChangeType": "Card.Creature+Legendary+YouOwn",
-            "ChangeTypeDesc": "a legendary creature card",
-            "SelectPrompt": "Select a legendary creature card in your hand",
-            "SpellDescription": "You may put a legendary creature card from your hand into the command zone. It's also your commander.",
-            "Optional": "You",
-            "ChangeNum": "1",
-            "RememberChanged": "True",
-            "SubAbility": "YouAreCommander"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

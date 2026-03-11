@@ -1,30 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Allies — At the beginning of your end step, put a +1/+1 counter on each of up to two other target legendary creatures.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "TriggerDescription": "Allies — At the beginning of your end step, put a +1/+1 counter on each of up to two other target legendary creatures.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Betrayal — Whenever a legendary creature with counters on it dies, draw a card for each counter on it. You lose 2 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidCard": "Creature.Legendary+HasCounters",
-        "TriggerDescription": "Betrayal — Whenever a legendary creature with counters on it dies, draw a card for each counter on it. You lose 2 life."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Legendary"
+          },
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

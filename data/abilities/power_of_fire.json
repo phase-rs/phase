@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"{T}: This creature deals 1 damage to any target.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Damage",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has \"{T}: This creature deals 1 damage to any target.\""
-      }
+      "modifications": [
+        {
+          "ability": "Damage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

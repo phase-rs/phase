@@ -2,67 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "R",
+        "type": "Mana"
+      },
+      "description": "Target creature becomes a Coward until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Coward"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "Target creature becomes a Coward until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 R",
+        "type": "Mana"
+      },
+      "description": "Target creature becomes a Warrior until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Warrior"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "SpellDescription": "Target creature becomes a Warrior until end of turn."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Cowards can't block Warriors.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Warrior",
-        "Description": "Cowards can't block Warriors.",
-        "ValidBlocker": "Creature.Coward"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

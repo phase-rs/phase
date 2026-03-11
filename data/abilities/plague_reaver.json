@@ -2,64 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "TriggerDescription": "Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
-          "RememberObjects": "Targeted & SacrificedCards",
-          "SpellDescription": "Choose target opponent. Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
-          "ValidTgts": "Opponent",
-          "Mode": "Phase",
-          "Phase": "Upkeep",
-          "ValidPlayer": "Player.IsTriggerRemembered",
-          "Execute": "DBChange",
-          "StackDescription": "Return CARDNAME to the battlefield under {p:Targeted}'s control at the beginning of their next upkeep."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "Discard<2/Card>"
+            "cost": "Discard<2/Card>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TriggerDescription": "Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
-        "RememberObjects": "Targeted & SacrificedCards",
-        "SpellDescription": "Choose target opponent. Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
-        "ValidTgts": "Opponent",
-        "Mode": "Phase",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player.IsTriggerRemembered",
-        "Execute": "DBChange",
-        "StackDescription": "Return CARDNAME to the battlefield under {p:Targeted}'s control at the beginning of their next upkeep."
-      }
+      "description": "Choose target opponent. Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
+      "effect": {
+        "description": "Choose target opponent. Return CARDNAME to the battlefield under that player's control at the beginning of their next upkeep.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, sacrifice each other creature you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "Execute": "SacAllOthers",
-        "TriggerDescription": "At the beginning of your end step, sacrifice each other creature you control."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "This creature assigns combat damage equal to its toughness rather than its power.",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This creature assigns combat damage equal to its toughness rather than its power."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

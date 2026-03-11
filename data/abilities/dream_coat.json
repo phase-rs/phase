@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "ActivationLimit": "1",
-          "Defined": "You",
-          "SpellDescription": "Enchanted creature becomes the color or colors of your choice. Activate only once each turn.",
-          "OrColors": "True",
-          "SubAbility": "DBAnimate"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "Defined": "You",
-        "SpellDescription": "Enchanted creature becomes the color or colors of your choice. Activate only once each turn.",
-        "OrColors": "True",
-        "SubAbility": "DBAnimate"
-      }
+      "description": "Enchanted creature becomes the color or colors of your choice. Activate only once each turn.",
+      "effect": {
+        "description": "Enchanted creature becomes the color or colors of your choice. Activate only once each turn.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

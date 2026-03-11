@@ -2,26 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:Targeted} may have CARDNAME deal 4 damage to them. If {p:Targeted} doesn't, {p:You} draws three cards.",
-        "ValidTgts": "Opponent",
-        "UnlessPayer": "Targeted",
-        "IsCurse": "True",
-        "SpellDescription": "Target opponent may have CARDNAME deal 4 damage to them. If that player doesn't, you draw three cards.",
-        "Defined": "You",
-        "UnlessCost": "DamageYou<4>"
-      }
+      "description": "Target opponent may have CARDNAME deal 4 damage to them. If that player doesn't, you draw three cards.",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

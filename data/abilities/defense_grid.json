@@ -1,18 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Amount": "3",
-        "Activator": "Player.NonActive",
-        "Type": "Spell",
-        "Description": "Each spell costs {3} more to cast except during its controller's turn."
-      }
+      "description": "Each spell costs {3} more to cast except during its controller's turn.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

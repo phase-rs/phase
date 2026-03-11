@@ -1,28 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "1",
-        "ValidCard": "Card.Colorless+cmcGE7",
-        "Description": "Colorless spells you cast with mana value 7 or greater cost {1} less to cast.",
-        "Type": "Spell",
-        "Activator": "You"
-      }
+      "description": "Colorless spells you cast with mana value 7 or greater cost {1} less to cast.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Colorless"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other colorless creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Colorless+Other+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Other colorless creatures you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

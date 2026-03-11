@@ -1,29 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "GainLife",
-      "params": {
-        "ValidPlayer": "You",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "GainDouble",
-        "AILogic": "DoubleLife",
-        "Description": "If you would gain life, you gain twice that much life instead."
-      }
+      "description": "If you would gain life, you gain twice that much life instead.",
+      "event": "GainLife"
     },
     {
-      "event": "Draw",
-      "params": {
-        "ValidPlayer": "You",
-        "ReplaceWith": "DrawTwo",
-        "Description": "If you would draw a card except the first one you draw in each of your draw steps, draw two cards instead.",
-        "ActiveZones": "Battlefield",
-        "NotFirstCardInDrawStep": "True"
-      }
+      "description": "If you would draw a card except the first one you draw in each of your draw steps, draw two cards instead.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

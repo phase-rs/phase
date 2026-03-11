@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDealtOnce",
-      "params": {
-        "Execute": "TrigExile",
-        "TriggerDescription": "Whenever CARDNAME deals damage, exile it face down. It becomes foretold.",
-        "ValidSource": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked by more than one creature.",
-        "Max": "1",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME deals damage, exile it face down. It becomes foretold.",
+      "mode": "DamageDealtOnce",
+      "valid_source": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

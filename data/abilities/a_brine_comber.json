@@ -1,84 +1,110 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigToken",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
           "mode": "BecomesTarget",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
-            "Execute": "TrigToken",
-            "Secondary": "True",
-            "ValidTarget": "Card.Self",
-            "ValidSource": "Spell.Aura"
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Spell",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Aura"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken",
-            "Destination": "Battlefield"
-          }
-        },
-        {
-          "mode": "BecomesTarget",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
-            "Execute": "TrigToken",
-            "ValidTarget": "Creature.EnchantedBy",
-            "TriggerZones": "Battlefield",
-            "ValidSource": "Spell.Aura",
-            "Secondary": "True"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Affected": "Creature.EnchantedBy",
-            "Secondary": "True",
-            "AddSVar": "EnMe"
-          }
+          "affected": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
+          },
+          "mode": "Continuous"
         }
       ],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ReplaceWith": "Exile",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self"
+          "description": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        },
+        {
+          "description": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+          "mode": "BecomesTarget",
+          "secondary": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Spell",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Aura"
+              }
+            ],
+            "type": "Typed"
+          },
+          "valid_target": {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

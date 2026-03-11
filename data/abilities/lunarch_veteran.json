@@ -1,55 +1,81 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever another creature you control enters, you gain 1 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Creature.Other+YouCtrl",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigGainLife",
-            "TriggerDescription": "Whenever another creature you control enters, you gain 1 life."
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZone",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever another creature you control leaves the battlefield, you gain 1 life.",
-            "Destination": "Any",
-            "ValidCard": "Creature.Other+YouCtrl",
-            "Execute": "TrigGainLife",
-            "Origin": "Battlefield"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Destination": "Graveyard",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ValidCard": "Card.Self"
+          "description": "Whenever another creature you control leaves the battlefield, you gain 1 life.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

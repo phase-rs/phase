@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "ActivationAfterBlockers": "True",
-          "ActivationPhases": "Declare Blockers->EndCombat",
-          "WinSubAbility": "ChaoticStrikePump",
-          "SpellDescription": "Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. Draw a card.",
-          "ValidTgts": "Creature",
-          "LoseSubAbility": "ChaoticStrikeDraw"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationAfterBlockers": "True",
-        "ActivationPhases": "Declare Blockers->EndCombat",
-        "WinSubAbility": "ChaoticStrikePump",
-        "SpellDescription": "Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. Draw a card.",
-        "ValidTgts": "Creature",
-        "LoseSubAbility": "ChaoticStrikeDraw"
-      }
+      "description": "Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. Draw a card.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. Draw a card.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

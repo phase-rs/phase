@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Shuffle",
-        "params": {
-          "SpellDescription": "Shuffle your library. Then exile the top card of your library. Until end of turn, you may play that card without paying its mana cost.",
-          "SubAbility": "DBExile",
-          "AILogic": "Always"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Shuffle your library. Then exile the top card of your library. Until end of turn, you may play that card without paying its mana cost.",
-        "SubAbility": "DBExile",
-        "AILogic": "Always"
-      }
+      "description": "Shuffle your library. Then exile the top card of your library. Until end of turn, you may play that card without paying its mana cost.",
+      "effect": {
+        "description": "Shuffle your library. Then exile the top card of your library. Until end of turn, you may play that card without paying its mana cost.",
+        "name": "Shuffle",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,64 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 1 damage to target creature or planeswalker and 1 damage to that permanent's controller.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 1
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Creature,Planeswalker"
-            }
+              "card_type": "Creature,Planeswalker",
+              "type": "Typed"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 1 damage to target creature or planeswalker and 1 damage to that permanent's controller.",
-            "SubAbility": "DBDealDamage",
-            "TgtPrompt": "Select target creature or planeswalker"
-          }
+          "target_prompt": "Select target creature or planeswalker"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 3 damage to target opponent. That player discards two cards.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 3
             },
             "target": {
-              "type": "Filtered",
-              "filter": "Player.Opponent"
-            }
+              "type": "Player"
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBDiscard",
-            "SpellDescription": "CARDNAME deals 3 damage to target opponent. That player discards two cards."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

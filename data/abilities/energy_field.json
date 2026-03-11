@@ -1,31 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "ValidCard": "Card.!token+YouOwn+Other",
-        "TriggerDescription": "When a card is put into your graveyard from anywhere, sacrifice CARDNAME."
-      }
+      "description": "Prevent all damage that would be dealt to you by sources you don't control.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "ValidTarget": "You",
-        "Description": "Prevent all damage that would be dealt to you by sources you don't control.",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Card.YouDontCtrl,Emblem.YouDontCtrl"
+      "description": "When a card is put into your graveyard from anywhere, sacrifice CARDNAME.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "faces": []
+  ]
 }

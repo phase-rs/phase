@@ -2,25 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Black+attacking,Creature.Black+blocking,Creature.Red+attacking,Creature.Red+blocking"
-        }
-      },
       "cost": null,
+      "description": "Destroy target black or red creature that's attacking or blocking. You gain 2 life.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "NaturalLife",
-        "SpellDescription": "Destroy target black or red creature that's attacking or blocking. You gain 2 life.",
-        "TgtPrompt": "Select target black or red creature that's attacking or blocking"
-      }
+      "target_prompt": "Select target black or red creature that's attacking or blocking"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

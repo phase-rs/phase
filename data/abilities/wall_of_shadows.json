@@ -1,29 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantTarget"
-      },
-      "params": {
-        "ValidTarget": "Card.Self",
-        "Description": "CARDNAME can't be the target of spells that can target only Walls or of abilities that can target only Walls.",
-        "SourceCanOnlyTarget": "Wall"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "ValidTarget": "Creature.Self",
-        "ValidSource": "Creature.blockedBySource",
-        "Description": "Prevent all damage that would be dealt to CARDNAME by creatures it's blocking."
+      "description": "Prevent all damage that would be dealt to CARDNAME by creatures it's blocking.",
+      "event": "DamageDone"
+    }
+  ],
+  "statics": [
+    {
+      "description": "CARDNAME can't be the target of spells that can target only Walls or of abilities that can target only Walls.",
+      "mode": {
+        "Other": "CantTarget"
       }
     }
   ],
-  "faces": []
+  "triggers": []
 }

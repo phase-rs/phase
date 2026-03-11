@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature. It can't be regenerated.",
-        "NoRegen": "True"
-      }
+      "description": "Destroy target creature. It can't be regenerated.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "SVarCompare": "GT9",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Amount": "6",
-        "Description": "If there are ten or more creature cards total in all graveyards, CARDNAME costs {6} less to cast."
-      }
+      "condition": {
+        "compare": "GT9",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If there are ten or more creature cards total in all graveyards, CARDNAME costs {6} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

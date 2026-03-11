@@ -2,31 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "type": "Tap"
+      },
+      "description": "Choose a creature card in your hand.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.YouOwn"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Tap"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChoiceZone": "Hand",
-        "ChoiceTitle": "Choose a creature card in your hand",
-        "SubAbility": "DBPump",
-        "SpellDescription": "Choose a creature card in your hand.",
-        "ChoiceDesc": "creature"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

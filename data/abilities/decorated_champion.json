@@ -1,21 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever another Warrior enters under your team's control, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever another Warrior enters under your team's control, put a +1/+1 counter on CARDNAME.",
-        "ValidCard": "Warrior.Other+YourTeamCtrl",
-        "Origin": "Any",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Warrior",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YourTeamCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

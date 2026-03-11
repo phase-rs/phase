@@ -2,24 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "IslandTrigger",
-          "SpellDescription": "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "IslandTrigger",
-        "SpellDescription": "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}."
-      }
+      "description": "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

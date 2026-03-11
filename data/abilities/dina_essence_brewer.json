@@ -2,51 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "You",
-        "SpellDescription": "You gain X life and put X +1/+1 counters on target creature you control, where X is the sacrificed creature's power.",
-        "SubAbility": "DBPutCounter"
-      }
+      "description": "You gain X life and put X +1/+1 counters on target creature you control, where X is the sacrificed creature's power.",
+      "effect": {
+        "amount": 0,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you sacrifice a creature, draw a card. This ability triggers only once each turn.",
       "mode": "Sacrificed",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you sacrifice a creature, draw a card. This ability triggers only once each turn.",
-        "ValidCard": "Creature",
-        "ActivationLimit": "1",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

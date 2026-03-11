@@ -1,29 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "TriggerDescription": "Whenever a Vampire you control dies, you may pay 2 life. If you do, draw a card.",
-        "ValidCard": "Vampire.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Vampire",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Attacking Vampires you control have deathtouch and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch & Lifelink",
-        "Description": "Attacking Vampires you control have deathtouch and lifelink.",
-        "Affected": "Vampire.attacking+YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Vampire you control dies, you may pay 2 life. If you do, draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Vampire",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

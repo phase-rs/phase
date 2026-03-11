@@ -1,28 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Alliance — Whenever another creature you control enters, NICKNAME deals 2 damage to each opponent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.YouCtrl+Other",
-        "Execute": "TrigDamage",
-        "Origin": "Any",
-        "TriggerDescription": "Alliance — Whenever another creature you control enters, NICKNAME deals 2 damage to each opponent."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "description": "Whenever NICKNAME attacks, create a 2/2 red Mutant token.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever NICKNAME attacks, create a 2/2 red Mutant token.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

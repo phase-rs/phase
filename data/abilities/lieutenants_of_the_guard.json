@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Council's dilemma — When CARDNAME enters, starting with you, each player votes for strength or numbers. Put a +1/+1 counter on CARDNAME for each strength vote and create a 1/1 white Soldier creature token for each numbers vote.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "Council's dilemma — When CARDNAME enters, starting with you, each player votes for strength or numbers. Put a +1/+1 counter on CARDNAME for each strength vote and create a 1/1 white Soldier creature token for each numbers vote.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigChangeZone"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

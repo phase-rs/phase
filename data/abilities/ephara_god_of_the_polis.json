@@ -1,31 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each upkeep, if another creature entered the battlefield under your control last turn, draw a card.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "CheckSVar": "Y",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to white and blue is less than seven, NICKNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "LT7",
-        "Description": "As long as your devotion to white and blue is less than seven, NICKNAME isn't a creature.",
-        "RemoveType": "Creature",
-        "Affected": "Card.Self",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each upkeep, if another creature entered the battlefield under your control last turn, draw a card.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

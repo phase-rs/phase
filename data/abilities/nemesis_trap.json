@@ -2,41 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
-      },
       "cost": null,
+      "description": "Exile target attacking creature. Create a token that's a copy of that creature. Exile it at the beginning of the next end step.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile target attacking creature. Create a token that's a copy of that creature. Exile it at the beginning of the next end step.",
-        "TgtPrompt": "Select target attacking creature",
-        "SubAbility": "NemesisToken",
-        "RememberLKI": "True"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "White"
+            },
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "Cost": "B B",
-        "ValidSA": "Spell.Self",
-        "Description": "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
-        "IsPresent": "Creature.White+attacking"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,44 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "SpellDescription": "Copy target activated or triggered ability you control from a colorless source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
-          "MayChooseTarget": "True",
-          "TgtPrompt": "Select target activated or triggered ability you control from a colorless source",
-          "ValidTgts": "Card.Colorless,Emblem",
-          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-          "AILogic": "AlwaysCopyActivatedAbilities"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target activated or triggered ability you control from a colorless source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
+      "effect": {
+        "description": "Copy target activated or triggered ability you control from a colorless source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Copy target activated or triggered ability you control from a colorless source. You may choose new targets for the copy. (Mana abilities can't be targeted.)",
-        "MayChooseTarget": "True",
-        "TgtPrompt": "Select target activated or triggered ability you control from a colorless source",
-        "ValidTgts": "Card.Colorless,Emblem",
-        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-        "AILogic": "AlwaysCopyActivatedAbilities"
-      }
+      "target_prompt": "Select target activated or triggered ability you control from a colorless source"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

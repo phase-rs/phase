@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gets +1/+1 until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "ValidBlocker": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gets +1/+1 until end of turn.",
-        "Execute": "TrigBlocks",
-        "ValidCard": "Creature"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gets +1/+1 until end of turn.",
       "mode": "AttackerBlockedByCreature",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gets +1/+1 until end of turn.",
-        "ValidBlocker": "Creature",
-        "Execute": "TrigBlocked",
-        "Secondary": "True",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

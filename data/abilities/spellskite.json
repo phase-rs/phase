@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "SpellDescription": "Change a target of target spell or ability to CARDNAME.",
-          "TargetType": "Spell,Activated,Triggered",
-          "ValidTgts": "Card,Emblem",
-          "ChangeSingleTarget": "True",
-          "DefinedMagnet": "Self"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "UP"
+        "cost": "UP",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Change a target of target spell or ability to CARDNAME.",
-        "TargetType": "Spell,Activated,Triggered",
-        "ValidTgts": "Card,Emblem",
-        "ChangeSingleTarget": "True",
-        "DefinedMagnet": "Self"
-      }
+      "description": "Change a target of target spell or ability to CARDNAME.",
+      "effect": {
+        "description": "Change a target of target spell or ability to CARDNAME.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

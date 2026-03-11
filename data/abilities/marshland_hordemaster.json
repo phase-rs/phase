@@ -1,31 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Lizard you control enters, CARDNAME perpetually gains battle cry.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Lizard you control enters, CARDNAME perpetually gains battle cry.",
-        "Execute": "TrigBattleCry",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Lizard.Other+YouCtrl",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Lizard.Other"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME or another Lizard you control dies, target opponent loses 1 life and you gain 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME or another Lizard you control dies, target opponent loses 1 life and you gain 1 life.",
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self,Lizard.Other+YouCtrl",
-        "Destination": "Graveyard",
-        "Execute": "TrigLoseLife"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Lizard.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

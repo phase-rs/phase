@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control enters, you gain 1 life. If CARDNAME isn't a creature, it becomes a 3/3 Angel creature with flying in addition to its other types until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever a creature you control enters, you gain 1 life. If CARDNAME isn't a creature, it becomes a 3/3 Angel creature with flying in addition to its other types until end of turn.",
-        "ValidCard": "Creature.YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

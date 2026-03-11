@@ -1,34 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "IsPresent": "Permanent.!token+setARN+Other",
-        "Execute": "TrigSac",
-        "TriggerDescription": "Whenever one or more other nontoken permanents with a name originally printed in the Arabian Nights expansion are on the battlefield, their controllers sacrifice them.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Players can't cast spells or play lands with a name originally printed in the Arabian Nights expansion.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "ValidCard": "Card.setARN",
-        "Description": "Players can't cast spells or play lands with a name originally printed in the Arabian Nights expansion."
       }
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card.setARN"
-      }
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever one or more other nontoken permanents with a name originally printed in the Arabian Nights expansion are on the battlefield, their controllers sacrifice them.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

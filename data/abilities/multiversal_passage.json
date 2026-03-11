@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddType": "ChosenType",
-        "RemoveLandTypes": "True",
-        "Description": "This land is the chosen type."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplaceWith": "DBChooseBasic",
-        "Description": "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "This land is the chosen type.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

@@ -2,85 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 white Soldier creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_1_1_soldier",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Create a 1/1 white Soldier creature token.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Target creature gets +3/+3 and gains flying until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 3,
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Target creature gets +3/+3 and gains flying until end of turn.",
-        "KW": "Flying"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Name": "Emblem — Elspeth, Knight-Errant",
-          "Planeswalker": "True",
-          "Stackable": "False",
-          "AILogic": "Always",
-          "SpellDescription": "You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"",
-          "StaticAbilities": "STIndestructible",
-          "Duration": "Permanent",
-          "Image": "emblem_elspeth_knight_errant",
-          "Ultimate": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Name": "Emblem — Elspeth, Knight-Errant",
-        "Planeswalker": "True",
-        "Stackable": "False",
-        "AILogic": "Always",
-        "SpellDescription": "You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"",
-        "StaticAbilities": "STIndestructible",
-        "Duration": "Permanent",
-        "Image": "emblem_elspeth_knight_errant",
-        "Ultimate": "True"
-      }
+      "description": "You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

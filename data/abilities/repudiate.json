@@ -1,59 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card,Emblem"
-            }
-          },
           "cost": null,
+          "description": "Counter target activated or triggered ability.",
+          "effect": {
+            "target": {
+              "card_type": "Card,Emblem",
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetType": "Activated,Triggered",
-            "TgtPrompt": "Select target activated or triggered ability",
-            "SpellDescription": "Counter target activated or triggered ability."
-          }
+          "target_prompt": "Select target activated or triggered ability"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Other",
-            "api_type": "CopyPermanent",
-            "params": {
-              "ValidTgts": "Creature.YouCtrl",
-              "TgtPrompt": "Select target creature you control",
-              "SpellDescription": "Create a token that's a copy of target creature you control."
-            }
-          },
           "cost": null,
+          "description": "Create a token that's a copy of target creature you control.",
+          "effect": {
+            "description": "Create a token that's a copy of target creature you control.",
+            "name": "CopyPermanent",
+            "type": "Unimplemented"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "ValidTgts": "Creature.YouCtrl",
-            "TgtPrompt": "Select target creature you control",
-            "SpellDescription": "Create a token that's a copy of target creature you control."
-          }
+          "target_prompt": "Select target creature you control"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

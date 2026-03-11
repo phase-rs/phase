@@ -2,43 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Creatures your opponents control lose hexproof and indestructible until end of turn.",
-          "ValidCards": "Creature.OppCtrl",
-          "RemoveKeywords": "Hexproof & Indestructible",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures your opponents control lose hexproof and indestructible until end of turn.",
-        "ValidCards": "Creature.OppCtrl",
-        "RemoveKeywords": "Hexproof & Indestructible",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Creatures your opponents control lose hexproof and indestructible until end of turn.",
+      "effect": {
+        "description": "Creatures your opponents control lose hexproof and indestructible until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, draw a card.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigDraw",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

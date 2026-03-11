@@ -1,60 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, search your library for a Forest card, put it onto the battlefield tapped, then shuffle.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigChange",
-            "TriggerDescription": "When CARDNAME enters, search your library for a Forest card, put it onto the battlefield tapped, then shuffle.",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever NICKNAME attacks, you may pay {1}{G}. If you do, transform her.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME attacks, you may pay {1}{G}. If you do, transform her.",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When this creature transforms into CARDNAME, other legendary creatures you control get +2/+2 and gain trample until end of turn.",
           "mode": "Transformed",
-          "params": {
-            "Execute": "TrigPumpAll",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When this creature transforms into CARDNAME, other legendary creatures you control get +2/+2 and gain trample until end of turn."
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "At the beginning of your upkeep, transform NICKNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransformBis",
-            "TriggerDescription": "At the beginning of your upkeep, transform NICKNAME.",
-            "Phase": "Upkeep",
-            "ValidPlayer": "You"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

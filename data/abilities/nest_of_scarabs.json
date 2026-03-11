@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you put one or more -1/-1 counters on a creature, create that many 1/1 black Insect creature tokens.",
       "mode": "CounterAddedOnce",
-      "params": {
-        "TriggerDescription": "Whenever you put one or more -1/-1 counters on a creature, create that many 1/1 black Insect creature tokens.",
-        "TriggerZones": "Battlefield",
-        "CounterType": "M1M1",
-        "ValidSource": "You",
-        "Execute": "TrigToken",
-        "ValidCard": "Creature"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "valid_source": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

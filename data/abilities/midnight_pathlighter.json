@@ -1,31 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, venture into the dungeon.",
-        "CombatDamage": "True",
-        "ValidSource": "Creature.YouCtrl",
-        "Execute": "TrigVenture"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures you control can't be blocked except by legendary creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.nonLegendary",
-        "Description": "Creatures you control can't be blocked except by legendary creatures.",
-        "ValidAttacker": "Creature.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, venture into the dungeon.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

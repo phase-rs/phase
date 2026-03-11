@@ -1,57 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks or blocks, scry 2.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigScry",
-            "TriggerDescription": "Whenever CARDNAME attacks or blocks, scry 2.",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME attacks or blocks, scry 2.",
           "mode": "Blocks",
-          "params": {
-            "Secondary": "True",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME attacks or blocks, scry 2.",
-            "Execute": "TrigScry"
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "Filtered",
-              "filter": "Card.nonCreature"
-            }
-          },
           "cost": null,
+          "description": "Counter target noncreature spell. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "target": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Creature"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Counter"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Counter target noncreature spell. (Then exile this card. You may cast the creature later from exile.)",
-            "TargetType": "Spell",
-            "TgtPrompt": "Select target noncreature spell"
-          }
+          "target_prompt": "Select target noncreature spell"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

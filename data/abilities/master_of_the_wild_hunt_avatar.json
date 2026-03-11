@@ -2,34 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "StackDescription": "SpellDescription",
-          "AtRandom": "True",
-          "SpellDescription": "Create a green creature token that's a 2/2 Wolf, a 2/3 Antelope with forestwalk, a 3/2 Cat with shroud, or a 4/4 Rhino with trample, chosen at random.",
-          "Choices": "Wolf,Antelope,Cat,Rhino",
-          "ActivationZone": "Command"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G"
+        "cost": "2 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "AtRandom": "True",
-        "SpellDescription": "Create a green creature token that's a 2/2 Wolf, a 2/3 Antelope with forestwalk, a 3/2 Cat with shroud, or a 4/4 Rhino with trample, chosen at random.",
-        "Choices": "Wolf,Antelope,Cat,Rhino",
-        "ActivationZone": "Command"
-      }
+      "description": "Create a green creature token that's a 2/2 Wolf, a 2/3 Antelope with forestwalk, a 3/2 Cat with shroud, or a 4/4 Rhino with trample, chosen at random.",
+      "effect": {
+        "description": "Create a green creature token that's a 2/2 Wolf, a 2/3 Antelope with forestwalk, a 3/2 Cat with shroud, or a 4/4 Rhino with trample, chosen at random.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

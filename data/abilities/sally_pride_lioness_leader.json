@@ -1,27 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, create X 2/2 red Mutant creature tokens, where X is the number of nontoken creatures you control.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBToken",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When NICKNAME enters, create X 2/2 red Mutant creature tokens, where X is the number of nontoken creatures you control."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME attacks, put a +1/+1 counter on each creature you control.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPutCounterAll",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever NICKNAME attacks, put a +1/+1 counter on each creature you control."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

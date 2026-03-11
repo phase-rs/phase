@@ -1,23 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, put a flying counter on it. This ability triggers only once.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main",
-        "IsPresent": "Card.tapped",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "PresentDefined": "Self",
-        "GameActivationLimit": "1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, put a flying counter on it. This ability triggers only once.",
-        "PhaseCount": "2"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
-      "mode": "Phase",
-      "params": {
-        "IsPresent": "Card.Self+counters_EQ0_P1P1",
-        "TriggerDescription": "At the beginning of your end step, return CARDNAME to its owner's hand unless it has a +1/+1 counter on it.",
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "Execute": "TrigReturn"
-      }
+      "description": "At the beginning of your end step, return CARDNAME to its owner's hand unless it has a +1/+1 counter on it.",
+      "mode": "Phase"
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — CARDNAME has flying as long as there are seven or more cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Threshold — CARDNAME has flying as long as there are seven or more cards in your graveyard.",
-        "Condition": "Threshold",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

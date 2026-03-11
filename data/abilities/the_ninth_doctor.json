@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Into the TARDIS — Whenever CARDNAME becomes untapped during your untap step, you get an additional upkeep step after this step.",
       "mode": "Untaps",
-      "params": {
-        "Execute": "TrigAddPhase",
-        "TriggerDescription": "Into the TARDIS — Whenever CARDNAME becomes untapped during your untap step, you get an additional upkeep step after this step.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self+ActivePlayerCtrl",
-        "Phase": "Untap"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "ActivePlayerCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

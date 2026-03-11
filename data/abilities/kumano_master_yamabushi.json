@@ -2,40 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "1 R",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "1 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 1 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidLKI": "Creature.DamagedBy",
-        "ReplaceWith": "DBExile",
-        "Description": "If a creature dealt damage by NICKNAME this turn would die, exile it instead.",
-        "Destination": "Graveyard"
-      }
+      "description": "If a creature dealt damage by NICKNAME this turn would die, exile it instead.",
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

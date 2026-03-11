@@ -1,19 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          },
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted artifact isn't a creature, it's an artifact creature with power and toughness each equal to its mana value.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as enchanted artifact isn't a creature, it's an artifact creature with power and toughness each equal to its mana value.",
-        "Affected": "Card.AttachedBy+nonCreature",
-        "SetPower": "AffectedX",
-        "SetToughness": "AffectedX",
-        "AddType": "Creature"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

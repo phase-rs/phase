@@ -2,21 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Scry",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Scry 3, then you may reveal the top card of your library. If it's a creature card, draw a card.",
-        "SubAbility": "DBPeekAndReveal"
-      }
+      "description": "Scry 3, then you may reveal the top card of your library. If it's a creature card, draw a card.",
+      "effect": {
+        "count": 3,
+        "type": "Scry"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

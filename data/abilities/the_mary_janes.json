@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "This spell costs {1} less to cast for each creature that attacked this turn.",
-        "Amount": "X",
-        "EffectZone": "All",
-        "Type": "Spell"
-      }
+      "description": "This spell costs {1} less to cast for each creature that attacked this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

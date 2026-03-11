@@ -1,31 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AffectedZone": "Graveyard",
-        "MayPlay": "True",
-        "CheckSVar": "X",
-        "EffectZone": "Graveyard",
-        "Description": "You may cast CARDNAME from your graveyard if you gained life this turn."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "You may cast CARDNAME from your graveyard if you gained life this turn.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

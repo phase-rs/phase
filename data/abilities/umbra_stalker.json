@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "Description": "Chroma — CARDNAME's power and toughness are each equal to the number of black mana symbols in the mana costs of cards in your graveyard."
-      }
+      "characteristic_defining": true,
+      "description": "Chroma — CARDNAME's power and toughness are each equal to the number of black mana symbols in the mana costs of cards in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

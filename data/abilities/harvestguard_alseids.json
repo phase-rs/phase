@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Constellation — Whenever CARDNAME or another enchantment you control enters, prevent all damage that would be dealt to target creature this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
-        "Origin": "Any",
-        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, prevent all damage that would be dealt to target creature this turn.",
-        "Destination": "Battlefield",
-        "Execute": "TrigPump"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Enchantment.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

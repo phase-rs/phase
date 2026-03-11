@@ -2,49 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RearrangeTopOfLibrary",
-        "params": {
-          "SpellDescription": "Look at the top three cards of your library, then put them back in any order.",
-          "NumCards": "3",
-          "AIRespondsToOwnAbility": "True",
-          "Defined": "You"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Look at the top three cards of your library, then put them back in any order.",
-        "NumCards": "3",
-        "AIRespondsToOwnAbility": "True",
-        "Defined": "You"
-      }
+      "description": "Look at the top three cards of your library, then put them back in any order.",
+      "effect": {
+        "description": "Look at the top three cards of your library, then put them back in any order.",
+        "name": "RearrangeTopOfLibrary",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "Draw a card, then put CARDNAME on top of its owner's library.",
-        "AILogic": "RespondToOwnActivation",
-        "Defined": "You"
-      }
+      "description": "Draw a card, then put CARDNAME on top of its owner's library.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

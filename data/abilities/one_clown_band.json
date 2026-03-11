@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 2,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Robot"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 R"
+        "cost": "2 R",
+        "type": "Mana"
       },
+      "description": "Target Robot gets +2/+0 until end of turn.",
+      "effect": {
+        "power": 2,
+        "target": {
+          "card_type": "Robot",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target Robot",
-        "SpellDescription": "Target Robot gets +2/+0 until end of turn."
-      }
+      "target_prompt": "Select target Robot"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,51 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Defined": "ExiledCards",
-          "ValidSA": "Spell",
-          "SorcerySpeed": "True",
-          "SpellDescription": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
-          "PrecostDesc": "Descend 8",
-          "IsPresent": "Permanent.YouOwn",
-          "PresentZone": "Graveyard",
-          "PresentCompare": "GE8"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "ExileFromGrave<1/Permanent>"
+        "cost": "ExileFromGrave<1/Permanent>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "ExiledCards",
-        "ValidSA": "Spell",
-        "SorcerySpeed": "True",
-        "SpellDescription": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
-        "PrecostDesc": "Descend 8",
-        "IsPresent": "Permanent.YouOwn",
-        "PresentZone": "Graveyard",
-        "PresentCompare": "GE8"
-      }
+      "description": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
+      "effect": {
+        "description": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, choose target creature card in your graveyard. Conjure a duplicate of it into your graveyard.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, choose target creature card in your graveyard. Conjure a duplicate of it into your graveyard.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "Execute": "TrigConjure"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

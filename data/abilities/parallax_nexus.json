@@ -2,48 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/FADE>"
+        "cost": "SubCounter<1/FADE>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Mandatory": "True",
-        "Chooser": "Targeted",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Target opponent exiles a card from their hand. Activate only as a sorcery.",
-        "Imprint": "True",
-        "ChangeNum": "1",
-        "SorcerySpeed": "True",
-        "IsCurse": "True",
-        "ChangeType": "Card",
-        "Hidden": "True"
-      }
+      "description": "Target opponent exiles a card from their hand. Activate only as a sorcery.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Hand",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME leaves the battlefield, each player returns to their hand all cards they own exiled with CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "When CARDNAME leaves the battlefield, each player returns to their hand all cards they own exiled with CARDNAME.",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

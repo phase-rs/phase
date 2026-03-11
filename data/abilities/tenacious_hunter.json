@@ -1,18 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as a creature has a -1/-1 counter on it, CARDNAME has vigilance and deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Description": "As long as a creature has a -1/-1 counter on it, CARDNAME has vigilance and deathtouch.",
-        "IsPresent": "Creature.counters_GE1_M1M1",
-        "AddKeyword": "Vigilance & Deathtouch"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

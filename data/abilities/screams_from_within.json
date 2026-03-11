@@ -1,29 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.EnchantedBy",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When enchanted creature dies, return CARDNAME from your graveyard to the battlefield.",
-        "Destination": "Graveyard",
-        "Execute": "TrigChange"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets -1/-1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets -1/-1.",
-        "Affected": "Creature.EnchantedBy",
-        "AddToughness": "-1",
-        "AddPower": "-1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": -1
+        },
+        {
+          "type": "AddToughness",
+          "value": -1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature dies, return CARDNAME from your graveyard to the battlefield.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

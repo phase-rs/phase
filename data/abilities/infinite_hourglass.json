@@ -2,50 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3",
+        "type": "Mana"
+      },
+      "description": "Remove a time counter from CARDNAME. Any player may activate this ability but only during any upkeep step.",
       "effect": {
-        "type": "RemoveCounter",
-        "counter_type": "TIME",
         "count": 1,
+        "counter_type": "TIME",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "RemoveCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3"
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep",
-        "SpellDescription": "Remove a time counter from CARDNAME. Any player may activate this ability but only during any upkeep step.",
-        "AILogic": "Never",
-        "Activator": "Player"
-      }
+      "description": "All creatures get +1/+0 for each time counter on CARDNAME.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a time counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a time counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Description": "All creatures get +1/+0 for each time counter on CARDNAME.",
-        "Affected": "Creature"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

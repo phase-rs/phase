@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantTarget"
-      },
-      "params": {
-        "ValidSource": "Card.nonGreen",
-        "ValidTarget": "Card.Self",
-        "Description": "CARDNAME can't be the target of nongreen spells or abilities from nongreen sources."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "CARDNAME can't be the target of nongreen spells or abilities from nongreen sources.",
+      "mode": {
+        "Other": "CantTarget"
+      }
+    }
+  ],
+  "triggers": []
 }

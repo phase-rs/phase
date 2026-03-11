@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each upkeep, if an opponent lost life last turn, put a +1/+1 counter on target creature you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each upkeep, if an opponent lost life last turn, put a +1/+1 counter on target creature you control.",
-        "Phase": "Upkeep",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

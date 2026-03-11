@@ -2,49 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains flying until end of turn.",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gains flying until end of turn.",
-        "Defined": "Self",
-        "KW": "Flying"
-      }
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't attack unless defending player controls an Island.",
+      "mode": "CantAttack"
     }
   ],
   "triggers": [
     {
+      "description": "When you control no Islands, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "IsPresent": "Island.YouCtrl",
-        "PresentCompare": "EQ0",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When you control no Islands, sacrifice CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless defending player controls an Island.",
-        "ValidCard": "Card.Self",
-        "UnlessDefender": "controlsIsland"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

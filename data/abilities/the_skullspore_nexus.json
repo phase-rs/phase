@@ -2,60 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP target creature_{c:Targeted}",
-        "SpellDescription": "Double target creature's power until end of turn."
-      }
+      "description": "Double target creature's power until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME costs {X} less to cast, where X is the greatest power among creatures you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever one or more nontoken creatures you control die, create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "ValidCards": "Creature.!token+YouCtrl",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more nontoken creatures you control die, create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures."
-      }
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Amount": "X",
-        "Description": "CARDNAME costs {X} less to cast, where X is the greatest power among creatures you control.",
-        "Type": "Spell",
-        "EffectZone": "All"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

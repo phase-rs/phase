@@ -2,52 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatPlayers": "Player",
-          "RepeatSubAbility": "ShuffleHand",
-          "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatPlayers": "Player",
-        "RepeatSubAbility": "ShuffleHand",
-        "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards."
-      }
+      "description": "Each player shuffles the cards from their hand into their library, then draws that many cards.",
+      "effect": {
+        "description": "Each player shuffles the cards from their hand into their library, then draws that many cards.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, shuffle the cards from your hand into your library, then draw that many cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, shuffle the cards from your hand into your library, then draw that many cards.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "WhirlYou"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

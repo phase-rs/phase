@@ -2,26 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "SHIELD",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a shield counter on target creature. (If that creature would be dealt damage or destroyed, remove a shield counter from it instead.)",
-        "SubAbility": "DBScry"
-      }
+      "description": "Put a shield counter on target creature. (If that creature would be dealt damage or destroyed, remove a shield counter from it instead.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "SHIELD",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

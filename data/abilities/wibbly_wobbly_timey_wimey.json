@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TimeTravel",
-        "params": {
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)"
-      }
+      "description": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)",
+      "effect": {
+        "description": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)",
+        "name": "TimeTravel",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

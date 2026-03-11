@@ -2,41 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "AILogic": "MostProminentComputerControls",
-          "SubAbility": "DBAnimate",
-          "Type": "Creature",
-          "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "MostProminentComputerControls",
-        "SubAbility": "DBAnimate",
-        "Type": "Creature",
-        "SpellDescription": "CARDNAME becomes the creature type of your choice until end of turn."
-      }
+      "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+      "effect": {
+        "description": "CARDNAME becomes the creature type of your choice until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "Wall"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has defender as long as it's a Wall.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has defender as long as it's a Wall.",
-        "Affected": "Card.Self+Wall",
-        "AddKeyword": "Defender"
-      }
+      "modifications": [
+        {
+          "keyword": "Defender",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

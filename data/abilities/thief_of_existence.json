@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, exile up to one target noncreature, nonland permanent an opponent controls with mana value 4 or less. If you do, CARDNAME gains \"When this creature leaves the battlefield, target opponent draws a card.\"",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "When you cast this spell, exile up to one target noncreature, nonland permanent an opponent controls with mana value 4 or less. If you do, CARDNAME gains \"When this creature leaves the battlefield, target opponent draws a card.\"",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigExile"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

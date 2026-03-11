@@ -1,39 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks or blocks, create a 1/1 colorless Spirit creature token.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigToken",
-            "TriggerDescription": "Whenever CARDNAME attacks or blocks, create a 1/1 colorless Spirit creature token.",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever CARDNAME attacks or blocks, create a 1/1 colorless Spirit creature token.",
           "mode": "Blocks",
-          "params": {
-            "Execute": "TrigToken",
-            "ValidCard": "Card.Self",
-            "Secondary": "True",
-            "TriggerDescription": "Whenever CARDNAME attacks or blocks, create a 1/1 colorless Spirit creature token."
+          "secondary": true,
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

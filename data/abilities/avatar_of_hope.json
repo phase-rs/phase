@@ -1,29 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "CheckSVar": "NeedHope",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "If you have 3 or less life, CARDNAME costs {6} less to cast.",
-        "SVarCompare": "LE3",
-        "Amount": "6"
-      }
+      "condition": {
+        "compare": "LE3",
+        "type": "CheckSVar",
+        "var": "NeedHope"
+      },
+      "description": "If you have 3 or less life, CARDNAME costs {6} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME can block any number of creatures.",
-        "CanBlockAny": "True",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME can block any number of creatures.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

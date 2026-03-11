@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "If CARDNAME is your commander, choose a color before the game begins. CARDNAME is the chosen color.",
-        "SetColor": "ChosenColor",
-        "Affected": "Card.Self",
-        "CharacteristicDefining": "True"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "If CARDNAME is your commander, choose a color before the game begins. CARDNAME is the chosen color.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

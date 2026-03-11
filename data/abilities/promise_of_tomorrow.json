@@ -1,31 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control dies, exile it.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.YouCtrl",
-        "Execute": "TrigChange",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control dies, exile it.",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of each end step, if you control no creatures, sacrifice CARDNAME and return all cards exiled with it to the battlefield under your control.",
       "mode": "Phase",
-      "params": {
-        "PresentCompare": "EQ0",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each end step, if you control no creatures, sacrifice CARDNAME and return all cards exiled with it to the battlefield under your control.",
-        "Phase": "End of Turn",
-        "IsPresent": "Creature.YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,20 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME or another creature you control with power 5 or greater dies, you may gain 5 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self,Creature.Other+powerGE5+YouCtrl",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "When CARDNAME or another creature you control with power 5 or greater dies, you may gain 5 life.",
-        "OptionalDecider": "You",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

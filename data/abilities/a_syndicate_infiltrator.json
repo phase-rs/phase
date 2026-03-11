@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE5",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are five or more mana values among cards in your graveyard, CARDNAME gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Affected": "Card.Self",
-        "AddToughness": "2",
-        "CheckSVar": "X",
-        "SVarCompare": "GE5",
-        "Description": "As long as there are five or more mana values among cards in your graveyard, CARDNAME gets +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

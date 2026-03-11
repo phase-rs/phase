@@ -1,43 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, target player sacrifices a creature or planeswalker and loses 1 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, target player sacrifices a creature or planeswalker and loses 1 life.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigSacrifice",
-            "Origin": "Any"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your end step, put a +1/+1 counter on CARDNAME if a permanent was put into a graveyard from the battlefield this turn.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigPutCounter",
-            "Phase": "End of Turn",
-            "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on CARDNAME if a permanent was put into a graveyard from the battlefield this turn.",
-            "ValidPlayer": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

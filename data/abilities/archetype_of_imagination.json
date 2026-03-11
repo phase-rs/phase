@@ -1,26 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures you control have flying.",
-        "AddKeyword": "Flying",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Creatures your opponents control lose flying and can't have or gain flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creatures your opponents control lose flying and can't have or gain flying.",
-        "Affected": "Creature.OppCtrl",
-        "CantHaveKeyword": "Flying",
-        "RemoveKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "RemoveKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

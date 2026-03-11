@@ -2,38 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "PayLife<4>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)",
       "effect": {
-        "type": "Pump",
         "power": 0,
-        "toughness": 0,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 0,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "PayLife<4>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Indestructible",
-        "SpellDescription": "CARDNAME gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Attacking"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is attacking, it gets +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Description": "As long as CARDNAME is attacking, it gets +2/+0.",
-        "Affected": "Creature.Self+attacking"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Description": "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-        "ValidSource": "Card,Emblem",
-        "ValidTarget": "Permanent,Player",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DmgTwice"
-      }
+      "description": "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

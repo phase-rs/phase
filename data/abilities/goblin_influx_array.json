@@ -1,31 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigConjure",
-        "TriggerDescription": "At the beginning of your end step, conjure a random card from CARDNAME's spellbook into your hand.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Color": "R",
-        "Amount": "1",
-        "Description": "Goblin spells you cast cost {R} less to cast. (If it doesn't require {R}, it costs {1} less to cast.)",
-        "ValidCard": "Goblin",
-        "Activator": "You",
-        "Type": "Spell"
-      }
+      "description": "Goblin spells you cast cost {R} less to cast. (If it doesn't require {R}, it costs {1} less to cast.)",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, conjure a random card from CARDNAME's spellbook into your hand.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

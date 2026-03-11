@@ -2,32 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Cast this spell only during your turn and only during combat before blockers are declared. You choose which creatures block this combat and how those creatures block. Whenever a creature attacks and isn't blocked this combat, untap it and remove it from combat.",
-          "ActivationPhases": "BeginCombat->Declare Attackers",
-          "PlayerTurn": "True",
-          "StaticAbilities": "DeclareCombatants",
-          "Duration": "UntilEndOfCombat",
-          "Triggers": "TrigAttack"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Cast this spell only during your turn and only during combat before blockers are declared. You choose which creatures block this combat and how those creatures block. Whenever a creature attacks and isn't blocked this combat, untap it and remove it from combat.",
-        "ActivationPhases": "BeginCombat->Declare Attackers",
-        "PlayerTurn": "True",
-        "StaticAbilities": "DeclareCombatants",
-        "Duration": "UntilEndOfCombat",
-        "Triggers": "TrigAttack"
-      }
+      "description": "Cast this spell only during your turn and only during combat before blockers are declared. You choose which creatures block this combat and how those creatures block. Whenever a creature attacks and isn't blocked this combat, untap it and remove it from combat.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

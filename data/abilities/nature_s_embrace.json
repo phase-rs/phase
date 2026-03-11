@@ -1,26 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a creature, it gets +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Description": "As long as enchanted permanent is a creature, it gets +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as enchanted permanent is a land, it has \"{T}: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.EnchantedBy",
-        "AddAbility": "DBMana",
-        "Description": "As long as enchanted permanent is a land, it has \"{T}: Add two mana of any one color.\""
-      }
+      "modifications": [
+        {
+          "ability": "DBMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,47 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 UB",
+        "type": "Mana"
+      },
+      "description": "Target player mills four cards. (They put the top four cards of their library into their graveyard.)",
       "effect": {
-        "type": "Mill",
         "count": 4,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 UB"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player mills four cards. (They put the top four cards of their library into their graveyard.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
       "mode": "Discarded",
-      "params": {
-        "Execute": "TrigPutCounterAll",
-        "ValidCard": "Card.OppOwn",
-        "TriggerDescription": "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
       "mode": "MilledOnce",
-      "params": {
-        "TriggerDescription": "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
-        "Secondary": "True",
-        "ValidPlayer": "Opponent",
-        "ValidCard": "Card",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounterAll"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

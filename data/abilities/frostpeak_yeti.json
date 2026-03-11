@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StackDescription": "CARDNAME can't be blocked this turn.",
-          "StaticAbilities": "Unblockable",
-          "SpellDescription": "CARDNAME can't be blocked this turn. ({S} can be paid with one mana from a snow source.)",
-          "RememberObjects": "Self",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 S"
+        "cost": "1 S",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "CARDNAME can't be blocked this turn.",
-        "StaticAbilities": "Unblockable",
-        "SpellDescription": "CARDNAME can't be blocked this turn. ({S} can be paid with one mana from a snow source.)",
-        "RememberObjects": "Self",
-        "ExileOnMoved": "Battlefield"
-      }
+      "description": "CARDNAME can't be blocked this turn. ({S} can be paid with one mana from a snow source.)",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

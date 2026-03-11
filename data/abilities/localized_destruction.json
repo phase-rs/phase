@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "You get {E} (an energy counter), then you may pay one or more {E}.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "ENERGY",
         "count": 1,
+        "counter_type": "ENERGY",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "Defined": "You",
-        "SubAbility": "DBChooseNumber",
-        "SpellDescription": "You get {E} (an energy counter), then you may pay one or more {E}."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

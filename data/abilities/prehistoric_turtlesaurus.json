@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {1} less to cast if you control a creature with a +1/+1 counter on it.",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "1",
-        "EffectZone": "All",
-        "IsPresent": "Creature.YouCtrl+counters_GE1_P1P1"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control a creature with a +1/+1 counter on it.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

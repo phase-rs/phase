@@ -1,55 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SorcerySpeed": "True",
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "4 UP"
+            "cost": "4 UP",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SorcerySpeed": "True",
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)"
-          }
+          "description": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player or battle, draw a card.",
           "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Card.Self",
-            "Execute": "TrigDraw",
-            "CombatDamage": "True",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or battle, draw a card.",
-            "ValidTarget": "Player,Battle"
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "card_type": "Player,Battle",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

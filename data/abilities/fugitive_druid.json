@@ -1,19 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes the target of an Aura spell, you draw a card.",
       "mode": "BecomesTarget",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes the target of an Aura spell, you draw a card.",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "ValidSource": "Spell.Aura"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Aura"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

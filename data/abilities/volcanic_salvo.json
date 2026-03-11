@@ -2,41 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 6 damage to each of up to two target creatures and/or planeswalkers.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 6
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "2",
-        "TargetMin": "0",
-        "TgtPrompt": "Select target creature and/or planeswalkers",
-        "SpellDescription": "CARDNAME deals 6 damage to each of up to two target creatures and/or planeswalkers."
-      }
+      "target_prompt": "Select target creature and/or planeswalkers"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "CARDNAME costs {X} less to cast, where X is the total power of creatures you control.",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Type": "Spell",
-        "Amount": "X"
-      }
+      "description": "CARDNAME costs {X} less to cast, where X is the total power of creatures you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

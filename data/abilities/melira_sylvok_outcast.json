@@ -1,44 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You can't get poison counters.",
       "mode": {
         "Other": "CantPutCounter"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "CounterType": "POISON",
-        "Description": "You can't get poison counters."
       }
     },
     {
+      "description": "Creatures you control can't have -1/-1 counters put on them.",
       "mode": {
         "Other": "CantPutCounter"
+      }
+    },
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       },
-      "params": {
-        "CounterType": "M1M1",
-        "Description": "Creatures you control can't have -1/-1 counters put on them.",
-        "ValidCard": "Creature.YouCtrl"
-      }
+      "description": "Creatures your opponents control lose infect.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Infect",
+          "type": "RemoveKeyword"
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "RemoveKeyword": "Infect",
-        "Description": "Creatures your opponents control lose infect.",
-        "Affected": "Creature.OppCtrl"
-      }
-    },
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "Sac",
-        "Affected": "Creature.YouCtrl+withPersist"
-      }
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

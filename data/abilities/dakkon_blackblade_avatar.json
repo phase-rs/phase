@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Hand",
+      "description": "You may play any colored card from your hand as a copy of a basic land card chosen at random that can produce mana of one of the card's colors.",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "Description": "You may play any colored card from your hand as a copy of a basic land card chosen at random that can produce mana of one of the card's colors.",
-        "AffectedZone": "Hand",
-        "Affected": "Card.nonColorless+YouOwn",
-        "EffectZone": "Command",
-        "AddAbility": "STPlayLand"
-      }
+      "modifications": [
+        {
+          "ability": "STPlayLand",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

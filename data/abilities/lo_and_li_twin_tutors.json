@@ -1,38 +1,56 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When NICKNAME enter, search your library for a Lesson or Noble card, reveal it, put it into your hand, then shuffle.",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Noble"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Noble creatures you control and Lesson spells you control have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Noble+YouCtrl",
-        "Description": "Noble creatures you control and Lesson spells you control have lifelink.",
-        "AddKeyword": "Lifelink"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Lesson",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "affected_zone": "Stack",
+      "description": "Noble creatures you control and Lesson spells you control have lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Stack",
-        "Description": "Noble creatures you control and Lesson spells you control have lifelink.",
-        "AddKeyword": "Lifelink",
-        "Affected": "Lesson.YouCtrl",
-        "Secondary": "True"
-      }
+      "modifications": [
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enter, search your library for a Lesson or Noble card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

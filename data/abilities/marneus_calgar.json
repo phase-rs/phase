@@ -2,42 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "6",
+        "type": "Mana"
+      },
+      "description": "Create two 2/2 white Astartes Warrior creature tokens with vigilance.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_2_2_astartes_warrior_vigilance",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "6"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "2",
-        "PrecostDesc": "Chapter Master —",
-        "TokenOwner": "You",
-        "SpellDescription": "Create two 2/2 white Astartes Warrior creature tokens with vigilance."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Master Tactician — Whenever one or more tokens you control enter, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "Execute": "DBDraw",
-        "ValidCards": "Card.token+YouCtrl",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Master Tactician — Whenever one or more tokens you control enter, draw a card."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

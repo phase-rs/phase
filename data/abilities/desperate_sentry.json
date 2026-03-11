@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME dies, create a 3/2 colorless Eldrazi Horror creature token.",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Delirium — CARDNAME gets +3/+0 as long as there are four or more card types among cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "Delirium",
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "Description": "Delirium — CARDNAME gets +3/+0 as long as there are four or more card types among cards in your graveyard."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME dies, create a 3/2 colorless Eldrazi Horror creature token.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

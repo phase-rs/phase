@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Adamant — If at least three black mana was spent to cast this spell, mill four cards. You may choose a creature card in your graveyard. If you do, return it to the battlefield with an additional +1/+1 counter on it.",
       "effect": {
-        "type": "Mill",
         "count": 4,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Mill"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionCheckSVar": "X",
-        "SpellDescription": "Adamant — If at least three black mana was spent to cast this spell, mill four cards. You may choose a creature card in your graveyard. If you do, return it to the battlefield with an additional +1/+1 counter on it.",
-        "SubAbility": "DBChangeZone",
-        "AIManaPref": "B",
-        "IfDesc": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

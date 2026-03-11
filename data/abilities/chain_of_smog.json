@@ -2,25 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Mode": "TgtChoose",
-        "SpellDescription": "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.",
-        "SubAbility": "DBCopy"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

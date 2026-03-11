@@ -1,20 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has double strike as long as there are three or more instant and/or sorcery cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "PresentCompare": "GE3",
-        "PresentZone": "Graveyard",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "Description": "CARDNAME has double strike as long as there are three or more instant and/or sorcery cards in your graveyard.",
-        "AddKeyword": "Double Strike",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

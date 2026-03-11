@@ -1,26 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Green,Creature.White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Green creatures and white creatures have protection from Gorgons.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Green,Creature.White",
-        "AddKeyword": "Protection:Gorgon",
-        "Description": "Green creatures and white creatures have protection from Gorgons."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Gorgon",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — CARDNAME has protection from green and from white as long as there are seven or more cards in your graveyard.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Protection from green & Protection from white",
-        "Description": "Threshold — CARDNAME has protection from green and from white as long as there are seven or more cards in your graveyard.",
-        "Affected": "Card.Self",
-        "Condition": "Threshold"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "green",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "white",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

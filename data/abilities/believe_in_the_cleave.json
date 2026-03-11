@@ -2,38 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets +1/+1 and gains double strike and trample until end of turn.",
-        "KW": "Double Strike & Trample",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Target creature gets +1/+1 and gains double strike and trample until end of turn.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "CARDNAME costs {1} less to cast for each attacking creature you control.",
-        "Type": "Spell"
-      }
+      "description": "CARDNAME costs {1} less to cast for each attacking creature you control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

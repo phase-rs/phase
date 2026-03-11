@@ -1,44 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "ReduceCost",
-          "params": {
-            "EffectZone": "All",
-            "Description": "This spell costs {2} less to cast if you control a Wolf or a Werewolf.",
-            "Type": "Spell",
-            "Amount": "2",
-            "IsPresent": "Wolf.YouCtrl,Werewolf.YouCtrl",
-            "ValidCard": "Card.Self"
-          }
+          "condition": {
+            "filter": {
+              "card_type": "Wolf",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl,Werewolf.YouCtrl"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "IsPresent"
+          },
+          "description": "This spell costs {2} less to cast if you control a Wolf or a Werewolf.",
+          "effect_zone": "Battlefield",
+          "mode": "ReduceCost"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another Wolf or Werewolf you control dies, draw a card.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Graveyard",
-            "Origin": "Battlefield",
-            "ValidCard": "Card.Self,Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
-            "Execute": "TrigDraw",
-            "TriggerDescription": "Whenever CARDNAME or another Wolf or Werewolf you control dies, draw a card."
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Wolf.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Werewolf.Other"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

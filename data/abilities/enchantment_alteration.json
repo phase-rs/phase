@@ -2,29 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Attach",
-        "target": {
-          "type": "Filtered",
-          "filter": "Aura.AttachedTo Creature,Aura.AttachedTo Land"
-        }
-      },
       "cost": null,
+      "description": "Attach target Aura attached to a creature or land to another permanent of that type.",
+      "effect": {
+        "target": {
+          "card_type": "Aura",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature,Aura.AttachedTo Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Attach"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "Move": "True",
-        "SpellDescription": "Attach target Aura attached to a creature or land to another permanent of that type.",
-        "AILogic": "MoveTgtAura",
-        "Object": "Targeted",
-        "Choices": "Permanent.sharesCardTypeWith AttachedBy Targeted",
-        "StackDescription": "SpellDescription",
-        "TgtPrompt": "Select target Aura attached to a creature or land"
-      }
+      "target_prompt": "Select target Aura attached to a creature or land"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

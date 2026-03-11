@@ -1,20 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Domri"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Domri planeswalker, CARDNAME gets +1/+1 and has trample.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "Description": "As long as you control a Domri planeswalker, CARDNAME gets +1/+1 and has trample.",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "IsPresent": "Planeswalker.Domri+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

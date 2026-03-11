@@ -2,41 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 B B B",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME gains \"Whenever equipped creature deals combat damage to a player, that player loses the game.\"",
       "effect": {
-        "type": "Animate",
         "power": null,
-        "toughness": null,
-        "types": [],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": null,
+        "type": "Animate",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 B B B"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAddSVar",
-        "SpellDescription": "Until end of turn, CARDNAME gains \"Whenever equipped creature deals combat damage to a player, that player loses the game.\"",
-        "Defined": "Self",
-        "Triggers": "TrigDamageDone"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+0 and has deathtouch.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+0 and has deathtouch.",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "Deathtouch"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

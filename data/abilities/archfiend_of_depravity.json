@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.",
-        "ValidPlayer": "Opponent",
-        "Execute": "TrigChoose",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

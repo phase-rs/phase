@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a historic spell, you may pay {1}. If you do, create a token that's a copy of CARDNAME. (Artifacts, legendaries, and Sagas are historic.)",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigCopy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a historic spell, you may pay {1}. If you do, create a token that's a copy of CARDNAME. (Artifacts, legendaries, and Sagas are historic.)",
-        "ValidCard": "Card.Historic"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Historic"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

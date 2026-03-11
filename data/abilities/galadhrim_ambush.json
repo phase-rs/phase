@@ -2,28 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Create X 1/1 green Elf Warrior creature tokens, where X is the number of attacking creatures.Prevent all combat damage that would be dealt this turn by non-Elf creatures.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_elf_warrior",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenAmount": "X",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "Create X 1/1 green Elf Warrior creature tokens, where X is the number of attacking creatures.Prevent all combat damage that would be dealt this turn by non-Elf creatures.",
-        "TokenOwner": "You"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsCommander"
+          },
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Commander creatures you own have base power and toughness 10/10 and are Giants in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "SetPower": "10",
-        "Affected": "Creature.IsCommander+YouOwn",
-        "SetToughness": "10",
-        "AddType": "Giant",
-        "Description": "Commander creatures you own have base power and toughness 10/10 and are Giants in addition to their other types."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 10
+        },
+        {
+          "type": "SetToughness",
+          "value": 10
+        },
+        {
+          "core_type": "Giant",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "Choices": "Card.ChosenColorSource",
-          "SpellDescription": "The next time a source of your choice of the chosen color would deal damage to you this turn, prevent that damage.",
-          "AILogic": "NeedsPrevention",
-          "SubAbility": "DBEffect"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W"
+        "cost": "W",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Card.ChosenColorSource",
-        "SpellDescription": "The next time a source of your choice of the chosen color would deal damage to you this turn, prevent that damage.",
-        "AILogic": "NeedsPrevention",
-        "SubAbility": "DBEffect"
-      }
+      "description": "The next time a source of your choice of the chosen color would deal damage to you this turn, prevent that damage.",
+      "effect": {
+        "description": "The next time a source of your choice of the chosen color would deal damage to you this turn, prevent that damage.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

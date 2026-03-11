@@ -1,19 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
+      },
+      "description": "Each creature your opponents control is an Illusion in addition to its other types and has \"When this creature becomes the target of a spell or ability, sacrifice it.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Each creature your opponents control is an Illusion in addition to its other types and has \"When this creature becomes the target of a spell or ability, sacrifice it.\"",
-        "AddType": "Illusion",
-        "Affected": "Creature.OppCtrl",
-        "AddTrigger": "DismissTarget",
-        "AddSVar": "DismissSac & TargetingSac"
-      }
+      "modifications": [
+        {
+          "core_type": "Illusion",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, each opponent discards a card.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, each opponent discards a card.",
-        "TargetsValid": "Card.Self",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDiscard",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

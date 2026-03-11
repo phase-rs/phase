@@ -1,27 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During your turn, this creature has first strike. (It deals combat damage before creatures without first strike.)",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "AddKeyword": "First Strike",
-        "Description": "During your turn, this creature has first strike. (It deals combat damage before creatures without first strike.)",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, creatures you control with +1/+1 counters on them have first strike.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
-        "AddKeyword": "First Strike",
-        "Condition": "PlayerTurn",
-        "Description": "During your turn, creatures you control with +1/+1 counters on them have first strike."
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

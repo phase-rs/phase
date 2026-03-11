@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, roll two six-sided dice. CARDNAME assembles a number of Contraptions equal to the difference between those results.",
       "mode": "CrankContraption",
-      "params": {
-        "TriggerDescription": "Whenever you crank CARDNAME, roll two six-sided dice. CARDNAME assembles a number of Contraptions equal to the difference between those results.",
-        "Execute": "TrigCrank",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,40 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "When NICKNAME dies, destroy target artifact or creature an opponent controls.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroy",
-        "Destination": "Graveyard"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Amount": "X",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "Description": "This spell costs {1} less to cast for each permanent sacrificed this turn.",
-        "ValidCard": "Card.Self"
-      }
+      "description": "This spell costs {1} less to cast for each permanent sacrificed this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     },
     {
+      "description": "CARDNAME can't be blocked except by legendary creatures.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.nonLegendary",
-        "Description": "CARDNAME can't be blocked except by legendary creatures.",
-        "ValidAttacker": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME dies, destroy target artifact or creature an opponent controls.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

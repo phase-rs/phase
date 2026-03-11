@@ -1,19 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Planeswalker",
+          "controller": "You",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Nissa"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Nissa planeswalker, CARDNAME gets +2/+0 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Planeswalker.Nissa+YouCtrl",
-        "Description": "As long as you control a Nissa planeswalker, CARDNAME gets +2/+0 and has vigilance.",
-        "Affected": "Card.Self",
-        "AddKeyword": "Vigilance",
-        "AddPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

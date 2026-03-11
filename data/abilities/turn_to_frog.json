@@ -2,33 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target creature loses all abilities and becomes a blue Frog with base power and toughness 1/1.",
       "effect": {
-        "type": "Animate",
         "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
         "toughness": 1,
+        "type": "Animate",
         "types": [
           "Frog"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "IsCurse": "True",
-        "SpellDescription": "Until end of turn, target creature loses all abilities and becomes a blue Frog with base power and toughness 1/1.",
-        "Colors": "Blue",
-        "RemoveAllAbilities": "True",
-        "OverwriteColors": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

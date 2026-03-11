@@ -2,83 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Untap up to two target artifacts.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap up to two target artifacts.",
-        "TgtPrompt": "Choose target artifact",
-        "TargetMin": "0",
-        "TargetMax": "2",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Choose target artifact"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "Search your library for an artifact card with mana value X or less, put it onto the battlefield, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Shuffle": "True",
-        "ChangeNum": "1",
-        "Planeswalker": "True",
-        "ChangeType": "Artifact.cmcLEX",
-        "SpellDescription": "Search your library for an artifact card with mana value X or less, put it onto the battlefield, then shuffle."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "SpellDescription": "Artifacts you control become artifact creatures with base power and toughness 5/5 until end of turn.",
-          "Power": "5",
-          "Ultimate": "True",
-          "Types": "Creature,Artifact",
-          "Toughness": "5",
-          "ValidCards": "Artifact.YouCtrl",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Artifacts you control become artifact creatures with base power and toughness 5/5 until end of turn.",
-        "Power": "5",
-        "Ultimate": "True",
-        "Types": "Creature,Artifact",
-        "Toughness": "5",
-        "ValidCards": "Artifact.YouCtrl",
-        "Planeswalker": "True"
-      }
+      "description": "Artifacts you control become artifact creatures with base power and toughness 5/5 until end of turn.",
+      "effect": {
+        "description": "Artifacts you control become artifact creatures with base power and toughness 5/5 until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

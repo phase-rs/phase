@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}, Pay 1 life: Draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "UCDraw",
-        "Description": "Enchanted land has \"{T}, Pay 1 life: Draw a card.\"",
-        "Affected": "Card.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "ability": "UCDraw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

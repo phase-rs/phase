@@ -1,41 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When NICKNAME enters, draw a card, then discard a card unless her additional cost was paid.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may waterbend {2}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "Description": "As an additional cost to cast this spell, you may waterbend {2}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
-        "EffectZone": "All",
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "Cost": "Waterbend<2>"
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "Y",
-        "AddToughness": "Y",
-        "Affected": "Card.Self",
-        "Description": "NICKNAME gets +1/+1 for each Lesson card in your graveyard."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "NICKNAME gets +1/+1 for each Lesson card in your graveyard.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When NICKNAME enters, draw a card, then discard a card unless her additional cost was paid.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

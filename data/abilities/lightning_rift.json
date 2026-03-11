@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a player cycles a card, you may pay {1}. If you do, CARDNAME deals 2 damage to any target.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card",
-        "TriggerDescription": "Whenever a player cycles a card, you may pay {1}. If you do, CARDNAME deals 2 damage to any target.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,31 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "AddsKeywordsUntil": "UntilEOT",
-          "SpellDescription": "Add {R}. If that mana is spent on a Dragon creature spell, it gains haste until end of turn.",
-          "AddsKeywords": "Haste",
-          "AddsKeywordsValid": "Spell.Dragon+Creature"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AddsKeywordsUntil": "UntilEOT",
-        "SpellDescription": "Add {R}. If that mana is spent on a Dragon creature spell, it gains haste until end of turn.",
-        "AddsKeywords": "Haste",
-        "AddsKeywordsValid": "Spell.Dragon+Creature"
-      }
+      "description": "Add {R}. If that mana is spent on a Dragon creature spell, it gains haste until end of turn.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

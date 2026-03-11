@@ -2,95 +2,74 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Elf"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Put a +1/+1 counter on up to one target Elf. Untap it. It gains deathtouch until end of turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Elf",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TgtPrompt": "Select target Elf",
-        "SubAbility": "DBUntap",
-        "SpellDescription": "Put a +1/+1 counter on up to one target Elf. Untap it. It gains deathtouch until end of turn."
-      }
+      "target_prompt": "Select target Elf"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Create a 1/1 green Elf Warrior creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "g_1_1_elf_warrior",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 1/1 green Elf Warrior creature token."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Ultimate": "True",
-          "Name": "Emblem — Tyvar Kell",
-          "AILogic": "Always",
-          "Duration": "Permanent",
-          "Planeswalker": "True",
-          "Image": "emblem_tyvar_kell",
-          "SpellDescription": "You get an emblem with \"Whenever you cast an Elf spell, it gains haste until end of turn and you draw two cards.\"",
-          "Triggers": "TrigSpellCast"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Name": "Emblem — Tyvar Kell",
-        "AILogic": "Always",
-        "Duration": "Permanent",
-        "Planeswalker": "True",
-        "Image": "emblem_tyvar_kell",
-        "SpellDescription": "You get an emblem with \"Whenever you cast an Elf spell, it gains haste until end of turn and you draw two cards.\"",
-        "Triggers": "TrigSpellCast"
-      }
+      "description": "You get an emblem with \"Whenever you cast an Elf spell, it gains haste until end of turn and you draw two cards.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Elf",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Elves you control have \"{T}: Add {B}.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Elves you control have \"{T}: Add {B}.\"",
-        "AddAbility": "Mana",
-        "Affected": "Elf.YouCtrl"
-      }
+      "modifications": [
+        {
+          "ability": "Mana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

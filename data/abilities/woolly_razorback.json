@@ -1,37 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Blocks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRemoveCounter",
-        "TriggerDescription": "Whenever CARDNAME blocks, remove an ice counter from it.",
-        "TriggerZones": "Battlefield"
-      }
+      "description": "As long as CARDNAME has an ice counter on it, prevent all combat damage it would deal.",
+      "event": "DamageDone"
     }
   ],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME has an ice counter on it, it has defender.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME has an ice counter on it, it has defender.",
-        "Affected": "Card.Self+counters_GE1_ICE",
-        "AddKeyword": "Defender"
-      }
+      "modifications": [
+        {
+          "keyword": "Defender",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self+counters_GE1_ICE",
-        "Description": "As long as CARDNAME has an ice counter on it, prevent all combat damage it would deal.",
-        "Prevent": "True",
-        "IsCombat": "True"
+      "description": "Whenever CARDNAME blocks, remove an ice counter from it.",
+      "mode": "Blocks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

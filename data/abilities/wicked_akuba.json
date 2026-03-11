@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B"
+        "cost": "B",
+        "type": "Mana"
       },
+      "description": "Target player dealt damage by CARDNAME this turn loses 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player dealt damage by CARDNAME this turn loses 1 life.",
-        "TgtPrompt": "Select target player that was dealt damage this turn",
-        "ValidTgts": "Player.wasDealtDamageThisTurnBySource"
-      }
+      "target_prompt": "Select target player that was dealt damage this turn"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

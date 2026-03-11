@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "Celebration"
+      },
+      "description": "Celebration — CARDNAME gets +1/+0 and has lifelink as long as two or more nonland permanents entered the battlefield under your control this turn.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Celebration — CARDNAME gets +1/+0 and has lifelink as long as two or more nonland permanents entered the battlefield under your control this turn.",
-        "SVarCompare": "GE2",
-        "AddPower": "1",
-        "Affected": "Card.Self",
-        "AddKeyword": "Lifelink",
-        "CheckSVar": "Celebration"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

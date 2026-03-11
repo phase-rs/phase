@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "SpellDescription": "Target player's life total becomes 20.",
-          "ValidTgts": "Player",
-          "LifeAmount": "20"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player's life total becomes 20.",
-        "ValidTgts": "Player",
-        "LifeAmount": "20"
-      }
+      "description": "Target player's life total becomes 20.",
+      "effect": {
+        "description": "Target player's life total becomes 20.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

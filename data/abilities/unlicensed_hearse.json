@@ -2,41 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Exile up to two target cards from a single graveyard.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Exile up to two target cards from a single graveyard.",
-        "TargetsWithSameController": "True",
-        "TargetMax": "2",
-        "TargetMin": "0",
-        "TgtPrompt": "Select up to two target cards in a graveyard"
-      }
+      "target_prompt": "Select up to two target cards in a graveyard"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetPower": "X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME's power and toughness are each equal to the number of cards exiled with it.",
-        "SetToughness": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME's power and toughness are each equal to the number of cards exiled with it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

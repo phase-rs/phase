@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Return the top creature card of your graveyard to the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "StackDescription": "{p:You} returns the top creature card of their graveyard to the battlefield.",
-        "Hidden": "True",
-        "ChangeType": "Creature.TopGraveyardCreature+YouOwn",
-        "SpellDescription": "Return the top creature card of your graveyard to the battlefield.",
-        "Mandatory": "True",
-        "RememberChanged": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

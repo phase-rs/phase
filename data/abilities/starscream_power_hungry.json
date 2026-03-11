@@ -1,66 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you draw a card, if you're the monarch, target opponent loses 2 life.",
           "mode": "Drawn",
-          "params": {
-            "Execute": "TrigDrain",
-            "ValidCard": "Card.YouCtrl",
-            "TriggerDescription": "Whenever you draw a card, if you're the monarch, target opponent loses 2 life.",
-            "TriggerZones": "Battlefield",
-            "CheckDefinedPlayer": "You.isMonarch"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "type": "Typed"
           }
         },
         {
+          "combat_damage": true,
+          "description": "Whenever one or more creatures deal combat damage to you, convert NICKNAME.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "ValidTarget": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigConvert",
-            "CombatDamage": "True",
-            "TriggerDescription": "Whenever one or more creatures deal combat damage to you, convert NICKNAME.",
-            "ValidSource": "Creature"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "Creature",
+            "type": "Typed"
+          },
+          "valid_target": {
+            "card_type": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever NICKNAME deals combat damage to a player, if there is no monarch, that player becomes the monarch.",
           "mode": "DamageDone",
-          "params": {
-            "CheckSVar": "Monarch",
-            "SVarCompare": "EQ0",
-            "Execute": "TrigMonarch",
-            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, if there is no monarch, that player becomes the monarch.",
-            "ValidSource": "Card.Self",
-            "ValidTarget": "Player",
-            "TriggerZones": "Battlefield",
-            "CombatDamage": "True"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         },
         {
+          "description": "Whenever you become the monarch, convert NICKNAME.",
           "mode": "BecomeMonarch",
-          "params": {
-            "ValidPlayer": "You",
-            "Execute": "TrigConvert",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever you become the monarch, convert NICKNAME."
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,26 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, it gets +0/+2 until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever CARDNAME attacks, it gets +0/+2 until end of turn."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At end of combat, tap all creatures that blocked CARDNAME this turn. They don't untap during their controller's next untap step.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigTapAll",
-        "Phase": "EndCombat",
-        "TriggerDescription": "At end of combat, tap all creatures that blocked CARDNAME this turn. They don't untap during their controller's next untap step."
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

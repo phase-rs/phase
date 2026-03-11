@@ -1,42 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Other",
+              "value": "IsSolved"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Solved — Creatures you control get +1/+0.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When this Case enters, choose target creature you don't control. Each creature you control deals 1 damage to that creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDamageEach",
-        "TriggerDescription": "When this Case enters, choose target creature you don't control. Each creature you control deals 1 damage to that creature.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "To solve — Three or more creatures attacked this turn. (If unsolved, solve at the beginning of your end step.)",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigSolve",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "SVarCompare": "GE3",
-        "TriggerDescription": "To solve — Three or more creatures attacked this turn. (If unsolved, solve at the beginning of your end step.)",
-        "ValidPlayer": "You",
-        "CheckSVar": "X",
-        "IsPresent": "Card.Self+!IsSolved"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "IsPresent": "Card.Self+IsSolved",
-        "Description": "Solved — Creatures you control get +1/+0.",
-        "Affected": "Creature.YouCtrl"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

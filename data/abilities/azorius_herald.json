@@ -1,37 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked.",
+      "mode": {
+        "Other": "CantBlockBy"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you gain 4 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "When CARDNAME enters, you gain 4 life."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters, sacrifice it unless {U} was spent to cast it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When CARDNAME enters, sacrifice it unless {U} was spent to cast it."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "CARDNAME can't be blocked.",
-        "ValidAttacker": "Creature.Self"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

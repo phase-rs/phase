@@ -1,17 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Human"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Human creatures you control have protection from creatures of the chosen type.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Protection:Creature.ChosenType:ChosenType",
-        "Affected": "Creature.Human+YouCtrl",
-        "Description": "Human creatures you control have protection from creatures of the chosen type."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Creature.ChosenType:ChosenType",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

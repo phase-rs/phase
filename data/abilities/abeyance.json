@@ -2,32 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "STCantBeCast,STCantBeActivated",
-          "RememberObjects": "Targeted",
-          "AILogic": "BeginningOfOppTurn",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities.",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "STCantBeCast,STCantBeActivated",
-        "RememberObjects": "Targeted",
-        "AILogic": "BeginningOfOppTurn",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities.",
-        "ValidTgts": "Player"
-      }
+      "description": "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may mill two cards.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigMill",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may mill two cards."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more land cards are put into your graveyard from your library, put them onto the battlefield tapped.",
+      "destination": "Graveyard",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZoneAll",
-        "Origin": "Library",
-        "ValidCards": "Land.YouOwn",
-        "TriggerDescription": "Whenever one or more land cards are put into your graveyard from your library, put them onto the battlefield tapped.",
-        "Destination": "Graveyard"
-      }
+      "origin": "Library",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

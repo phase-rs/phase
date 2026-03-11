@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "RevealAllValid": "Card.cmcGE2+TargetedPlayerCtrl",
-          "SubAbility": "DBExile",
-          "SpellDescription": "Target player reveals all cards with mana value 2 or greater in their hand. You choose a card from among those cards. Exile that card. If a card was exiled this way, that player drafts a card from CARDNAME's spellbook and reveals it.",
-          "StackDescription": "SpellDescription",
-          "ValidTgts": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RevealAllValid": "Card.cmcGE2+TargetedPlayerCtrl",
-        "SubAbility": "DBExile",
-        "SpellDescription": "Target player reveals all cards with mana value 2 or greater in their hand. You choose a card from among those cards. Exile that card. If a card was exiled this way, that player drafts a card from CARDNAME's spellbook and reveals it.",
-        "StackDescription": "SpellDescription",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player reveals all cards with mana value 2 or greater in their hand. You choose a card from among those cards. Exile that card. If a card was exiled this way, that player drafts a card from CARDNAME's spellbook and reveals it.",
+      "effect": {
+        "description": "Target player reveals all cards with mana value 2 or greater in their hand. You choose a card from among those cards. Exile that card. If a card was exiled this way, that player drafts a card from CARDNAME's spellbook and reveals it.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

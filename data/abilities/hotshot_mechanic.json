@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME crews Vehicles as though its power were 2 greater.",
       "mode": {
         "Other": "TapPowerValue"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidSA": "Activated.Crew+Vehicle",
-        "Description": "CARDNAME crews Vehicles as though its power were 2 greater.",
-        "Value": "2"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

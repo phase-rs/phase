@@ -1,44 +1,70 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsSolved"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Solved — This Case is a 4/4 Gorgon creature with deathtouch and lifelink in addition to its other types.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature & Gorgon",
+          "type": "AddType"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When this Case enters, destroy up to one target creature that was dealt damage this turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When this Case enters, destroy up to one target creature that was dealt damage this turn.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "To solve — Three or more creature cards were put into graveyards from anywhere this turn. (If unsolved, solve at the beginning of your end step.)",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "To solve — Three or more creature cards were put into graveyards from anywhere this turn. (If unsolved, solve at the beginning of your end step.)",
-        "SVarCompare": "GE3",
-        "CheckSVar": "Count$ThisTurnEntered_Graveyard_Creature.!token",
-        "Phase": "End of Turn",
-        "Execute": "Solved",
-        "IsPresent": "Card.Self+!IsSolved",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+IsSolved",
-        "SetPower": "4",
-        "AddType": "Creature & Gorgon",
-        "AddKeyword": "Deathtouch & Lifelink",
-        "Description": "Solved — This Case is a 4/4 Gorgon creature with deathtouch and lifelink in addition to its other types.",
-        "SetToughness": "4"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

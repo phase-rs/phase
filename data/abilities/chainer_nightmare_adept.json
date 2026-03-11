@@ -2,41 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You may cast a creature spell from your graveyard this turn. Activate only once each turn.",
-          "ActivationLimit": "1",
-          "StaticAbilities": "STYardCast"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may cast a creature spell from your graveyard this turn. Activate only once each turn.",
-        "ActivationLimit": "1",
-        "StaticAbilities": "STYardCast"
-      }
+      "description": "You may cast a creature spell from your graveyard this turn. Activate only once each turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nontoken creature you control enters, if you didn't cast it from your hand, it gains haste until your next turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigPump",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a nontoken creature you control enters, if you didn't cast it from your hand, it gains haste until your next turn.",
-        "Origin": "Any",
-        "ValidCard": "Creature.!token+YouCtrl+!wasCastFromYourHandByYou"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

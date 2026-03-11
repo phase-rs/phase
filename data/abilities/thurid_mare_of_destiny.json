@@ -1,29 +1,67 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Creature.Pegasus,Creature.Unicorn,Creature.Horse",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCopySpell",
-        "TriggerDescription": "Whenever you cast a Pegasus, Unicorn, or Horse creature spell, copy it. (The copy becomes a token.)"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Pegasus",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Unicorn.Other"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Horse.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Pegasi, Unicorns, and Horses you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Pegasus.Other+YouCtrl,Unicorn.Other+YouCtrl,Horse.Other+YouCtrl",
-        "AddToughness": "1",
-        "Description": "Other Pegasi, Unicorns, and Horses you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a Pegasus, Unicorn, or Horse creature spell, copy it. (The copy becomes a token.)",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Pegasus,Creature.Unicorn,Creature.Horse"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -2,36 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U R",
-        "params": {
-          "SpellDescription": "Add {U} or {R}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U} or {R}."
-      }
+      "description": "Add {U} or {R}.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control two or fewer other lands.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "LandTapped",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped unless you control two or fewer other lands."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

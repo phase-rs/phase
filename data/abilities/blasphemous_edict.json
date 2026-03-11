@@ -2,39 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player sacrifices thirteen creatures of their choice.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Creature",
-        "Amount": "13",
-        "Defined": "Player",
-        "SpellDescription": "Each player sacrifices thirteen creatures of their choice."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "PresentCompare": "GE13",
-        "IsPresent": "Creature",
-        "Cost": "B",
-        "ValidSA": "Spell.Self",
-        "Description": "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

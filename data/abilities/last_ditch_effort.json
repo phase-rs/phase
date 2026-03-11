@@ -2,28 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Sacrifice any number of creatures. CARDNAME deals that much damage to any target.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice any number of creatures. CARDNAME deals that much damage to any target.",
-        "Defined": "You",
-        "RememberSacrificed": "True",
-        "Amount": "SacX",
-        "SacValid": "Creature",
-        "SubAbility": "DBDamage",
-        "Optional": "True"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

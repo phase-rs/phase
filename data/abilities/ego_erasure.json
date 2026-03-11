@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": -2,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures target player controls get -2/-0 and lose all creature types until end of turn.",
-        "ValidCards": "Creature",
-        "IsCurse": "True",
-        "SubAbility": "DBAnimateAll"
-      }
+      "description": "Creatures target player controls get -2/-0 and lose all creature types until end of turn.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "type": "Player"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

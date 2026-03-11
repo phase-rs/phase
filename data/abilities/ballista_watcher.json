@@ -1,75 +1,69 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 R"
+                "cost": "2 R",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 1 damage to any target."
-          }
-        }
-      ],
-      "triggers": [],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [
-        {
-          "kind": "Activated",
+          "description": "CARDNAME deals 1 damage to any target.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 1
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "2 R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "RememberDamaged": "True",
-            "SpellDescription": "CARDNAME deals 1 damage to any target. A creature dealt damage this way can't block this turn.",
-            "SubAbility": "DBNoBlock"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
+    },
+    {
+      "abilities": [
+        {
+          "cost": {
+            "cost": "2 R",
+            "type": "Mana"
+          },
+          "description": "CARDNAME deals 1 damage to any target. A creature dealt damage this way can't block this turn.",
+          "effect": {
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Any"
+            },
+            "type": "DealDamage"
+          },
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

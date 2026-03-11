@@ -2,34 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "M0M1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.blockedBySource,Creature.blockingSource"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B"
+        "cost": "B",
+        "type": "Mana"
       },
+      "description": "If CARDNAME's power is 1 or more, it gets -1/-0 until end of turn and put a -0/-1 counter on target creature blocking or blocked by CARDNAME. Activate only during the declare blockers step.",
+      "effect": {
+        "count": 1,
+        "counter_type": "M0M1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Declare Blockers",
-        "ConditionCompare": "EQ1",
-        "SubAbility": "DBPump",
-        "SpellDescription": "If CARDNAME's power is 1 or more, it gets -1/-0 until end of turn and put a -0/-1 counter on target creature blocking or blocked by CARDNAME. Activate only during the declare blockers step.",
-        "ConditionDefined": "Self",
-        "TgtPrompt": "Select target creature blocking or blocked by CARDNAME",
-        "ConditionPresent": "Creature.powerGE1"
-      }
+      "target_prompt": "Select target creature blocking or blocked by CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

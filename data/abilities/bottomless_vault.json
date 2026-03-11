@@ -2,61 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "Amount": "X",
-          "SpellDescription": "Add {B} for each storage counter removed this way.",
-          "AILogic": "ManaRitualBattery"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<X/STORAGE>"
+            "cost": "SubCounter<X/STORAGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "X",
-        "SpellDescription": "Add {B} for each storage counter removed this way.",
-        "AILogic": "ManaRitualBattery"
-      }
+      "description": "Add {B} for each storage counter removed this way.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is tapped, put a storage counter on it.",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.tapped",
-        "Phase": "Upkeep",
-        "Execute": "TrigStore",
-        "PresentDefined": "Self"
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "ReplaceWith": "ETBTapped"
-      }
+      "description": "At the beginning of your upkeep, if CARDNAME is tapped, put a storage counter on it.",
+      "mode": "Phase",
+      "phase": "Upkeep"
     }
-  ],
-  "faces": []
+  ]
 }

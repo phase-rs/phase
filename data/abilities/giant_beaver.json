@@ -1,18 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks while saddled, put a +1/+1 counter on target creature that saddled it this turn.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self+IsSaddled",
-        "TriggerDescription": "Whenever CARDNAME attacks while saddled, put a +1/+1 counter on target creature that saddled it this turn.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "IsSaddled"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

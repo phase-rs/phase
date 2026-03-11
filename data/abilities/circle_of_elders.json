@@ -2,33 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "CheckSVar": "FormidableTest",
-          "SVarCompare": "GE8",
-          "SpellDescription": "Add {C}{C}{C}. Activate only if creatures you control have total power 8 or greater.",
-          "PrecostDesc": "Formidable —",
-          "Amount": "3"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CheckSVar": "FormidableTest",
-        "SVarCompare": "GE8",
-        "SpellDescription": "Add {C}{C}{C}. Activate only if creatures you control have total power 8 or greater.",
-        "PrecostDesc": "Formidable —",
-        "Amount": "3"
-      }
+      "description": "Add {C}{C}{C}. Activate only if creatures you control have total power 8 or greater.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

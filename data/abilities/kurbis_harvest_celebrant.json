@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ReplacementEffects": "RPrevent",
-          "SpellDescription": "Prevent all damage that would be dealt this turn to another target creature with a +1/+1 counter on it.",
-          "ValidTgts": "Creature.Other+counters_GE1_P1P1",
-          "RememberObjects": "Targeted",
-          "TgtPrompt": "Select another target creature with a +1/+1 counter on it",
-          "StackDescription": "Prevent all damage that would be dealt this turn to {c:Targeted}."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/P1P1/NICKNAME>"
+        "cost": "SubCounter<1/P1P1/NICKNAME>",
+        "type": "Mana"
       },
+      "description": "Prevent all damage that would be dealt this turn to another target creature with a +1/+1 counter on it.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ReplacementEffects": "RPrevent",
-        "SpellDescription": "Prevent all damage that would be dealt this turn to another target creature with a +1/+1 counter on it.",
-        "ValidTgts": "Creature.Other+counters_GE1_P1P1",
-        "RememberObjects": "Targeted",
-        "TgtPrompt": "Select another target creature with a +1/+1 counter on it",
-        "StackDescription": "Prevent all damage that would be dealt this turn to {c:Targeted}."
-      }
+      "target_prompt": "Select another target creature with a +1/+1 counter on it"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

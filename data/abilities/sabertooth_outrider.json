@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Formidable — Whenever CARDNAME attacks, if creatures you control have total power 8 or greater, CARDNAME gains first strike until end of turn.",
       "mode": "Attacks",
-      "params": {
-        "SVarCompare": "GE8",
-        "TriggerDescription": "Formidable — Whenever CARDNAME attacks, if creatures you control have total power 8 or greater, CARDNAME gains first strike until end of turn.",
-        "ValidCard": "Card.Self",
-        "CheckSVar": "X",
-        "Execute": "TrigFormidable",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

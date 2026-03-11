@@ -2,34 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "XMin1 X"
+            "cost": "XMin1 X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/Creature.cmcEQX/creature you control with mana value X>"
+            "cost": "Return<1/Creature.cmcEQX/creature you control with mana value X>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationZone": "Command",
-        "SpellDescription": "Draw a number of cards chosen at random between 0 and X. X can't be 0.",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Draw a number of cards chosen at random between 0 and X. X can't be 0.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,42 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "StaticAbilities": "Exploration",
-              "SpellDescription": "You may play an additional land this turn. (Then exile this card. You may cast the creature later from exile.)",
-              "Name": "Plant Beans's Effect — Exploration",
-              "AILogic": "Always"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "StaticAbilities": "Exploration",
-            "SpellDescription": "You may play an additional land this turn. (Then exile this card. You may cast the creature later from exile.)",
-            "Name": "Plant Beans's Effect — Exploration",
-            "AILogic": "Always"
-          }
+          "description": "You may play an additional land this turn. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

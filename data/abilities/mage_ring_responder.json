@@ -2,46 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "7",
+        "type": "Mana"
+      },
+      "description": "Untap this creature.",
       "effect": {
-        "type": "Untap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "7"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Untap this creature."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever this creature attacks, it deals 7 damage to target creature defending player controls."
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "ValidStepTurnToController": "You",
-        "Description": "This creature doesn't untap during your untap step."
+      "description": "Whenever this creature attacks, it deals 7 damage to target creature defending player controls.",
+      "mode": "Attacks",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

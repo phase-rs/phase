@@ -2,27 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "W U B R G",
-        "params": {
-          "RestrictValid": "CantPayGenericCosts",
-          "SpellDescription": "Add {W}{U}{B}{R}{G}. This mana can't be spent to pay generic mana costs."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RestrictValid": "CantPayGenericCosts",
-        "SpellDescription": "Add {W}{U}{B}{R}{G}. This mana can't be spent to pay generic mana costs."
-      }
+      "description": "Add {W}{U}{B}{R}{G}. This mana can't be spent to pay generic mana costs.",
+      "effect": {
+        "produced": [
+          "White",
+          "Blue",
+          "Black",
+          "Red",
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

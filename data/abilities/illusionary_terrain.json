@@ -1,18 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Basic"
+          },
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Basic lands of the first chosen type are the second chosen type.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.Basic+ChosenType",
-        "AddType": "ChosenType2",
-        "Description": "Basic lands of the first chosen type are the second chosen type.",
-        "RemoveLandTypes": "True"
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType2",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

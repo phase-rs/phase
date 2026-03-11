@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 G",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +3/+3 and becomes a Bear Berserker until end of turn. Activate only once each turn.",
       "effect": {
-        "type": "Pump",
         "power": 3,
-        "toughness": 3,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 3,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "ActivationLimit": "1",
-        "SpellDescription": "CARDNAME gets +3/+3 and becomes a Bear Berserker until end of turn. Activate only once each turn.",
-        "SubAbility": "DBAnimate"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,32 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigMonarch",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, target opponent becomes the monarch. You can't become the monarch this turn."
-      }
+      "description": "If damage would be dealt to NICKNAME while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "AlwaysReplace": "True",
-        "CheckDefinedPlayer": "You.isMonarch",
-        "Description": "If damage would be dealt to NICKNAME while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
-        "ReplaceWith": "Counters",
-        "PreventionEffect": "True"
+      "description": "When CARDNAME enters, target opponent becomes the monarch. You can't become the monarch this turn.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

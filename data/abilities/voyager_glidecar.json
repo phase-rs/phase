@@ -2,45 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<3/Creature.Other/other creature>",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, this Vehicle becomes an artifact creature and gains flying. Put a +1/+1 counter on it.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<3/Creature.Other/other creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Keywords": "Flying",
-        "SubAbility": "DBPutCounter",
-        "Defined": "Self",
-        "SpellDescription": "Until end of turn, this Vehicle becomes an artifact creature and gains flying. Put a +1/+1 counter on it."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this Vehicle enters, scry 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigScry",
-        "TriggerDescription": "When this Vehicle enters, scry 1.",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigUntap",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Morbid — At the beginning of each end step, if a creature died this turn, untap this creature.",
-        "Phase": "End of Turn"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self"
-      }
+      "description": "Morbid — At the beginning of each end step, if a creature died this turn, untap this creature.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

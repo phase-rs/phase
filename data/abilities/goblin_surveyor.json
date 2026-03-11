@@ -1,20 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "ABDraw",
-        "AffectedZone": "Graveyard",
-        "Description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
-        "Affected": "Card.Self",
-        "EffectZone": "Graveyard",
-        "Condition": "MaxSpeed"
-      }
+      "modifications": [
+        {
+          "ability": "ABDraw",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

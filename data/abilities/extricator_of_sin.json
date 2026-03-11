@@ -1,88 +1,94 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you may sacrifice another permanent. If you do, create a 3/2 colorless Eldrazi Horror creature token.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigToken",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, you may sacrifice another permanent. If you do, create a 3/2 colorless Eldrazi Horror creature token.",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Delirium — At the beginning of your upkeep, if there are four or more card types among cards in your graveyard, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Phase": "Upkeep",
-            "ValidPlayer": "You",
-            "Delirium": "True",
-            "Execute": "TrigTransform",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Delirium — At the beginning of your upkeep, if there are four or more card types among cards in your graveyard, transform CARDNAME."
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "c_3_2_eldrazi_horror",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2"
+                "cost": "2",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Create a 3/2 colorless Eldrazi Horror creature token.",
-            "TokenOwner": "You"
-          }
+          "description": "Create a 3/2 colorless Eldrazi Horror creature token.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "c_3_2_eldrazi_horror",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Eldrazi"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Eldrazi you control have vigilance.",
           "mode": "Continuous",
-          "params": {
-            "AddKeyword": "Vigilance",
-            "Description": "Eldrazi you control have vigilance.",
-            "Affected": "Card.Eldrazi+YouCtrl"
-          }
+          "modifications": [
+            {
+              "keyword": "Vigilance",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

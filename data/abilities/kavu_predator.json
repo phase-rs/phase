@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent gains life, put that many +1/+1 counters on CARDNAME.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerDescription": "Whenever an opponent gains life, put that many +1/+1 counters on CARDNAME.",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPut"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

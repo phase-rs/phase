@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "SpellDescription": "Flip a coin. If you win the flip, sacrifice CARDNAME and draw three cards.",
-          "WinSubAbility": "DBSac"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Flip a coin. If you win the flip, sacrifice CARDNAME and draw three cards.",
-        "WinSubAbility": "DBSac"
-      }
+      "description": "Flip a coin. If you win the flip, sacrifice CARDNAME and draw three cards.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, sacrifice CARDNAME and draw three cards.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

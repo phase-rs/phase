@@ -1,20 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +1/+0 and has flying and \"Whenever this creature attacks, draw a card.\"",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Flying",
-        "AddSVar": "AE",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature gets +1/+0 and has flying and \"Whenever this creature attacks, draw a card.\"",
-        "AddPower": "1",
-        "AddTrigger": "AttackTrig"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

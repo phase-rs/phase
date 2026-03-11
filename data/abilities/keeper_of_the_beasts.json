@@ -2,39 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "g_2_2_beast",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target opponent who controlled more creatures than you did as you activated this ability. Create a 2/2 green Beast creature token.",
-        "ValidTgts": "Opponent",
-        "TokenOwner": "You",
-        "ValidAfterStack": "Ability.IsTargeting Player.withMoreCreaturesThanYou"
-      }
+      "description": "Choose target opponent who controlled more creatures than you did as you activated this ability. Create a 2/2 green Beast creature token.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "g_2_2_beast",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

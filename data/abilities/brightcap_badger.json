@@ -1,61 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "Phase": "End of Turn",
-            "ValidPlayer": "You",
-            "Execute": "TrigToken",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your end step, create a 1/1 green Saproling creature token."
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "card_type": "Fungus",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Saproling.YouCtrl"
+              }
+            ],
+            "type": "Typed"
+          },
+          "description": "Each Fungus and Saproling you control has \"{T}: Add {G}.\"",
           "mode": "Continuous",
-          "params": {
-            "Affected": "Fungus.YouCtrl,Saproling.YouCtrl",
-            "Description": "Each Fungus and Saproling you control has \"{T}: Add {G}.\"",
-            "AddAbility": "Mana"
-          }
+          "modifications": [
+            {
+              "ability": "Mana",
+              "type": "AddAbility"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, create a 1/1 green Saproling creature token.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create two 1/1 green Saproling creature tokens.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "g_1_1_saproling",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenAmount": "2",
-            "TokenOwner": "You",
-            "SpellDescription": "Create two 1/1 green Saproling creature tokens."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

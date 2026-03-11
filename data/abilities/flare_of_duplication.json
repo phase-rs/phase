@@ -2,41 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "ValidTgts": "Instant,Sorcery",
-          "MayChooseTarget": "True",
-          "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-          "TargetType": "Spell"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Instant,Sorcery",
-        "MayChooseTarget": "True",
-        "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-        "TargetType": "Spell"
-      }
+      "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may sacrifice a nontoken red creature rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "ValidSA": "Spell.Self",
-        "Cost": "Sac<1/Creature.Red+!token/a nontoken red creature>",
-        "Description": "You may sacrifice a nontoken red creature rather than pay this spell's mana cost.",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

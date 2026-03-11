@@ -1,28 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CommitCrime",
-      "params": {
-        "ValidPlayer": "You",
-        "ActivationLimit": "1",
-        "TriggerDescription": "Whenever you commit a crime, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyard is a crime.)",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as NICKNAME has four or more +1/+1 counters on it, it has menace and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as NICKNAME has four or more +1/+1 counters on it, it has menace and lifelink.",
-        "Affected": "Card.Self+counters_GE4_P1P1",
-        "AddKeyword": "Menace & Lifelink"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you commit a crime, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyard is a crime.)",
+      "mode": "CommitCrime",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

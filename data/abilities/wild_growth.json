@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
       "mode": "TapsForMana",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
-        "Execute": "TrigMana",
-        "Static": "True"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

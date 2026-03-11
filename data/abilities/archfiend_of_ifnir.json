@@ -1,18 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle or discard another card, put a -1/-1 counter on each creature your opponents control.",
       "mode": "Discarded",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you cycle or discard another card, put a -1/-1 counter on each creature your opponents control.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Other+YouOwn"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

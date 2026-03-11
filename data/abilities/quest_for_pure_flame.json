@@ -2,50 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "If any source you control would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead.",
-          "ReplacementEffects": "DamageEvent"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "SubCounter<4/QUEST>"
+            "cost": "SubCounter<4/QUEST>",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If any source you control would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead.",
-        "ReplacementEffects": "DamageEvent"
-      }
+      "description": "If any source you control would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source you control deals damage to an opponent, you may put a quest counter on CARDNAME.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "ValidTarget": "Opponent",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a source you control deals damage to an opponent, you may put a quest counter on CARDNAME."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Emblem.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,31 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<2/Artifact;Creature/artifacts and/or creatures>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals 1 damage to each opponent. Activate only as a sorcery.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 1
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Artifact;Creature/artifacts and/or creatures>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Opponent",
-        "SpellDescription": "CARDNAME deals 1 damage to each opponent. Activate only as a sorcery.",
-        "SorcerySpeed": "True"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

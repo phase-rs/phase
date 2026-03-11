@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, each opponent discards a card. You draw a card for each land card discarded this way.",
       "mode": "SetInMotion",
-      "params": {
-        "Execute": "DBRepeat",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, each opponent discards a card. You draw a card for each land card discarded this way.",
-        "ValidCard": "Card.Self"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

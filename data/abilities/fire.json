@@ -1,61 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 2 damage divided as you choose among one or two targets.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 2
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TargetMin": "1",
-            "SpellDescription": "CARDNAME deals 2 damage divided as you choose among one or two targets.",
-            "TgtPrompt": "Select any target to distribute damage to",
-            "DividedAsYouChoose": "2",
-            "TargetMax": "2"
-          }
+          "target_prompt": "Select any target to distribute damage to"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Tap",
-            "target": {
-              "type": "Filtered",
-              "filter": "Permanent"
-            }
-          },
           "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Tap target permanent. Draw a card.",
-            "SubAbility": "DBDraw"
-          }
+          "description": "Tap target permanent. Draw a card.",
+          "effect": {
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "Tap"
+          },
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

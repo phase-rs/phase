@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Artifacts you control have protection from each mana value among artifacts you control.",
       "mode": "Continuous",
-      "params": {
-        "KeywordDefined": "Artifact.YouCtrl",
-        "AddKeyword": "Protection from EachCMCAmongDefined",
-        "Affected": "Artifact.YouCtrl",
-        "Description": "Artifacts you control have protection from each mana value among artifacts you control."
-      }
+      "modifications": [
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "EachCMCAmongDefined",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,38 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-          "MayChooseTarget": "True",
-          "ValidTgts": "Instant,Sorcery",
-          "TargetType": "Spell"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
-        "MayChooseTarget": "True",
-        "ValidTgts": "Instant,Sorcery",
-        "TargetType": "Spell"
-      }
+      "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game.",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "TrigCopy",
-        "TriggerDescription": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

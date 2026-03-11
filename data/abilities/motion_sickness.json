@@ -1,43 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTap",
-        "TriggerDescription": "When CARDNAME enters the battlefield, tap enchanted creature.",
-        "Origin": "Any"
-      }
-    },
-    {
-      "mode": "VisitAttraction",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "Execute": "TrigAttach",
-        "TriggerDescription": "Whenever you visit an Attraction, you may attach CARDNAME to target tapped creature.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Attraction.YouCtrl"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidCard": "Creature.AttachedBy",
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen"
+      "description": "When CARDNAME enters the battlefield, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "Whenever you visit an Attraction, you may attach CARDNAME to target tapped creature.",
+      "mode": "VisitAttraction",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Attraction",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

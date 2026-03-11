@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, target opponent reveals each nonland card in their hand. You choose one of them. That card perpetually gains \"When you cast this spell, each opponent draws a card and gains 3 life.\"",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigReveal",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, target opponent reveals each nonland card in their hand. You choose one of them. That card perpetually gains \"When you cast this spell, each opponent draws a card and gains 3 life.\""
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

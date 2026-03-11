@@ -1,40 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control with flying get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters or dies, create a 1/1 blue Jellyfish creature token with flying.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters or dies, create a 1/1 blue Jellyfish creature token with flying."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or dies, create a 1/1 blue Jellyfish creature token with flying.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigToken",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Secondary": "True",
-        "TriggerDescription": "When CARDNAME enters or dies, create a 1/1 blue Jellyfish creature token with flying.",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Description": "Creatures you control with flying get +1/+1.",
-        "Affected": "Creature.withFlying+YouCtrl",
-        "AddToughness": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

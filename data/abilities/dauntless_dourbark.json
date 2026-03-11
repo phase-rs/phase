@@ -1,28 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "X",
-        "SetPower": "X",
-        "CharacteristicDefining": "True",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME's power and toughness are each equal to the number of Forests you control plus the number of Treefolk you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of Forests you control plus the number of Treefolk you control.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Treefolk",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has trample as long as you control another Treefolk.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has trample as long as you control another Treefolk.",
-        "IsPresent": "Treefolk.YouCtrl+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

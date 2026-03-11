@@ -1,18 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to 1 plus twice the number of age counters on it.",
-        "SetPower": "Y",
-        "CharacteristicDefining": "True",
-        "SetToughness": "Y"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to 1 plus twice the number of age counters on it.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

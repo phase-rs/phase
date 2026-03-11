@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "White creatures have plainswalk.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:Plains",
-        "Affected": "Creature.White",
-        "Description": "White creatures have plainswalk."
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Plains",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

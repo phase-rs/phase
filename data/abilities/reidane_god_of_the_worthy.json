@@ -1,67 +1,76 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [
+      "replacements": [
         {
-          "mode": "RaiseCost",
-          "params": {
-            "Activator": "Opponent",
-            "Amount": "2",
-            "ValidCard": "Card.nonCreature+cmcGE4",
-            "Type": "Spell",
-            "Description": "Noncreature spells your opponents cast with mana value 4 or greater cost {2} more to cast."
+          "description": "Snow lands your opponents control enter tapped.",
+          "event": "Moved",
+          "valid_card": {
+            "card_type": "Land",
+            "controller": "Opponent",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Snow"
+              }
+            ],
+            "type": "Typed"
           }
         }
       ],
-      "replacements": [
+      "statics": [
         {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "ETBTapped",
-            "ActiveZones": "Battlefield",
-            "Description": "Snow lands your opponents control enter tapped.",
-            "ReplacementResult": "Updated",
-            "ValidCard": "Land.Snow+OppCtrl",
-            "Destination": "Battlefield"
-          }
+          "description": "Noncreature spells your opponents cast with mana value 4 or greater cost {2} more to cast.",
+          "mode": "RaiseCost"
         }
-      ]
+      ],
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "BecomesTarget",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidSource": "SpellAbility.OppCtrl",
-            "Execute": "TrigCounter",
-            "TriggerDescription": "Whenever you or another permanent you control becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {1}.",
-            "ValidTarget": "You,Permanent.YouCtrl+Other+inZoneBattlefield"
-          }
+          "description": "If a source an opponent controls would deal damage to you or a permanent you control, prevent 1 of that damage.",
+          "event": "DamageDone"
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "DamageDone",
-          "params": {
-            "Description": "If a source an opponent controls would deal damage to you or a permanent you control, prevent 1 of that damage.",
-            "ActiveZones": "Battlefield",
-            "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
-            "ValidTarget": "You,Permanent.YouCtrl",
-            "ReplaceWith": "DBReplace",
-            "PreventionEffect": "True"
+          "description": "Whenever you or another permanent you control becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {1}.",
+          "mode": "BecomesTarget",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "card_type": "SpellAbility",
+            "controller": "Opponent",
+            "type": "Typed"
+          },
+          "valid_target": {
+            "filters": [
+              {
+                "card_type": "You,Permanent",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

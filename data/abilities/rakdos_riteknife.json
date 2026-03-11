@@ -2,48 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Sacrifice",
-        "target": {
-          "type": "Player"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "B R"
+            "cost": "B R",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SacValid": "Permanent",
-        "Amount": "X",
-        "SpellDescription": "Target player sacrifices a permanent for each blood counter on CARDNAME."
-      }
+      "description": "Target player sacrifices a permanent for each blood counter on CARDNAME.",
+      "effect": {
+        "target": {
+          "type": "Player"
+        },
+        "type": "Sacrifice"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+0 for each blood counter on CARDNAME and has \"{T}, Sacrifice a creature: Put a blood counter on CARDNAME.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "RitualSac",
-        "Description": "Equipped creature gets +1/+0 for each blood counter on CARDNAME and has \"{T}, Sacrifice a creature: Put a blood counter on CARDNAME.\"",
-        "Affected": "Card.EquippedBy",
-        "AddPower": "X"
-      }
+      "modifications": [
+        {
+          "ability": "RitualSac",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

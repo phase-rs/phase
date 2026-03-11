@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, choose an opponent. CARDNAME enters with a -1/-1 counter on it for each creature that player controls.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "ChooseP",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "As CARDNAME enters, choose an opponent. CARDNAME enters with a -1/-1 counter on it for each creature that player controls."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

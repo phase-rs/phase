@@ -1,17 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control with flanking have flanking. (Each instance of flanking triggers separately.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+withFlanking+YouCtrl",
-        "Description": "Other creatures you control with flanking have flanking. (Each instance of flanking triggers separately.)",
-        "AddKeyword": "Flanking"
-      }
+      "modifications": [
+        {
+          "keyword": "Flanking",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

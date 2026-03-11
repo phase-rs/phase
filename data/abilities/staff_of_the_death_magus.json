@@ -1,31 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a black spell or a Swamp you control enters, you gain 1 life.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever you cast a black spell or a Swamp you control enters, you gain 1 life.",
-        "ValidCard": "Card.Black"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a black spell or a Swamp you control enters, you gain 1 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever you cast a black spell or a Swamp you control enters, you gain 1 life.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigGainLife",
-        "ValidCard": "Swamp.YouCtrl",
-        "Secondary": "True",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Swamp",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

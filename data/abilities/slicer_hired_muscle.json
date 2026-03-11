@@ -1,44 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of each opponent's upkeep, you may have that player gain control of NICKNAME until end of turn. If you do, untap NICKNAME, goad it, and it can't be sacrificed this turn. If you don't, convert it.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of each opponent's upkeep, you may have that player gain control of NICKNAME until end of turn. If you do, untap NICKNAME, goad it, and it can't be sacrificed this turn. If you don't, convert it.",
-            "Phase": "Upkeep",
-            "Execute": "TrigGainControl",
-            "ValidPlayer": "Opponent"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "combat_damage": true,
+          "description": "Whenever NICKNAME deals combat damage to a player, convert it at end of combat.",
           "mode": "DamageDone",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "ValidTarget": "Player",
-            "CombatDamage": "True",
-            "Execute": "TrigDelTrig",
-            "ValidSource": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, convert it at end of combat."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

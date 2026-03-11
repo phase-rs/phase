@@ -1,48 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBlock",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Description": "CARDNAME can't block."
-          }
+          "description": "CARDNAME can't block.",
+          "mode": "CantBlock"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Hand",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouOwn"
-            }
-          },
           "cost": null,
+          "description": "Return target creature card from your graveyard to your hand. (Then exile this card. You may cast the creature later from exile.)",
+          "effect": {
+            "destination": "Hand",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouOwn"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target creature card in your graveyard",
-            "SpellDescription": "Return target creature card from your graveyard to your hand. (Then exile this card. You may cast the creature later from exile.)"
-          }
+          "target_prompt": "Select target creature card in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -2,27 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Battlefield",
-        "destination": "Command",
-        "target": {
-          "type": "All",
-          "filter": "Player"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "ChangeType": "Permanent.IsCommander+TargetedPlayerCtrl",
-        "SpellDescription": "Target player returns each commander they control from the battlefield to the command zone. Draw a card."
-      }
+      "description": "Target player returns each commander they control from the battlefield to the command zone. Draw a card.",
+      "effect": {
+        "destination": "Command",
+        "origin": "Battlefield",
+        "target": {
+          "type": "Player"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

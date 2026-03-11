@@ -1,101 +1,93 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attacks, each opponent discards a card. For each opponent who can't, you draw a card.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigDiscard",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Whenever NICKNAME attacks, each opponent discards a card. For each opponent who can't, you draw a card."
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever an opponent discards a land card, create a 1/1 black Bat creature token with flying.",
           "mode": "Discarded",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "ValidCard": "Land.OppOwn",
-            "TriggerDescription": "Whenever an opponent discards a land card, create a 1/1 black Bat creature token with flying."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Land",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "OppOwn"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "description": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigTransform",
-            "Destination": "Graveyard",
-            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "B",
-            "params": {
-              "SpellDescription": "Add {B}."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Add {B}."
-          }
+          "description": "Add {B}.",
+          "effect": {
+            "produced": [
+              "Black"
+            ],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "SorcerySpeed": "True",
-              "SpellDescription": "Transform CARDNAME. Activate only if a player has one or fewer cards in hand and only as a sorcery.",
-              "CheckSVar": "X",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2 B"
+                "cost": "2 B",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "SorcerySpeed": "True",
-            "SpellDescription": "Transform CARDNAME. Activate only if a player has one or fewer cards in hand and only as a sorcery.",
-            "CheckSVar": "X",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME. Activate only if a player has one or fewer cards in hand and only as a sorcery.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if a player has one or fewer cards in hand and only as a sorcery.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sorcery_speed": true,
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,38 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.ChosenCard",
-        "Execute": "DBCleanup",
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "Static": "True"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Card.ChosenCard",
-        "Description": "Activated abilities of the chosen permanent can't be activated."
-      }
+      "description": "Activated abilities of the chosen permanent can't be activated.",
+      "mode": "CantBeActivated"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "ManaConversion": "AnyType->AnyColor",
-        "GainsValidAbilities": "Activated.!Loyalty",
-        "EffectZone": "Battlefield",
-        "GainsAbilitiesOfDefined": "ChosenCard",
-        "Description": "CARDNAME has all activated abilities of the chosen permanent except for loyalty abilities. You may spend mana as though it were mana of any color to activate those abilities."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of the chosen permanent except for loyalty abilities. You may spend mana as though it were mana of any color to activate those abilities.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenCard"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

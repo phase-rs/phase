@@ -2,59 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "SorcerySpeed": "True",
-          "SpellDescription": "Conjure a duplicate of another target creature card in your graveyard onto the top of your library. The duplicate perpetually gets +1/+1 and gains deathtouch. Activate only as a sorcery.",
-          "RememberMade": "True",
-          "ValidTgts": "Creature.Other+YouOwn",
-          "PrecostDesc": "Renew —",
-          "Conjure": "True",
-          "DefinedName": "Targeted",
-          "ActivationZone": "Graveyard",
-          "TgtZone": "Graveyard",
-          "LibraryPosition": "0",
-          "TgtPrompt": "Select another target creature card in your graveyard",
-          "SubAbility": "DBPump",
-          "Zone": "Library"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME/this card>"
+            "cost": "ExileFromGrave<1/CARDNAME/this card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Conjure a duplicate of another target creature card in your graveyard onto the top of your library. The duplicate perpetually gets +1/+1 and gains deathtouch. Activate only as a sorcery.",
+      "effect": {
+        "description": "Conjure a duplicate of another target creature card in your graveyard onto the top of your library. The duplicate perpetually gets +1/+1 and gains deathtouch. Activate only as a sorcery.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SorcerySpeed": "True",
-        "SpellDescription": "Conjure a duplicate of another target creature card in your graveyard onto the top of your library. The duplicate perpetually gets +1/+1 and gains deathtouch. Activate only as a sorcery.",
-        "RememberMade": "True",
-        "ValidTgts": "Creature.Other+YouOwn",
-        "PrecostDesc": "Renew —",
-        "Conjure": "True",
-        "DefinedName": "Targeted",
-        "ActivationZone": "Graveyard",
-        "TgtZone": "Graveyard",
-        "LibraryPosition": "0",
-        "TgtPrompt": "Select another target creature card in your graveyard",
-        "SubAbility": "DBPump",
-        "Zone": "Library"
-      }
+      "target_prompt": "Select another target creature card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

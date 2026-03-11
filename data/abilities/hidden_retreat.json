@@ -2,41 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Instant,Sorcery",
-          "AILogic": "Prevent",
-          "TgtZone": "Stack",
-          "SpellDescription": "Prevent all damage target instant or sorcery spell would deal this turn.",
-          "TgtPrompt": "Select target instant or sorcery spell to prevent damage from",
-          "ExileOnMoved": "Stack",
-          "RememberObjects": "TargetedSource",
-          "StaticAbilities": "PreventDmg",
-          "Stackable": "False"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "PutCardToLibFromHand<1/0/Card>"
+        "cost": "PutCardToLibFromHand<1/0/Card>",
+        "type": "Mana"
       },
+      "description": "Prevent all damage target instant or sorcery spell would deal this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Instant,Sorcery",
-        "AILogic": "Prevent",
-        "TgtZone": "Stack",
-        "SpellDescription": "Prevent all damage target instant or sorcery spell would deal this turn.",
-        "TgtPrompt": "Select target instant or sorcery spell to prevent damage from",
-        "ExileOnMoved": "Stack",
-        "RememberObjects": "TargetedSource",
-        "StaticAbilities": "PreventDmg",
-        "Stackable": "False"
-      }
+      "target_prompt": "Select target instant or sorcery spell to prevent damage from"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

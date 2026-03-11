@@ -2,39 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl,Vehicle.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Return target creature or Vehicle an opponent controls to its owner's hand. Draw a card.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "OppCtrl,Vehicle.OppCtrl"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Return target creature or Vehicle an opponent controls to its owner's hand. Draw a card.",
-        "TgtPrompt": "Select target creature or Vehicle an opponent controls",
-        "SubAbility": "DBDraw"
-      }
+      "target_prompt": "Select target creature or Vehicle an opponent controls"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {2} less to cast if it targets a permanent with mana value 1.",
-        "Type": "Spell",
-        "ValidCard": "Card.Self",
-        "Amount": "2",
-        "ValidTarget": "Permanent.cmcEQ1",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {2} less to cast if it targets a permanent with mana value 1.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

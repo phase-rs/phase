@@ -1,21 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "IsPresent": "Card.Self+untapped",
-        "Description": "As long as CARDNAME is untapped, all damage that would be dealt to you by artifacts is dealt to CARDNAME instead.",
-        "ValidTarget": "You",
-        "ReplaceWith": "DmgMe",
-        "ValidSource": "Artifact",
-        "DamageTarget": "Self"
-      }
+      "description": "As long as CARDNAME is untapped, all damage that would be dealt to you by artifacts is dealt to CARDNAME instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

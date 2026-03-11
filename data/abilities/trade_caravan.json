@@ -2,40 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.Basic"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<2/CURRENCY>"
+        "cost": "SubCounter<2/CURRENCY>",
+        "type": "Mana"
       },
+      "description": "Untap target basic land. Activate only during an opponent's upkeep.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Basic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "OpponentTurn": "True",
-        "TgtPrompt": "Select target basic land",
-        "ActivationPhases": "Upkeep",
-        "SpellDescription": "Untap target basic land. Activate only during an opponent's upkeep."
-      }
+      "target_prompt": "Select target basic land"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a currency counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a currency counter on CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

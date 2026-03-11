@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When enchanted permanent dies or is put into exile, return that card to the battlefield under your control.",
+      "destination": "Graveyard,Exile",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When enchanted permanent dies or is put into exile, return that card to the battlefield under your control.",
-        "Destination": "Graveyard,Exile",
-        "Origin": "Battlefield",
-        "Execute": "TrigReturn",
-        "ValidCard": "Card.AttachedBy"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

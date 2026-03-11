@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Reveal",
-        "params": {
-          "SubAbility": "DBScentOfCinderDamage",
-          "SpellDescription": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
-          "AnyNumber": "True",
-          "RememberRevealed": "True",
-          "Defined": "You",
-          "RevealValid": "Card.Red"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBScentOfCinderDamage",
-        "SpellDescription": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
-        "AnyNumber": "True",
-        "RememberRevealed": "True",
-        "Defined": "You",
-        "RevealValid": "Card.Red"
-      }
+      "description": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
+      "effect": {
+        "description": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
+        "name": "Reveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if CARDNAME is untapped, you lose 3 life.",
       "mode": "Phase",
-      "params": {
-        "PresentDefined": "Self",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.untapped",
-        "Execute": "TrigLoseLife",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, if CARDNAME is untapped, you lose 3 life."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

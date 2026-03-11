@@ -1,40 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of enchanted opponent's end step, you and that player each draw a card.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of enchanted opponent's end step, you and that player each draw a card.",
-        "ValidPlayer": "Opponent.EnchantedBy",
-        "Execute": "TrigDraw"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice CARDNAME.",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackedTarget": "Player.EnchantedBy,Planeswalker.EnchantedPlayerCtrl",
-        "AttackingPlayer": "You",
-        "Execute": "TrigSac",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice CARDNAME.",
       "mode": "AttackersDeclared",
-      "params": {
-        "Execute": "TrigSac",
-        "Secondary": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice CARDNAME.",
-        "AttackedTarget": "You,Planeswalker.YouCtrl",
-        "AttackingPlayer": "Player.EnchantedBy"
-      }
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

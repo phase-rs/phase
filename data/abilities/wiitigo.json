@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME if it has blocked or been blocked since your last upkeep. Otherwise, remove a +1/+1 counter from it.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter2",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME if it has blocked or been blocked since your last upkeep. Otherwise, remove a +1/+1 counter from it.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

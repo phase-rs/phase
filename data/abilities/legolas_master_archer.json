@@ -1,29 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on NICKNAME.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigCounters",
-        "TargetsValid": "Card.Self",
-        "TriggerDescription": "Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on NICKNAME.",
-        "ValidActivatingPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever you cast a spell that targets a creature you don't control, NICKNAME deals damage equal to its power to up to one target creature.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a spell that targets a creature you don't control, NICKNAME deals damage equal to its power to up to one target creature.",
-        "TargetsValid": "Creature.YouDontCtrl",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigFight",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "MayChooseTarget": "True",
-          "ValidTgts": "Instant,Sorcery",
-          "AILogic": "Always",
-          "TargetType": "Spell",
-          "TargetValidTargeting": "You",
-          "SpellDescription": "Copy target instant or sorcery spell that targets you. You may choose new targets for the copy."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 UR UR"
+        "cost": "1 UR UR",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MayChooseTarget": "True",
-        "ValidTgts": "Instant,Sorcery",
-        "AILogic": "Always",
-        "TargetType": "Spell",
-        "TargetValidTargeting": "You",
-        "SpellDescription": "Copy target instant or sorcery spell that targets you. You may choose new targets for the copy."
-      }
+      "description": "Copy target instant or sorcery spell that targets you. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target instant or sorcery spell that targets you. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

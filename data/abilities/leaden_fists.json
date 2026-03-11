@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "Description": "Enchanted creature gets +3/+3 and doesn't untap during its controller's untap step.",
-        "Affected": "Creature.EnchantedBy",
-        "AddPower": "3"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ValidStepTurnToController": "You",
-        "Secondary": "True",
-        "ValidCard": "Creature.EnchantedBy",
-        "Layer": "CantHappen"
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +3/+3 and doesn't untap during its controller's untap step.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

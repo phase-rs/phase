@@ -1,30 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.Opponent",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of each opponent's upkeep, NICKNAME deals 2 damage to that player unless they sacrifice a creature.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDmg"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "LT7",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as your devotion to black and red is less than seven, NICKNAME isn't a creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "CheckSVar": "X",
-        "SVarCompare": "LT7",
-        "RemoveType": "Creature",
-        "Description": "As long as your devotion to black and red is less than seven, NICKNAME isn't a creature."
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "RemoveType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each opponent's upkeep, NICKNAME deals 2 damage to that player unless they sacrifice a creature.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

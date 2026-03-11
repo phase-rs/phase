@@ -1,21 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source you control deals noncombat damage to an opponent, you may exile that many cards from the top of your library. You may play those cards this turn.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Whenever a source you control deals noncombat damage to an opponent, you may exile that many cards from the top of your library. You may play those cards this turn.",
-        "OptionalDecider": "You",
-        "ValidTarget": "Opponent",
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
-        "Execute": "TrigExile",
-        "CombatDamage": "False"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Emblem.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

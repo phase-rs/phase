@@ -1,29 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a creature spell with power 4, 5, or 6, CARDNAME deals 4 damage to any target.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a creature spell with power 4, 5, or 6, CARDNAME deals 4 damage to any target.",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Creature.powerGE4+powerLE6"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever you cast a creature spell with power 7 or greater, CARDNAME deals 4 damage to each opponent and each creature and planeswalker they control.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast a creature spell with power 7 or greater, CARDNAME deals 4 damage to each opponent and each creature and planeswalker they control.",
-        "Execute": "TrigDamageAll",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Creature.powerGE7",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

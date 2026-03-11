@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each of your postcombat main phases, add {R} for each 1 life your opponents have lost this turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main2",
-        "Execute": "TrigMana",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of each of your postcombat main phases, add {R} for each 1 life your opponents have lost this turn.",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "PostCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

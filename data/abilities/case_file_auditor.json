@@ -1,43 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "You may spend mana as though it were mana of any color to cast Case spells.",
+      "mode": {
+        "Other": "ManaConvert"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters and whenever you solve a Case, look at the top six cards of your library. You may reveal an enchantment card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDig",
-        "TriggerDescription": "When CARDNAME enters and whenever you solve a Case, look at the top six cards of your library. You may reveal an enchantment card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters and whenever you solve a Case, look at the top six cards of your library. You may reveal an enchantment card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
       "mode": "CaseSolved",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "When CARDNAME enters and whenever you solve a Case, look at the top six cards of your library. You may reveal an enchantment card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
-        "ValidPlayer": "You",
-        "ValidCard": "Case",
-        "Execute": "TrigDig",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Case",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "ManaConvert"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "ValidSA": "Spell",
-        "Description": "You may spend mana as though it were mana of any color to cast Case spells.",
-        "ValidCard": "Case.YouCtrl",
-        "ManaConversion": "AnyType->AnyColor"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,43 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Combo U R",
-        "params": {
-          "PlayerTurn": "True",
-          "Amount": "X",
-          "SpellDescription": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power. Activate only during your turn and only once each turn.",
-          "ActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PlayerTurn": "True",
-        "Amount": "X",
-        "SpellDescription": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power. Activate only during your turn and only once each turn.",
-        "ActivationLimit": "1"
-      }
+      "description": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power. Activate only during your turn and only once each turn.",
+      "effect": {
+        "produced": [
+          "Blue",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a noncreature spell, put a +1/+1 counter on CARDNAME and it deals 1 damage to each opponent.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigPutCounter",
-        "ValidCard": "Card.nonCreature",
-        "TriggerDescription": "Whenever you cast a noncreature spell, put a +1/+1 counter on CARDNAME and it deals 1 damage to each opponent.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,44 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, mill a card. Then if there are three or more creature cards in your graveyard, transform CARDNAME. (To mill a card, put the top card of your library into your graveyard.)",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigMill",
-            "TriggerDescription": "At the beginning of your upkeep, mill a card. Then if there are three or more creature cards in your graveyard, transform CARDNAME. (To mill a card, put the top card of your library into your graveyard.)",
-            "TriggerZones": "Battlefield",
-            "Phase": "Upkeep",
-            "ValidPlayer": "You"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of your upkeep, you may exile a card from a graveyard. If a creature card was exiled this way, put a +1/+1 counter on CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your upkeep, you may exile a card from a graveyard. If a creature card was exiled this way, put a +1/+1 counter on CARDNAME.",
-            "OptionalDecider": "You",
-            "Execute": "TrigExile",
-            "ValidPlayer": "You",
-            "Phase": "Upkeep"
-          }
+          "optional": true,
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

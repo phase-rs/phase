@@ -1,23 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Creature",
-        "ExecuteMode": "PerSource",
-        "ReplaceWith": "Counters",
-        "AlwaysReplace": "True",
-        "Description": "If a creature would deal combat damage to CARDNAME, prevent that damage and put a +1/+1 counter on CARDNAME.",
-        "ValidTarget": "Card.Self",
-        "PreventionEffect": "True",
-        "IsCombat": "True"
-      }
+      "description": "If a creature would deal combat damage to CARDNAME, prevent that damage and put a +1/+1 counter on CARDNAME.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

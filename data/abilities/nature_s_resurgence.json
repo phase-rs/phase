@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatSubAbility": "DBDraw",
-          "RepeatPlayers": "Player",
-          "SpellDescription": "Each player draws a card for each creature card in their graveyard."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatSubAbility": "DBDraw",
-        "RepeatPlayers": "Player",
-        "SpellDescription": "Each player draws a card for each creature card in their graveyard."
-      }
+      "description": "Each player draws a card for each creature card in their graveyard.",
+      "effect": {
+        "description": "Each player draws a card for each creature card in their graveyard.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

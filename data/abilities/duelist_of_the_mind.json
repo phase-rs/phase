@@ -1,28 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CommitCrime",
-      "params": {
-        "Execute": "TrigLoot",
-        "ActivationLimit": "1",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you commit a crime, you may draw a card. If you do, discard a card. This ability triggers only once each turn."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power is equal to the number of cards you've drawn this turn.",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of cards you've drawn this turn.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you commit a crime, you may draw a card. If you do, discard a card. This ability triggers only once each turn.",
+      "mode": "CommitCrime",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,91 +1,90 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gets +2/+0 until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 2,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME is dealt damage, it deals that much damage to any target.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "Execute": "TrigDamage",
-            "TriggerZones": "Battlefield",
-            "ValidTarget": "Card.Self",
-            "TriggerDescription": "Whenever CARDNAME is dealt damage, it deals that much damage to any target."
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_target": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gets +2/+0 until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 2,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 R"
+          "kind": "Activated",
+          "sub_ability": null
+        }
+      ],
+      "replacements": [],
+      "statics": [
+        {
+          "affected": {
+            "card_type": "Permanent",
+            "controller": "You",
+            "type": "Typed"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME gets +2/+0 until end of turn.",
-            "Defined": "Self"
-          }
+          "mode": "Continuous"
         }
       ],
       "triggers": [
         {
+          "description": "Whenever a permanent you control is dealt damage, CARDNAME deals that much damage to any target.",
           "mode": "DamageDoneOnce",
-          "params": {
-            "Execute": "TrigDamage",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever a permanent you control is dealt damage, CARDNAME deals that much damage to any target.",
-            "ValidTarget": "Permanent.YouCtrl"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_target": {
+            "card_type": "Permanent",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "AddSVar": "CE",
-            "Affected": "Permanent.YouCtrl"
-          }
-        }
-      ],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

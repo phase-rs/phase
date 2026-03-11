@@ -1,37 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayLookAt": "You",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "You may look at the top card of your library any time.",
-        "AffectedZone": "Library"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may look at the top card of your library any time.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Library",
-        "MayPlay": "True",
-        "Description": "You may play lands and cast Bird spells from the top of your library.",
-        "Affected": "Card.TopLibrary+YouCtrl+Bird,Card.TopLibrary+YouCtrl+Land"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "Bird,Card.TopLibrary"
+          },
+          {
+            "type": "Other",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "You may play lands and cast Bird spells from the top of your library.",
+      "mode": "Continuous"
     },
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidCause": "Land.YouCtrl,Bird.YouCtrl",
-        "Destination": "Battlefield",
-        "Description": "If a land or Bird you control entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "ValidCard": "Permanent.YouCtrl"
-      }
+      "description": "If a land or Bird you control entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,25 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.powerLE2,Creature.toughnessLE2"
-        }
-      },
       "cost": null,
+      "description": "Counter target creature spell with power or toughness 2 or less.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target creature spell with power or toughness 2 or less.",
-        "TgtPrompt": "Select target creature spell with power or toughness 2 or less",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target creature spell with power or toughness 2 or less"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

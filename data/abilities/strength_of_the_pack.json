@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterType": "P1P1",
-          "CounterNum": "2",
-          "ValidCards": "Creature.YouCtrl",
-          "SpellDescription": "Put two +1/+1 counters on each creature you control."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterType": "P1P1",
-        "CounterNum": "2",
-        "ValidCards": "Creature.YouCtrl",
-        "SpellDescription": "Put two +1/+1 counters on each creature you control."
-      }
+      "description": "Put two +1/+1 counters on each creature you control.",
+      "effect": {
+        "description": "Put two +1/+1 counters on each creature you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "RepeatCards": "Creature",
-          "Zone": "Battlefield",
-          "SpellDescription": "For each creature, choose a number from 0 to 2 at random. CARDNAME deals that much damage to that creature.",
-          "RepeatSubAbility": "DBDealDamage"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RepeatCards": "Creature",
-        "Zone": "Battlefield",
-        "SpellDescription": "For each creature, choose a number from 0 to 2 at random. CARDNAME deals that much damage to that creature.",
-        "RepeatSubAbility": "DBDealDamage"
-      }
+      "description": "For each creature, choose a number from 0 to 2 at random. CARDNAME deals that much damage to that creature.",
+      "effect": {
+        "description": "For each creature, choose a number from 0 to 2 at random. CARDNAME deals that much damage to that creature.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

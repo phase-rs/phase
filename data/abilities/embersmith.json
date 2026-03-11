@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an artifact spell, you may pay {1}. If you do, CARDNAME deals 1 damage to any target.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast an artifact spell, you may pay {1}. If you do, CARDNAME deals 1 damage to any target.",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidCard": "Artifact",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDamage"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

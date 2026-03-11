@@ -2,66 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "6",
-          "RestrictValid": "Spell.Creature,Activated.Creature+inZoneBattlefield",
-          "SpellDescription": "Add six {G}. Spend this mana only to cast creature spells or activate abilities of creatures."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 G G"
+            "cost": "2 G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "6",
-        "RestrictValid": "Spell.Creature,Activated.Creature+inZoneBattlefield",
-        "SpellDescription": "Add six {G}. Spend this mana only to cast creature spells or activate abilities of creatures."
-      }
+      "description": "Add six {G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control a Forest.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "LandTapped",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped unless you control a Forest.",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

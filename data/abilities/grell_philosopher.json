@@ -1,30 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Aberrant Tinkering — When CARDNAME enters and at the beginning of your upkeep, each Horror you control gains all activated abilities of target artifact an opponent controls until end of turn. You may spend blue mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigEffect",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "Aberrant Tinkering — When CARDNAME enters and at the beginning of your upkeep, each Horror you control gains all activated abilities of target artifact an opponent controls until end of turn. You may spend blue mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Aberrant Tinkering — When CARDNAME enters and at the beginning of your upkeep, each Horror you control gains all activated abilities of target artifact an opponent controls until end of turn. You may spend blue mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigEffect",
-        "TriggerDescription": "Aberrant Tinkering — When CARDNAME enters and at the beginning of your upkeep, each Horror you control gains all activated abilities of target artifact an opponent controls until end of turn. You may spend blue mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

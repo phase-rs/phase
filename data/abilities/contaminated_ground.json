@@ -1,28 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted land becomes tapped, its controller loses 2 life.",
-        "Execute": "TrigLose",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land is a Swamp.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "Swamp",
-        "RemoveLandTypes": "True",
-        "Affected": "Card.EnchantedBy",
-        "Description": "Enchanted land is a Swamp."
-      }
+      "modifications": [
+        {
+          "core_type": "Swamp",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever enchanted land becomes tapped, its controller loses 2 life.",
+      "mode": "Taps",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

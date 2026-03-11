@@ -1,29 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to the life paid as it entered.",
-        "SetToughness": "LifePaidOnETB",
-        "CharacteristicDefining": "True",
-        "SetPower": "LifePaidOnETB"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, pay any amount of life. The amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
       "event": "Moved",
-      "params": {
-        "Description": "As CARDNAME enters, pay any amount of life. The amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
-        "ReplaceWith": "PayLife",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the life paid as it entered.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 2
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationLimit": "1",
-        "SpellDescription": "Draw two cards. Activate only once each turn."
-      }
+      "description": "Draw two cards. Activate only once each turn.",
+      "effect": {
+        "count": 2,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You can't play lands.",
       "mode": {
         "Other": "CantPlayLand"
-      },
-      "params": {
-        "Player": "You",
-        "Description": "You can't play lands."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

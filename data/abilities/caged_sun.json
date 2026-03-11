@@ -1,45 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenColor"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creatures you control of the chosen color get +1/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
       "mode": "ManaAdded",
-      "params": {
-        "ValidSA": "SpellAbility.ManaAbility",
-        "Produced": "ChosenColor",
-        "Player": "You",
-        "Execute": "TrigMana",
-        "ValidSource": "Land",
-        "Static": "True",
-        "TriggerDescription": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
       "mode": "ManaAdded",
-      "params": {
-        "Produced": "ChosenColor",
-        "ValidSource": "Land",
-        "ValidSA": "SpellAbility.!ManaAbility",
-        "Execute": "TrigMana",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
-        "Player": "You"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Affected": "Creature.ChosenColor+YouCtrl",
-        "Description": "Creatures you control of the chosen color get +1/+1."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

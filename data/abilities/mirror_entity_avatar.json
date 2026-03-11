@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "SubAbility": "DBAnimate",
-          "Defined": "You",
-          "SpellDescription": "Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.",
-          "ActivationZone": "Command",
-          "AILogic": "MostProminentComputerControls",
-          "Type": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "X"
+        "cost": "X",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimate",
-        "Defined": "You",
-        "SpellDescription": "Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.",
-        "ActivationZone": "Command",
-        "AILogic": "MostProminentComputerControls",
-        "Type": "Creature"
-      }
+      "description": "Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.",
+      "effect": {
+        "description": "Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

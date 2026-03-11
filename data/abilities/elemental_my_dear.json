@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Investigate",
-        "params": {
-          "SubAbility": "DBToken",
-          "SpellDescription": "Investigate X times, then create an 0/0 Blue Elemental creature token.",
-          "Num": "X"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "SpellDescription": "Investigate X times, then create an 0/0 Blue Elemental creature token.",
-        "Num": "X"
-      }
+      "description": "Investigate X times, then create an 0/0 Blue Elemental creature token.",
+      "effect": {
+        "description": "Investigate X times, then create an 0/0 Blue Elemental creature token.",
+        "name": "Investigate",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

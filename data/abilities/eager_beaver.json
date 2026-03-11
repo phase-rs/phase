@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, you may untap target permanent.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Host": "True",
-        "OptionalDecider": "You",
-        "Origin": "Any",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "When this creature enters, you may untap target permanent.",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

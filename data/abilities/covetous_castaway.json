@@ -1,53 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME dies, mill three cards.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigMill",
-            "Origin": "Battlefield",
-            "TriggerDescription": "When CARDNAME dies, mill three cards.",
-            "Destination": "Graveyard"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
+      "replacements": [
         {
-          "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, you may shuffle up to three target cards from your graveyard into your library.",
-            "Origin": "Any",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "Execute": "TrigChangeZone"
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ],
       "statics": [],
-      "replacements": [
+      "triggers": [
         {
-          "event": "Moved",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "ReplaceWith": "Exile",
-            "Destination": "Graveyard"
+          "description": "When CARDNAME enters, you may shuffle up to three target cards from your graveyard into your library.",
+          "destination": "Battlefield",
+          "mode": "ChangesZone",
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
       ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

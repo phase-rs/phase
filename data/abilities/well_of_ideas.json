@@ -1,39 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, draw two cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDraw1",
-        "TriggerDescription": "When CARDNAME enters, draw two cards.",
-        "Destination": "Battlefield",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each other player's draw step, that player draws an additional card.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Draw",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw2",
-        "TriggerDescription": "At the beginning of each other player's draw step, that player draws an additional card.",
-        "ValidPlayer": "Player.Other"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your draw step, draw two additional cards.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your draw step, draw two additional cards.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw1",
-        "Phase": "Draw"
-      }
+      "phase": "Draw",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

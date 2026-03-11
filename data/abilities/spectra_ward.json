@@ -1,19 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +2/+2 and has protection from each color. This effect doesn't remove auras.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature gets +2/+2 and has protection from each color. This effect doesn't remove auras.",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "AddKeyword": "Protection:Card.nonColorless:each color:Aura",
-        "Affected": "Creature.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Protection:Card.nonColorless:each",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "color:Aura",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

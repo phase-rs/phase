@@ -2,44 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SubAbility": "DelTrigSlowtrip",
-          "Amount": "2",
-          "SpellDescription": "Add two mana of any one color. Draw a card at the beginning of the next turn's upkeep."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DelTrigSlowtrip",
-        "Amount": "2",
-        "SpellDescription": "Add two mana of any one color. Draw a card at the beginning of the next turn's upkeep."
-      }
+      "description": "Add two mana of any one color. Draw a card at the beginning of the next turn's upkeep.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

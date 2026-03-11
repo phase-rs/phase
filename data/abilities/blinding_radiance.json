@@ -2,25 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "TapAll",
-        "params": {
-          "ValidCards": "Creature.OppCtrl+toughnessLE2",
-          "SpellDescription": "Tap all creatures your opponents control with toughness 2 or less."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.OppCtrl+toughnessLE2",
-        "SpellDescription": "Tap all creatures your opponents control with toughness 2 or less."
-      }
+      "description": "Tap all creatures your opponents control with toughness 2 or less.",
+      "effect": {
+        "description": "Tap all creatures your opponents control with toughness 2 or less.",
+        "name": "TapAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

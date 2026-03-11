@@ -2,43 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Counter target spell unless its controller pays {1}. If you revealed a Dragon card or controlled a Dragon as you cast this spell, counter that spell instead.",
+      "effect": {
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ConditionSVarCompare": "EQ0",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Counter target spell unless its controller pays {1}. If you revealed a Dragon card or controlled a Dragon as you cast this spell, counter that spell instead.",
-        "ConditionCheckSVar": "TotalPresence",
-        "SubAbility": "DBCounter",
-        "TgtPrompt": "Select target spell",
-        "TargetType": "Spell",
-        "UnlessCost": "1"
-      }
+      "target_prompt": "Select target spell"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
-        "Cost": "Reveal<1/Dragon>",
-        "ValidSA": "Spell",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,86 +2,74 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "AlterAttribute",
-        "params": {
-          "SpellDescription": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
-          "Attributes": "Saddled",
-          "TgtPrompt": "Select target Mount you control",
-          "ValidTgts": "Mount.YouCtrl",
-          "SorcerySpeed": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
+      "effect": {
+        "description": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
+        "name": "AlterAttribute",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
-        "Attributes": "Saddled",
-        "TgtPrompt": "Select target Mount you control",
-        "ValidTgts": "Mount.YouCtrl",
-        "SorcerySpeed": "True"
-      }
+      "target_prompt": "Select target Mount you control"
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "costs": [
+          {
+            "cost": "2",
+            "type": "Mana"
+          },
+          {
+            "type": "Tap"
+          }
+        ],
+        "type": "Composite"
+      },
+      "description": "Target Vehicle you control becomes an artifact creature until end of turn.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Vehicle",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Vehicle.YouCtrl"
-        }
-      },
-      "cost": {
-        "type": "Composite",
-        "costs": [
-          {
-            "type": "Mana",
-            "cost": "2"
-          },
-          {
-            "type": "Tap"
-          }
         ]
       },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target Vehicle you control becomes an artifact creature until end of turn.",
-        "TgtPrompt": "Select target Vehicle you control"
-      }
+      "target_prompt": "Select target Vehicle you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this artifact enters, draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When this artifact enters, draw a card.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

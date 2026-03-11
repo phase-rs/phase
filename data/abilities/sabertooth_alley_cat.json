@@ -2,37 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Creatures without defender can't block CARDNAME this turn.",
-          "StaticAbilities": "KWPump",
-          "Duration": "UntilHostLeavesPlayOrEOT"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R"
+        "cost": "1 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Creatures without defender can't block CARDNAME this turn.",
-        "StaticAbilities": "KWPump",
-        "Duration": "UntilHostLeavesPlayOrEOT"
-      }
+      "description": "Creatures without defender can't block CARDNAME this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's first main phase, if CARDNAME is untapped, that player adds {C} for each artifact they control.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigGetMana",
-        "PresentDefined": "Self",
-        "ValidPlayer": "Player",
-        "Phase": "Main1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each player's first main phase, if CARDNAME is untapped, that player adds {C} for each artifact they control.",
-        "IsPresent": "Card.untapped"
-      }
+      "phase": "PreCombatMain",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

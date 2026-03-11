@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "SPORE",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Fungus"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G G"
+        "cost": "G G",
+        "type": "Mana"
       },
+      "description": "Put a spore counter on target Fungus.",
+      "effect": {
+        "count": 1,
+        "counter_type": "SPORE",
+        "target": {
+          "card_type": "Fungus",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a spore counter on target Fungus.",
-        "TgtPrompt": "Select target Fungus"
-      }
+      "target_prompt": "Select target Fungus"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

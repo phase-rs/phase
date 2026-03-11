@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME has \"When CARDNAME enters, it deals 3 damage to any target.\"",
-        "Affected": "Card.Self",
-        "AddTrigger": "TrigETB",
-        "Condition": "Threshold"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME has \"When CARDNAME enters, it deals 3 damage to any target.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

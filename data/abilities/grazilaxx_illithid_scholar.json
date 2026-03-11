@@ -1,30 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control becomes blocked, you may return it to its owner's hand.",
       "mode": "AttackerBlocked",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever a creature you control becomes blocked, you may return it to its owner's hand.",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigBounce"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever one or more creatures you control deal combat damage to a player, draw a card.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "Player",
-        "CombatDamage": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, draw a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

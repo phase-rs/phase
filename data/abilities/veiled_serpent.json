@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When an opponent casts a spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Serpent creature with \"This creature can't attack unless defending player controls an Island.\"",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate",
-        "ValidCard": "Card",
-        "TriggerDescription": "When an opponent casts a spell, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Serpent creature with \"This creature can't attack unless defending player controls an Island.\"",
-        "IsPresent": "Card.Self+Enchantment",
-        "ValidActivatingPlayer": "Opponent"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,74 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 5,
-        "destination": ""
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "1",
-        "ChangeValid": "Artifact",
-        "Optional": "True",
-        "SpellDescription": "Look at the top five cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
-        "Planeswalker": "True"
-      }
+      "description": "Look at the top five cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 5,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -1,
+        "type": "Loyalty"
+      },
+      "description": "Target artifact becomes an artifact creature with base power and toughness 5/5.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 5,
+        "target": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
         "toughness": 5,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact"
-        }
+        ]
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target artifact becomes an artifact creature with base power and toughness 5/5.",
-        "Duration": "Permanent",
-        "AITgts": "Artifact.YouCtrl",
-        "Planeswalker": "True",
-        "AITgtsStrict": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -4
+        "amount": -4,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player loses X life and you gain X life, where X is twice the number of artifacts you control.",
-        "Ultimate": "True",
-        "SubAbility": "DBGain",
-        "Planeswalker": "True",
-        "ValidTgts": "Player"
-      }
+      "description": "Target player loses X life and you gain X life, where X is twice the number of artifacts you control.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

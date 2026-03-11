@@ -2,49 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "SpellDescription": "Roll a six-sided die plus an additional six-sided die for each mana from Treasures spent to activate this ability.",
-          "Amount": "Count$TotalManaSpent Treasure/Plus.1",
-          "StackDescription": "SpellDescription"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Roll a six-sided die plus an additional six-sided die for each mana from Treasures spent to activate this ability.",
-        "Amount": "Count$TotalManaSpent Treasure/Plus.1",
-        "StackDescription": "SpellDescription"
-      }
+      "description": "Roll a six-sided die plus an additional six-sided die for each mana from Treasures spent to activate this ability.",
+      "effect": {
+        "description": "Roll a six-sided die plus an additional six-sided die for each mana from Treasures spent to activate this ability.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you roll a 4 or higher, create a 3/3 colorless Robot artifact creature token. If you rolled 6 or higher, instead create that token and a Treasure token.",
       "mode": "RolledDie",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigBranch",
-        "TriggerZones": "Battlefield",
-        "ValidResult": "GE4",
-        "TriggerDescription": "Whenever you roll a 4 or higher, create a 3/3 colorless Robot artifact creature token. If you rolled 6 or higher, instead create that token and a Treasure token."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

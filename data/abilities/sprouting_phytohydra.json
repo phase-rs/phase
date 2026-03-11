@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, you may create a token that's a copy of Sprouting CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, you may create a token that's a copy of Sprouting CARDNAME.",
-        "ValidTarget": "Card.Self",
-        "Execute": "TrigCopy"
+      "optional": true,
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

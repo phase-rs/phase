@@ -1,20 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME dies, you may search your library for up to three Forest cards, put them onto the battlefield tapped, then shuffle.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "OptionalDecider": "TriggeredCardController",
-        "Destination": "Graveyard",
-        "TriggerDescription": "When CARDNAME dies, you may search your library for up to three Forest cards, put them onto the battlefield tapped, then shuffle.",
-        "Origin": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

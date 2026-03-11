@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Players can't untap more than one creature during their untap steps.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Players can't untap more than one creature during their untap steps.",
-        "Affected": "Player",
-        "AddKeyword": "UntapAdjust:Creature:1"
-      }
+      "modifications": [
+        {
+          "keyword": "UntapAdjust:Creature:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

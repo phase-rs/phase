@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Paradox — Whenever you cast a spell from anywhere other than your hand, put a +1/+1 counter on target creature.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Paradox — Whenever you cast a spell from anywhere other than your hand, put a +1/+1 counter on target creature.",
-        "ValidCard": "Card.!wasCastFromYourHand",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Team TARDIS — At the beginning of your end step, untap each creature you control with a counter on it.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "Team TARDIS — At the beginning of your end step, untap each creature you control with a counter on it.",
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

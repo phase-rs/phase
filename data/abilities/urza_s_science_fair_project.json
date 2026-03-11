@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RollDice",
-        "params": {
-          "AILogic": "CombatEarly",
-          "SpellDescription": "Roll a six-sided die. CARDNAME gets the indicated result.",
-          "ResultSubAbilities": "1:M2,2:Fog,3:Vig,4:FS,5:Fly,6:P2"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "CombatEarly",
-        "SpellDescription": "Roll a six-sided die. CARDNAME gets the indicated result.",
-        "ResultSubAbilities": "1:M2,2:Fog,3:Vig,4:FS,5:Fly,6:P2"
-      }
+      "description": "Roll a six-sided die. CARDNAME gets the indicated result.",
+      "effect": {
+        "description": "Roll a six-sided die. CARDNAME gets the indicated result.",
+        "name": "RollDice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

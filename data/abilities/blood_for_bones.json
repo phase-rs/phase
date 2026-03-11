@@ -2,44 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Battlefield",
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 B"
+            "cost": "3 B",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeTypeDesc": "creature",
-        "SpellDescription": "Return a creature card from your graveyard to the battlefield, then return another creature card from your graveyard to your hand.",
-        "PrimaryPrompt": "Choose a creature card to return to the battlefield",
-        "Hidden": "True",
-        "SubAbility": "DBChangeZone",
-        "ChangeType": "Creature.YouOwn",
-        "Mandatory": "True"
-      }
+      "description": "Return a creature card from your graveyard to the battlefield, then return another creature card from your graveyard to your hand.",
+      "effect": {
+        "destination": "Battlefield",
+        "origin": "Graveyard",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

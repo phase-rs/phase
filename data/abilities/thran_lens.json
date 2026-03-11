@@ -1,17 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent",
-        "Description": "All permanents are colorless.",
-        "SetColor": "Colorless"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "type": "Typed"
+      },
+      "description": "All permanents are colorless.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

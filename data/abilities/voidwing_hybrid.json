@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you proliferate, return CARDNAME from your graveyard to your hand.",
       "mode": "Proliferate",
-      "params": {
-        "TriggerDescription": "When you proliferate, return CARDNAME from your graveyard to your hand.",
-        "IsPresent": "Card.StrictlySelf",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigReturn",
-        "ValidPlayer": "You",
-        "PresentZone": "Graveyard",
-        "PresentPlayer": "You"
-      }
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

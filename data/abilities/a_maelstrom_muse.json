@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, the next instant or sorcery spell you cast this turn costs {X} less to cast, where X is CARDNAME's power as this ability resolves.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, the next instant or sorcery spell you cast this turn costs {X} less to cast, where X is CARDNAME's power as this ability resolves.",
-        "Execute": "CheckPower"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,27 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Gain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "controller": "Opponent",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature an opponent controls.",
-        "LoseControl": "EOT",
-        "Untap": "True",
-        "AddKWs": "Haste",
-        "SpellDescription": "Gain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn."
-      }
+      "target_prompt": "Select target creature an opponent controls."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

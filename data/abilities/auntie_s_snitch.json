@@ -1,31 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Goblin.YouCtrl,Rogue.YouCtrl",
-        "PresentZone": "Graveyard",
-        "Execute": "TrigChange",
-        "ValidTarget": "Player",
-        "TriggerZones": "Graveyard",
-        "CombatDamage": "True",
-        "OptionalDecider": "You",
-        "IsPresent": "Card.StrictlySelf",
-        "TriggerDescription": "Whenever a Goblin or Rogue you control deals combat damage to a player, if CARDNAME is in your graveyard, you may return CARDNAME to your hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "combat_damage": true,
+      "description": "Whenever a Goblin or Rogue you control deals combat damage to a player, if CARDNAME is in your graveyard, you may return CARDNAME to your hand.",
+      "mode": "DamageDone",
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_source": {
+        "card_type": "Goblin",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Rogue.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "Player"
+      }
+    }
+  ]
 }

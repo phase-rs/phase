@@ -2,56 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "ThisTurn": "True",
-          "Mode": "SpellCast",
-          "AILogic": "SpellCopy",
-          "ValidCard": "Instant,Sorcery",
-          "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it. You may choose new targets for the copy.",
-          "Execute": "EffTrigCopy",
-          "ValidActivatingPlayer": "You"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<3/CHARGE>"
+            "cost": "SubCounter<3/CHARGE>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ThisTurn": "True",
-        "Mode": "SpellCast",
-        "AILogic": "SpellCopy",
-        "ValidCard": "Instant,Sorcery",
-        "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it. You may choose new targets for the copy.",
-        "Execute": "EffTrigCopy",
-        "ValidActivatingPlayer": "You"
-      }
+      "description": "When you next cast an instant or sorcery spell this turn, copy it. You may choose new targets for the copy.",
+      "effect": {
+        "description": "When you next cast an instant or sorcery spell this turn, copy it. You may choose new targets for the copy.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a permanent you control of the chosen type enters, put a charge counter on this artifact.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl+ChosenType",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever a permanent you control of the chosen type enters, put a charge counter on this artifact.",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ChosenType"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

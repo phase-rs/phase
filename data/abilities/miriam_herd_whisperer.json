@@ -1,28 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever a Mount or Vehicle you control attacks, put a +1/+1 counter on it.",
-        "ValidCard": "Mount.YouCtrl,Vehicle.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Mount",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Vehicle.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, Mounts and Vehicles you control have hexproof.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Hexproof",
-        "Affected": "Mount.YouCtrl,Vehicle.YouCtrl",
-        "Description": "During your turn, Mounts and Vehicles you control have hexproof.",
-        "Condition": "PlayerTurn"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Mount or Vehicle you control attacks, put a +1/+1 counter on it.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Mount",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Vehicle.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

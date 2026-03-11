@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, create a Map token. (It's an artifact with \"{1}, {T}, Sacrifice this artifact: Target creature you control explores. Activate only as a sorcery.\")",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "description": "If a creature you control would explore, instead it explores, then it explores again.",
+      "event": {
+        "Other": "Explore"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Explore"
-      },
-      "params": {
-        "ReplaceWith": "Explore1",
-        "ActiveZones": "Battlefield",
-        "ValidExplorer": "Creature.YouCtrl",
-        "Description": "If a creature you control would explore, instead it explores, then it explores again."
+      "description": "When CARDNAME enters, create a Map token. (It's an artifact with \"{1}, {T}, Sacrifice this artifact: Target creature you control explores. Activate only as a sorcery.\")",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

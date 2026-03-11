@@ -1,18 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you had another creature enter the battlefield under your control this turn, CARDNAME has trample and indestructible.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample & Indestructible",
-        "Affected": "Card.Self",
-        "Description": "As long as you had another creature enter the battlefield under your control this turn, CARDNAME has trample and indestructible.",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

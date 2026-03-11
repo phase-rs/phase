@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
+      "effect_zone": "Command",
       "mode": {
         "Other": "CombatDamageToughness"
-      },
-      "params": {
-        "EffectZone": "Command",
-        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
-        "ValidCard": "Creature.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

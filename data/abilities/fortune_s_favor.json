@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "NoPeek": "True",
-          "NoReveal": "True",
-          "RememberPeeked": "True",
-          "SubAbility": "Separate",
-          "SpellDescription": "Target opponent looks at the top four cards of your library and separates them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard.",
-          "PeekAmount": "4"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "NoPeek": "True",
-        "NoReveal": "True",
-        "RememberPeeked": "True",
-        "SubAbility": "Separate",
-        "SpellDescription": "Target opponent looks at the top four cards of your library and separates them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard.",
-        "PeekAmount": "4"
-      }
+      "description": "Target opponent looks at the top four cards of your library and separates them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard.",
+      "effect": {
+        "description": "Target opponent looks at the top four cards of your library and separates them into a face-down pile and a face-up pile. Put one pile into your hand and the other into your graveyard.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

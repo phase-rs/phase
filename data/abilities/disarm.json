@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Unattach",
-        "params": {
-          "ValidTgts": "Creature",
-          "Defined": "Valid Equipment.AttachedTo Card.targetedBy",
-          "SpellDescription": "Unattach all Equipment from target creature."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "Defined": "Valid Equipment.AttachedTo Card.targetedBy",
-        "SpellDescription": "Unattach all Equipment from target creature."
-      }
+      "description": "Unattach all Equipment from target creature.",
+      "effect": {
+        "description": "Unattach all Equipment from target creature.",
+        "name": "Unattach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

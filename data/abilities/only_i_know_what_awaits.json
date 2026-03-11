@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, for each card type among permanents your opponents control, you may put a permanent card of that type from your hand onto the battlefield.",
       "mode": "SetInMotion",
-      "params": {
-        "TriggerDescription": "When you set this scheme in motion, for each card type among permanents your opponents control, you may put a permanent card of that type from your hand onto the battlefield.",
-        "Execute": "TrigRepeatEach",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,22 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if you have five or more cards in hand, CARDNAME deals 1 damage to target opponent or planeswalker.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "Phase": "Upkeep",
-        "PresentCompare": "GE5",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.YouCtrl",
-        "TriggerDescription": "At the beginning of your upkeep, if you have five or more cards in hand, CARDNAME deals 1 damage to target opponent or planeswalker.",
-        "PresentZone": "Hand",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

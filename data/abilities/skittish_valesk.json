@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, flip a coin. If you lose the flip, turn CARDNAME face down.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigFlipACoin",
-        "TriggerDescription": "At the beginning of your upkeep, flip a coin. If you lose the flip, turn CARDNAME face down.",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

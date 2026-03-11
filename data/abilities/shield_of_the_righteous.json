@@ -1,27 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever equipped creature blocks a creature, that creature doesn't untap during its controller's next untap step.",
-        "Execute": "TrigPump",
-        "ValidBlocker": "Card.EquippedBy"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +0/+2 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "2",
-        "AddKeyword": "Vigilance",
-        "Affected": "Creature.EquippedBy",
-        "Description": "Equipped creature gets +0/+2 and has vigilance."
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever equipped creature blocks a creature, that creature doesn't untap during its controller's next untap step.",
+      "mode": "AttackerBlocked"
+    }
+  ]
 }

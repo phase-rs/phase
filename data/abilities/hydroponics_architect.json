@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks, a random land card in your library perpetually becomes a basic Island in addition to its other types and gains \"When this land enters, draw a card.\"",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever this creature attacks, a random land card in your library perpetually becomes a basic Island in addition to its other types and gains \"When this land enters, draw a card.\"",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRandom"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

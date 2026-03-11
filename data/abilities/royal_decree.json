@@ -1,18 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Swamp, Mountain, black permanent, or red permanent becomes tapped, CARDNAME deals 1 damage to that permanent's controller.",
       "mode": "Taps",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Swamp,Mountain,Permanent.Black,Permanent.Red",
-        "TriggerDescription": "Whenever a Swamp, Mountain, black permanent, or red permanent becomes tapped, CARDNAME deals 1 damage to that permanent's controller.",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Swamp,Mountain,Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Black,Permanent.Red"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

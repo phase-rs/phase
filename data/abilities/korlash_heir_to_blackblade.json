@@ -2,59 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate NICKNAME."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 B"
+        "cost": "1 B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate NICKNAME."
-      }
+      "description": "Regenerate NICKNAME.",
+      "effect": {
+        "description": "Regenerate NICKNAME.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card.namedKorlash, Heir to Blackblade>",
+        "type": "Mana"
+      },
+      "description": "Search your library for up to two Swamp cards, put them onto the battlefield tapped, then shuffle.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Library",
         "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card.namedKorlash, Heir to Blackblade>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ChangeNum": "2",
-        "SpellDescription": "Search your library for up to two Swamp cards, put them onto the battlefield tapped, then shuffle.",
-        "Tapped": "True",
-        "ChangeType": "Swamp",
-        "CostDesc": "Grandeur — Discard another card named Korlash, Heir to Blackblade:"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to the number of Swamps you control.",
-        "CharacteristicDefining": "True",
-        "SetPower": "X",
-        "SetToughness": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of Swamps you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

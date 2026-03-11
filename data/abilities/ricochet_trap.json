@@ -2,45 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell.singleTarget",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Change the target of target spell with a single target.",
-          "ValidTgts": "Card",
-          "TgtPrompt": "Select target spell with a single target"
-        }
-      },
       "cost": null,
+      "description": "Change the target of target spell with a single target.",
+      "effect": {
+        "description": "Change the target of target spell with a single target.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.singleTarget",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Change the target of target spell with a single target.",
-        "ValidTgts": "Card",
-        "TgtPrompt": "Select target spell with a single target"
-      }
+      "target_prompt": "Select target spell with a single target"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent cast a blue spell this turn, you may pay {R} rather than pay this spell's mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "If an opponent cast a blue spell this turn, you may pay {R} rather than pay this spell's mana cost.",
-        "EffectZone": "All",
-        "ValidSA": "Spell.Self",
-        "CheckSVar": "X",
-        "Cost": "R",
-        "StackDescription": "Description"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

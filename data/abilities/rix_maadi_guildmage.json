@@ -2,47 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B R"
+        "cost": "B R",
+        "type": "Mana"
       },
+      "description": "Target player who lost life this turn loses 1 life.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target player who lost life this turn",
-        "SpellDescription": "Target player who lost life this turn loses 1 life.",
-        "ValidTgts": "Player.LostLifeThisTurn"
-      }
+      "target_prompt": "Select target player who lost life this turn"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": -1,
-        "toughness": -1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.blocking"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B R"
+        "cost": "B R",
+        "type": "Mana"
       },
+      "description": "Target blocking creature gets -1/-1 until end of turn.",
+      "effect": {
+        "power": -1,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": -1,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target blocking creature gets -1/-1 until end of turn.",
-        "TgtPrompt": "Select target blocking creature",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

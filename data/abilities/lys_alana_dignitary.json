@@ -2,29 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "Amount": "2",
-          "CheckSVar": "X",
-          "SpellDescription": "Add {G}{G}. Activate only if there is an Elf card in your graveyard."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "CheckSVar": "X",
-        "SpellDescription": "Add {G}{G}. Activate only if there is an Elf card in your graveyard."
-      }
+      "description": "Add {G}{G}. Activate only if there is an Elf card in your graveyard.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

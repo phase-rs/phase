@@ -2,29 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Equipment"
-        }
-      },
       "cost": null,
+      "description": "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Equipment",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "None",
-        "TgtPrompt": "Select target equipment",
-        "SpellDescription": "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)",
-        "SubAbility": "MagneticTheft",
-        "IsCurse": "True"
-      }
+      "target_prompt": "Select target equipment"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

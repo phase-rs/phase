@@ -2,91 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Defined": "You",
-        "SubAbility": "DBDig",
-        "SpellDescription": "You lose 1 life. Look at the top three cards of your library. Put one of them into your hand and the rest into your graveyard."
-      }
+      "description": "You lose 1 life. Look at the top three cards of your library. Put one of them into your hand and the rest into your graveyard.",
+      "effect": {
+        "amount": 1,
+        "type": "LoseLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SubAbility": "DBSac",
-          "RepeatPlayers": "Opponent",
-          "SpellDescription": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
-          "Planeswalker": "True",
-          "RepeatSubAbility": "DBChooseCard"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -3
+        "amount": -3,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBSac",
-        "RepeatPlayers": "Opponent",
-        "SpellDescription": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
-        "Planeswalker": "True",
-        "RepeatSubAbility": "DBChooseCard"
-      }
+      "description": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
+      "effect": {
+        "description": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "MaxRepeat": "7",
-          "Ultimate": "True",
-          "RepeatSubAbility": "TrigDiscard",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -8
+        "amount": -8,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "MaxRepeat": "7",
-        "Ultimate": "True",
-        "RepeatSubAbility": "TrigDiscard",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
-        "Planeswalker": "True"
-      }
+      "description": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
+      "effect": {
+        "description": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 2 life and you gain 2 life.",
       "mode": "SpellCastOrCopy",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 2 life and you gain 2 life.",
-        "Execute": "TrigDrain"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

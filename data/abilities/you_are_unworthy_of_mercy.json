@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you set this scheme in motion, each opponent sacrifices a nonland permanent. If you control six or more lands, each opponent sacrifices three nonland permanents instead.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSacEach",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you set this scheme in motion, each opponent sacrifices a nonland permanent. If you control six or more lands, each opponent sacrifices three nonland permanents instead."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

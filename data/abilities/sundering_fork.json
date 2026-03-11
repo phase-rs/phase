@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, destroy target artifact.",
       "mode": "CrankContraption",
-      "params": {
-        "Execute": "TrigCrank",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever you crank CARDNAME, destroy target artifact."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

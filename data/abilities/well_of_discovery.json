@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "PresentCompare": "EQ0",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you control no untapped lands, draw a card.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "IsPresent": "Land.untapped+YouCtrl",
-        "Execute": "TrigDraw"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddSVar": "AITap",
-        "Affected": "Land.YouCtrl"
-      }
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you control no untapped lands, draw a card.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

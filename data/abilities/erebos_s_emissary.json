@@ -2,40 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Creature>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +2/+2 until end of turn. If CARDNAME is an Aura, enchanted creature gets +2/+2 until end of turn instead.",
       "effect": {
-        "type": "Pump",
         "power": 2,
-        "toughness": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 2,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME gets +2/+2 until end of turn. If CARDNAME is an Aura, enchanted creature gets +2/+2 until end of turn instead.",
-        "ConditionPresent": "Card.Self+nonAura",
-        "SubAbility": "DBPump",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +3/+3.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "AddPower": "3",
-        "Description": "Enchanted creature gets +3/+3.",
-        "Affected": "Card.EnchantedBy"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

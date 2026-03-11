@@ -1,29 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When NICKNAME enters, gain control of target creature an opponent controls until end of turn. Untap that creature. It gains lifelink and haste until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When NICKNAME enters, gain control of target creature an opponent controls until end of turn. Untap that creature. It gains lifelink and haste until end of turn."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever an opponent gains control of a permanent from you, you create a Treasure token.",
       "mode": "ChangesController",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever an opponent gains control of a permanent from you, you create a Treasure token.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.OppCtrl",
-        "ValidOriginalController": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

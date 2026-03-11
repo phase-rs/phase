@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you descended this turn, put a +1/+1 counter on CARDNAME. (You descended if a permanent card was put into your graveyard from anywhere.)",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You.descended",
-        "Phase": "End of Turn",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you descended this turn, put a +1/+1 counter on CARDNAME. (You descended if a permanent card was put into your graveyard from anywhere.)"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

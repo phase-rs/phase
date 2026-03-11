@@ -1,66 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Until end of turn, target creature loses all abilities and becomes a red Weird with base power and toughness 0/1.",
           "effect": {
-            "type": "Animate",
             "power": 0,
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
             "toughness": 1,
+            "type": "Animate",
             "types": [
               "Weird"
-            ],
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+            ]
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "Colors": "Red",
-            "OverwriteColors": "True",
-            "RemoveAllAbilities": "True",
-            "IsCurse": "True",
-            "RemoveCreatureTypes": "True",
-            "SpellDescription": "Until end of turn, target creature loses all abilities and becomes a red Weird with base power and toughness 0/1."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "CARDNAME deals 2 damage to any target.",
           "effect": {
-            "type": "DealDamage",
             "amount": {
               "type": "Fixed",
               "value": 2
             },
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "DealDamage"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME deals 2 damage to any target."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

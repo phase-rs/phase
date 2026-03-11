@@ -2,42 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell.singleTarget+IsTargeting You",
-          "TargetRestriction": "Player",
-          "SpellDescription": "Change the target of target spell with a single target if that target is you. The new target must be a player. X is twice the mana value of that spell.",
-          "TgtPrompt": "Select target spell with a single target targeting you",
-          "ValidTgts": "Card"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Change the target of target spell with a single target if that target is you. The new target must be a player. X is twice the mana value of that spell.",
+      "effect": {
+        "description": "Change the target of target spell with a single target if that target is you. The new target must be a player. X is twice the mana value of that spell.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.singleTarget+IsTargeting You",
-        "TargetRestriction": "Player",
-        "SpellDescription": "Change the target of target spell with a single target if that target is you. The new target must be a player. X is twice the mana value of that spell.",
-        "TgtPrompt": "Select target spell with a single target targeting you",
-        "ValidTgts": "Card"
-      }
+      "target_prompt": "Select target spell with a single target targeting you"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

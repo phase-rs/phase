@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature.Red",
-        "Description": "Prevent all damage that CARDNAME would deal to red creatures.",
-        "ValidSource": "Card.Self",
-        "ActiveZones": "Battlefield",
-        "Prevent": "True"
-      }
+      "description": "Prevent all damage that CARDNAME would deal to red creatures.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

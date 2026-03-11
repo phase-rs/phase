@@ -2,36 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseSource",
-        "params": {
-          "AILogic": "NeedsPrevention",
-          "ActivationLimit": "1",
-          "Choices": "Card,Emblem",
-          "ActivationZone": "Command",
-          "SubAbility": "DBEffect",
-          "SpellDescription": "If damage would be dealt to you this turn by a source of your choice, prevent that damage. CARDNAME deals damage to you and target opponent or planeswalker equal to half the damage prevented this way, rounded up. Activate only once each turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "0"
+        "cost": "0",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "NeedsPrevention",
-        "ActivationLimit": "1",
-        "Choices": "Card,Emblem",
-        "ActivationZone": "Command",
-        "SubAbility": "DBEffect",
-        "SpellDescription": "If damage would be dealt to you this turn by a source of your choice, prevent that damage. CARDNAME deals damage to you and target opponent or planeswalker equal to half the damage prevented this way, rounded up. Activate only once each turn."
-      }
+      "description": "If damage would be dealt to you this turn by a source of your choice, prevent that damage. CARDNAME deals damage to you and target opponent or planeswalker equal to half the damage prevented this way, rounded up. Activate only once each turn.",
+      "effect": {
+        "description": "If damage would be dealt to you this turn by a source of your choice, prevent that damage. CARDNAME deals damage to you and target opponent or planeswalker equal to half the damage prevented this way, rounded up. Activate only once each turn.",
+        "name": "ChooseSource",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

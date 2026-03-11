@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "IsPresent": "Island",
-        "Description": "CARDNAME can't attack unless there are five or more Islands on the battlefield.",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "LT5"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Island",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't attack unless there are five or more Islands on the battlefield.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

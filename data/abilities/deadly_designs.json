@@ -2,38 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2",
+        "type": "Mana"
+      },
+      "description": "Put a plot counter on CARDNAME. Any player may activate this ability.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "PLOT",
         "count": 1,
+        "counter_type": "PLOT",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Activator": "Player",
-        "SpellDescription": "Put a plot counter on CARDNAME. Any player may activate this ability."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When there are five or more plot counters on CARDNAME, sacrifice it. If you do, destroy up to two target creatures.",
       "mode": "Always",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE5_PLOT",
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When there are five or more plot counters on CARDNAME, sacrifice it. If you do, destroy up to two target creatures.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

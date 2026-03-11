@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "AffectedZone": "Exile",
-        "Affected": "Card.Self",
-        "EffectZone": "Exile",
-        "Description": "You may cast CARDNAME from exile."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Exile",
+      "description": "You may cast CARDNAME from exile.",
+      "effect_zone": "Exile",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,24 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "GainLife",
-          "SpellDescription": "Until end of turn, whenever a player gains life, that player loses 2 life for each 1 life they gained."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "GainLife",
-        "SpellDescription": "Until end of turn, whenever a player gains life, that player loses 2 life for each 1 life they gained."
-      }
+      "description": "Until end of turn, whenever a player gains life, that player loses 2 life for each 1 life they gained.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

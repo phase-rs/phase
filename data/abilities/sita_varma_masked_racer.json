@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X G G U",
+        "type": "Mana"
+      },
+      "description": "Put X +1/+1 counters on NICKNAME. Then you may have the base power and toughness of each other creature you control become equal to NICKNAME's power until end of turn. (Activate each exhaust ability only once.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X G G U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBAnimateAll",
-        "Exhaust": "True",
-        "Defined": "Self",
-        "SpellDescription": "Put X +1/+1 counters on NICKNAME. Then you may have the base power and toughness of each other creature you control become equal to NICKNAME's power until end of turn. (Activate each exhaust ability only once.)"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

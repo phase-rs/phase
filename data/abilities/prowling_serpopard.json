@@ -1,27 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Description": "This spell can't be countered.",
-        "Layer": "CantHappen",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "event": "Counter",
-      "params": {
-        "ValidSA": "Spell.Creature+YouCtrl",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "Description": "Creature spells you control can't be countered."
-      }
+      "description": "Creature spells you control can't be countered.",
+      "event": "Counter"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

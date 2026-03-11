@@ -2,29 +2,28 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/P1P1>"
+        "cost": "SubCounter<1/P1P1>",
+        "type": "Mana"
       },
+      "description": "Put target artifact card from your graveyard on top of your library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put target artifact card from your graveyard on top of your library.",
-        "TgtPrompt": "Choose target artifact card in your graveyard"
-      }
+      "target_prompt": "Choose target artifact card in your graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

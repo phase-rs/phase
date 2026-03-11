@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is enchanted, it has \"{T}: CARDNAME deals 2 damage to target attacking or blocking creature.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as CARDNAME is enchanted, it has \"{T}: CARDNAME deals 2 damage to target attacking or blocking creature.\"",
-        "Affected": "Card.Self+enchanted",
-        "AddAbility": "DealDamage"
-      }
+      "modifications": [
+        {
+          "ability": "DealDamage",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

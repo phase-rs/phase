@@ -1,59 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "ConditionCheckSVar": "CheckHandLand",
-              "Mode": "Flip",
-              "ConditionSVarCompare": "GE7",
-              "SpellDescription": "If you have seven or more land cards in your hand, flip CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "Reveal<1/Hand>"
+            "cost": "Reveal<1/Hand>",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "ConditionCheckSVar": "CheckHandLand",
-            "Mode": "Flip",
-            "ConditionSVarCompare": "GE7",
-            "SpellDescription": "If you have seven or more land cards in your hand, flip CARDNAME."
-          }
+          "description": "If you have seven or more land cards in your hand, flip CARDNAME.",
+          "effect": {
+            "description": "If you have seven or more land cards in your hand, flip CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever a land you control is tapped for mana, add an additional one mana of any type that land produced for each other land you control with the same name as it.",
           "mode": "TapsForMana",
-          "params": {
-            "TriggerDescription": "Whenever a land you control is tapped for mana, add an additional one mana of any type that land produced for each other land you control with the same name as it.",
-            "ValidCard": "Land.YouCtrl",
-            "Execute": "DBRepeat",
-            "TriggerZones": "Battlefield",
-            "Static": "True"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Land",
+            "controller": "You",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may cast target instant or sorcery card with mana value less than or equal to CARDNAME's power from your graveyard without paying its mana cost. If that spell would be put into your graveyard this turn, exile it instead.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigPlay",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may cast target instant or sorcery card with mana value less than or equal to CARDNAME's power from your graveyard without paying its mana cost. If that spell would be put into your graveyard this turn, exile it instead."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

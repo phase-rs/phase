@@ -1,17 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Protection:Card.ChosenColor:chosenColor:Aura.ControlledBy Player.PlayerUID_HostCardControllerUID,Equipment.ControlledBy Player.PlayerUID_HostCardControllerUID:SBA"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.ChosenColor:chosenColor:Aura.ControlledBy",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Player.PlayerUID_HostCardControllerUID,Equipment.ControlledBy",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Player.PlayerUID_HostCardControllerUID:SBA",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

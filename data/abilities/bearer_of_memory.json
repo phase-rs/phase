@@ -2,30 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment.Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "5 G"
+        "cost": "5 G",
+        "type": "Mana"
       },
+      "description": "Put a +1/+1 counter on target enchantment creature. It gains trample until end of turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Enchantment",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "TgtPrompt": "Select target enchantment creature",
-        "SpellDescription": "Put a +1/+1 counter on target enchantment creature. It gains trample until end of turn."
-      }
+      "target_prompt": "Select target enchantment creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control two or more artifacts, this creature gets +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "IsPresent": "Artifact.YouCtrl",
-        "Description": "As long as you control two or more artifacts, this creature gets +2/+0.",
-        "Affected": "Card.Self",
-        "PresentCompare": "GE2"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

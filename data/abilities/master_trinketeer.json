@@ -2,39 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 W",
+        "type": "Mana"
+      },
+      "description": "Create a 1/1 colorless Servo artifact creature token.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_1_1_a_servo",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 colorless Servo artifact creature token.",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Servo"
+          },
+          {
+            "type": "Other",
+            "value": "YouCtrl,Permanent.Thopter"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Servos and Thopters you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.Servo+YouCtrl,Permanent.Thopter+YouCtrl",
-        "AddToughness": "1",
-        "AddPower": "1",
-        "Description": "Servos and Thopters you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,17 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.withoutFlying+ChosenColor",
-        "Target": "You",
-        "Description": "Creatures of the chosen color without flying can't attack you."
-      }
+      "description": "Creatures of the chosen color without flying can't attack you.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

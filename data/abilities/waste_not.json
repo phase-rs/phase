@@ -1,36 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent discards a creature card, create a 2/2 black Zombie creature token.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Creature.OppOwn",
-        "TriggerDescription": "Whenever an opponent discards a creature card, create a 2/2 black Zombie creature token.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent discards a land card, add {B}{B}.",
       "mode": "Discarded",
-      "params": {
-        "Execute": "TrigMana",
-        "ValidCard": "Land.OppOwn",
-        "TriggerDescription": "Whenever an opponent discards a land card, add {B}{B}.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent discards a noncreature, nonland card, draw a card.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card.nonLand+nonCreature+OppOwn",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever an opponent discards a noncreature, nonland card, draw a card."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          },
+          {
+            "type": "NonType",
+            "value": "Creature"
+          },
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,48 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "ValidZone": "Hand",
-          "Valid": "Card.YouOwn",
-          "WithoutManaCost": "True",
-          "Controller": "You",
-          "Optional": "True",
-          "AILogic": "NeedsChosenCard",
-          "SpellDescription": "You may cast an instant or sorcery spell from your hand without paying its mana cost.",
-          "ValidSA": "Instant,Sorcery"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U"
+            "cost": "2 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidZone": "Hand",
-        "Valid": "Card.YouOwn",
-        "WithoutManaCost": "True",
-        "Controller": "You",
-        "Optional": "True",
-        "AILogic": "NeedsChosenCard",
-        "SpellDescription": "You may cast an instant or sorcery spell from your hand without paying its mana cost.",
-        "ValidSA": "Instant,Sorcery"
-      }
+      "description": "You may cast an instant or sorcery spell from your hand without paying its mana cost.",
+      "effect": {
+        "description": "You may cast an instant or sorcery spell from your hand without paying its mana cost.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

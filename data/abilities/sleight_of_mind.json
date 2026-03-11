@@ -2,33 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeText",
-        "params": {
-          "ChangeColorWord": "Choose Choose",
-          "ValidTgts": "Card",
-          "Duration": "Permanent",
-          "TgtPrompt": "Choose target spell or permanent",
-          "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)",
-          "TgtZone": "Stack,Battlefield"
-        }
-      },
       "cost": null,
+      "description": "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)",
+      "duration": "Permanent",
+      "effect": {
+        "description": "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)",
+        "name": "ChangeText",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "ChangeColorWord": "Choose Choose",
-        "ValidTgts": "Card",
-        "Duration": "Permanent",
-        "TgtPrompt": "Choose target spell or permanent",
-        "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)",
-        "TgtZone": "Stack,Battlefield"
-      }
+      "target_prompt": "Choose target spell or permanent"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

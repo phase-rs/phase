@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Surveil",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you surveil, put a +1/+1 counter on CARDNAME.",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As long as CARDNAME has three or more +1/+1 counters on it, it can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "ValidCard": "Card.Self+counters_GE3_P1P1",
-        "Description": "As long as CARDNAME has three or more +1/+1 counters on it, it can attack as though it didn't have defender."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you surveil, put a +1/+1 counter on CARDNAME.",
+      "mode": "Surveil",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

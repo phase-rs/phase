@@ -2,63 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
-        "count": 2,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 G G"
+            "cost": "4 G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "1",
-        "TargetMax": "2",
-        "DividedAsYouChoose": "2",
-        "SpellDescription": "Distribute two +1/+1 counters among one or two target creatures."
-      }
+      "description": "Distribute two +1/+1 counters among one or two target creatures.",
+      "effect": {
+        "count": 2,
+        "counter_type": "P1P1",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Green",
-        "Amount": "1",
-        "Type": "Spell",
-        "Description": "Green spells you cast cost {1} less to cast.",
-        "Activator": "You"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.",
       "event": {
         "Other": "AddCounter"
       },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidCounterType": "P1P1",
-        "ReplaceWith": "DoubleCounters",
-        "ValidCard": "Creature.YouCtrl+inZoneBattlefield",
-        "Description": "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead."
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Green spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

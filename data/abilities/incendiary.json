@@ -1,30 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may put a fuse counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a fuse counter on CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "When enchanted creature dies, CARDNAME deals X damage to any target, where X is the number of fuse counters on CARDNAME.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When enchanted creature dies, CARDNAME deals X damage to any target, where X is the number of fuse counters on CARDNAME.",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.AttachedBy",
-        "Destination": "Graveyard",
-        "Execute": "TrigDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

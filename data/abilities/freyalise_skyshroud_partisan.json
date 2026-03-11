@@ -2,85 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Untap up to one target Elf. That Elf and a random Elf creature card in your hand perpetually get +1/+1.",
       "effect": {
-        "type": "Untap",
         "target": {
-          "type": "Filtered",
-          "filter": "Elf"
-        }
+          "card_type": "Elf",
+          "type": "Typed"
+        },
+        "type": "Untap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "1",
-        "SubAbility": "DBRandom",
-        "StackDescription": "REP up to one target Elf_{c:Targeted}",
-        "SpellDescription": "Untap up to one target Elf. That Elf and a random Elf creature card in your hand perpetually get +1/+1.",
-        "TargetMin": "0",
-        "TgtPrompt": "Select up to one target Elf",
-        "RememberTargets": "True",
-        "Planeswalker": "True"
-      }
+      "target_prompt": "Select up to one target Elf"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "StackDescription": "REP Seek_{p:You} seeks",
-          "SpellDescription": "Seek an Elf card.",
-          "Planeswalker": "True",
-          "Type": "Card.Elf"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "REP Seek_{p:You} seeks",
-        "SpellDescription": "Seek an Elf card.",
-        "Planeswalker": "True",
-        "Type": "Card.Elf"
-      }
+      "description": "Seek an Elf card.",
+      "effect": {
+        "description": "Seek an Elf card.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "MakeCard",
-        "params": {
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "SpellDescription": "Conjure a card named Regal Force onto the battlefield.",
-          "Conjure": "True",
-          "Name": "Regal Force",
-          "Zone": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "SpellDescription": "Conjure a card named Regal Force onto the battlefield.",
-        "Conjure": "True",
-        "Name": "Regal Force",
-        "Zone": "Battlefield"
-      }
+      "description": "Conjure a card named Regal Force onto the battlefield.",
+      "effect": {
+        "description": "Conjure a card named Regal Force onto the battlefield.",
+        "name": "MakeCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

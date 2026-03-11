@@ -1,26 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature gets +3/+3, has trample, and can't attack you or planeswalkers you control.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Trample",
-        "AddPower": "3",
-        "AddToughness": "3",
-        "Description": "Enchanted creature gets +3/+3, has trample, and can't attack you or planeswalkers you control."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Target": "You,Planeswalker.YouCtrl"
-      }
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

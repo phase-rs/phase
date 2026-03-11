@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonVampire+nonWerewolf+nonZombie"
-        }
-      },
       "cost": null,
+      "description": "Destroy target non-Vampire, non-Werewolf, non-Zombie creature.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target non-Vampire, non-Werewolf, non-Zombie creature",
-        "SpellDescription": "Destroy target non-Vampire, non-Werewolf, non-Zombie creature."
-      }
+      "target_prompt": "Select target non-Vampire, non-Werewolf, non-Zombie creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Lieutenant — At the beginning of combat on your turn, if you control your commander, put a +1/+1 counter on each creature you control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Phase": "BeginCombat",
-        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
-        "TriggerDescription": "Lieutenant — At the beginning of combat on your turn, if you control your commander, put a +1/+1 counter on each creature you control.",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

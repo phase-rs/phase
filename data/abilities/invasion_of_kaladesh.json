@@ -1,41 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create a 1/1 colorless Thopter artifact creature token with flying.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigToken",
-            "TriggerDescription": "When CARDNAME enters, create a 1/1 colorless Thopter artifact creature token with flying.",
-            "Origin": "Any",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "Description": "CARDNAME's power is equal to the number of artifacts you control.",
-            "SetPower": "X",
-            "CharacteristicDefining": "True"
-          }
+          "characteristic_defining": true,
+          "description": "CARDNAME's power is equal to the number of artifacts you control.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

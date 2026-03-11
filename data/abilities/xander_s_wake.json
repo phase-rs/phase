@@ -1,21 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creatures you control die, draft a card from CARDNAME's spellbook. This ability triggers only once each turn.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ActivationLimit": "1",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever one or more creatures you control die, draft a card from CARDNAME's spellbook. This ability triggers only once each turn.",
-        "ValidCard": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraft"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

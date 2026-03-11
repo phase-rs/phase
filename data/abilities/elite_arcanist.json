@@ -2,80 +2,68 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "SpellDescription": "Copy the exiled card. You may cast the copy without paying its mana cost. X is the mana value of the exiled card.",
-          "Amount": "All",
-          "ValidSA": "Spell",
-          "Valid": "Card.IsRemembered+ExiledWithSource",
-          "Optional": "True",
-          "CopyCard": "True",
-          "ValidZone": "Exile",
-          "WithoutManaCost": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Copy the exiled card. You may cast the copy without paying its mana cost. X is the mana value of the exiled card.",
-        "Amount": "All",
-        "ValidSA": "Spell",
-        "Valid": "Card.IsRemembered+ExiledWithSource",
-        "Optional": "True",
-        "CopyCard": "True",
-        "ValidZone": "Exile",
-        "WithoutManaCost": "True"
-      }
+      "description": "Copy the exiled card. You may cast the copy without paying its mana cost. X is the mana value of the exiled card.",
+      "effect": {
+        "description": "Copy the exiled card. You may cast the copy without paying its mana cost. X is the mana value of the exiled card.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may exile an instant card from your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, you may exile an instant card from your hand.",
-        "Origin": "Any",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Exile",
-        "ValidCard": "Card.IsRemembered+ExiledWithSource",
-        "Destination": "Any",
-        "Execute": "ForgetCard",
-        "Static": "True"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          },
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Static": "True",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Destination": "Any",
-        "Execute": "DBCleanup"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

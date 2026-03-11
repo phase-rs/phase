@@ -1,25 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Each nonland permanent you control is all colors.",
-        "SetColor": "All",
-        "Affected": "Permanent.nonLand+YouCtrl"
-      }
+      "affected": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each nonland permanent you control is all colors.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control are every basic land type in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "AddType": "AllBasicLandType",
-        "Affected": "Land.YouCtrl",
-        "Description": "Lands you control are every basic land type in addition to their other types."
-      }
+      "modifications": [
+        {
+          "core_type": "AllBasicLandType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

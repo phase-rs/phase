@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Crushing Teeth — Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on each other creature you control.",
       "mode": "DamageDone",
-      "params": {
-        "TriggerDescription": "Crushing Teeth — Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on each other creature you control.",
-        "Execute": "TrigPutCounter",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

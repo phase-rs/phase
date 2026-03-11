@@ -1,29 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChoose",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.EnchantedBy",
-        "TriggerDescription": "When enchanted creature dies, its controller chooses target creature one of their opponents controls. Return CARDNAME from its owner's graveyard to the battlefield attached to that creature.",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddTrigger": "NecroticPlagueTrig",
-        "Affected": "Creature.EnchantedBy",
-        "AddSVar": "NecroticPlagueSac",
-        "Description": "Enchanted creature has \"At the beginning of your upkeep, sacrifice this creature.\""
-      }
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"At the beginning of your upkeep, sacrifice this creature.\"",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature dies, its controller chooses target creature one of their opponents controls. Return CARDNAME from its owner's graveyard to the battlefield attached to that creature.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

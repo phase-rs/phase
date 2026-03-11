@@ -1,18 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Fungus"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Creature.Saproling"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Each other creature you control that's a Fungus or Saproling gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Fungus+Other+YouCtrl,Creature.Saproling+Other+YouCtrl",
-        "Description": "Each other creature you control that's a Fungus or Saproling gets +1/+1.",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

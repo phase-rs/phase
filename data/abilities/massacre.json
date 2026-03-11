@@ -2,43 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "PumpAll",
-        "power": -2,
-        "toughness": -2,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "All creatures get -2/-2 until end of turn.",
-        "IsCurse": "True",
-        "ValidCards": "Creature"
-      }
+      "description": "All creatures get -2/-2 until end of turn.",
+      "effect": {
+        "power": -2,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": -2,
+        "type": "PumpAll"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "If an opponent controls a Plains and you control a Swamp, you may cast this spell without paying its mana cost.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Description": "If an opponent controls a Plains and you control a Swamp, you may cast this spell without paying its mana cost.",
-        "EffectZone": "All",
-        "CheckSVar": "X",
-        "CheckSecondSVar": "Y",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Cost": "0",
-        "ValidPlayer": "You"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

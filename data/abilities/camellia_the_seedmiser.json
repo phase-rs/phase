@@ -2,50 +2,61 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "SpellDescription": "Put a +1/+1 counter on each other Squirrel you control. (To forage, exile three cards from your graveyard or sacrifice a Food.)",
-          "ValidCards": "Squirrel.StrictlyOther+YouCtrl",
-          "CounterType": "P1P1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 Forage"
+        "cost": "2 Forage",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a +1/+1 counter on each other Squirrel you control. (To forage, exile three cards from your graveyard or sacrifice a Food.)",
-        "ValidCards": "Squirrel.StrictlyOther+YouCtrl",
-        "CounterType": "P1P1"
-      }
+      "description": "Put a +1/+1 counter on each other Squirrel you control. (To forage, exile three cards from your graveyard or sacrifice a Food.)",
+      "effect": {
+        "description": "Put a +1/+1 counter on each other Squirrel you control. (To forage, exile three cards from your graveyard or sacrifice a Food.)",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Squirrel",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Squirrels you control have menace.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
   "triggers": [
     {
+      "description": "Whenever you sacrifice one or more Foods, create a 1/1 green Squirrel creature token.",
       "mode": "SacrificedOnce",
-      "params": {
-        "ValidCard": "Food",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever you sacrifice one or more Foods, create a 1/1 green Squirrel creature token."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Food",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Squirrel.Other+YouCtrl",
-        "AddKeyword": "Menace",
-        "Description": "Other Squirrels you control have menace."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,33 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent discards a card, you may put a quest counter on CARDNAME.",
       "mode": "Discarded",
-      "params": {
-        "ValidCard": "Card.OppOwn",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever an opponent discards a card, you may put a quest counter on CARDNAME."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of each opponent's upkeep, if that player has no cards in hand and CARDNAME has two or more quest counters on it, you may have that player lose 5 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has no cards in hand and CARDNAME has two or more quest counters on it, you may have that player lose 5 life.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "OptionalDecider": "You",
-        "CheckSVar": "CardsInHand",
-        "IsPresent": "Card.Self+counters_GE2_QUEST",
-        "SVarCompare": "EQ0"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

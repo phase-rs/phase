@@ -2,22 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "LoseLife",
-        "amount": 0
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent loses half their life, rounded up. If this spell was kicked, you gain life equal to the life lost this way.",
-        "ValidTgts": "Opponent",
-        "SubAbility": "DBGainLife"
-      }
+      "description": "Target opponent loses half their life, rounded up. If this spell was kicked, you gain life equal to the life lost this way.",
+      "effect": {
+        "amount": 0,
+        "type": "LoseLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

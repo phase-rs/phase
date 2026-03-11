@@ -1,26 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Spacecraft",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Spacecraft you control have \"Exhaust — {W}: Conjure a card named Starfighter Pilot onto the battlefield.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Spacecraft you control have \"Exhaust — {W}: Conjure a card named Starfighter Pilot onto the battlefield.\"",
-        "Affected": "Spacecraft.YouCtrl",
-        "AddAbility": "ABConjureExh"
-      }
+      "modifications": [
+        {
+          "ability": "ABConjureExh",
+          "type": "AddAbility"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "STATION 10+ Creatures you control have flying.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+counters_GE10_CHARGE",
-        "AddType": "Creature",
-        "Description": "STATION 10+ Creatures you control have flying.",
-        "AddStaticAbility": "CarrierStatic"
-      }
+      "modifications": [
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

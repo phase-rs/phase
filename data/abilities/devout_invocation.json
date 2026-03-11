@@ -2,28 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Tap any number of untapped creatures you control. Create a 4/4 white Angel creature token with flying for each creature tapped this way.",
       "effect": {
-        "type": "Tap",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Tap"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap any number of untapped creatures you control. Create a 4/4 white Angel creature token with flying for each creature tapped this way.",
-        "ChoiceAmount": "Count$Valid Creature.YouCtrl+untapped",
-        "CardChoices": "Creature.YouCtrl+untapped",
-        "RememberTapped": "True",
-        "SubAbility": "DBToken",
-        "AnyNumber": "True",
-        "StackDescription": "SpellDescription"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

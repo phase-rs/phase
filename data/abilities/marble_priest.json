@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "IsCombat": "True",
-        "ValidSource": "Wall",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Card.Self",
-        "Prevent": "True",
-        "Description": "Prevent all combat damage that would be dealt to CARDNAME by Walls."
-      }
+      "description": "Prevent all combat damage that would be dealt to CARDNAME by Walls.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

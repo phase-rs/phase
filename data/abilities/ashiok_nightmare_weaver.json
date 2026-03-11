@@ -2,75 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Exile"
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Opponent",
-        "ChangeNum": "All",
-        "Planeswalker": "True",
-        "SpellDescription": "Exile the top three cards of target opponent's library."
-      }
+      "description": "Exile the top three cards of target opponent's library.",
+      "effect": {
+        "count": 3,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "Put a creature card with mana value X exiled with CARDNAME onto the battlefield under your control. That creature is a Nightmare in addition to its other types.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.cmcEQX+ExiledWithSource"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a creature card with mana value X exiled with CARDNAME onto the battlefield under your control. That creature is a Nightmare in addition to its other types.",
-        "Planeswalker": "True",
-        "ChoiceZone": "Exile",
-        "AILogic": "Ashiok",
-        "SubAbility": "DBChangeZone"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZoneAll",
-        "origin": "Graveyard,Hand",
-        "destination": "Exile",
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile all cards from all opponents' hands and graveyards.",
-        "ChangeType": "Card.OppCtrl",
-        "Planeswalker": "True"
-      }
+      "description": "Exile all cards from all opponents' hands and graveyards.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Graveyard,Hand",
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChangeZoneAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

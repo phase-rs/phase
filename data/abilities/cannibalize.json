@@ -2,32 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TargetsWithSameController": "True",
-        "TargetMax": "2",
-        "SpellDescription": "Choose two target creatures controlled by the same player. Exile one of those creatures and put two +1/+1 counters on the other.",
-        "StackDescription": "SpellDescription",
-        "IsCurse": "True",
-        "TargetUnique": "True",
-        "SubAbility": "DBChoose"
-      }
+      "description": "Choose two target creatures controlled by the same player. Exile one of those creatures and put two +1/+1 counters on the other.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

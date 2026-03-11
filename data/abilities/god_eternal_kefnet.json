@@ -1,33 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "You may reveal the first card you draw each turn as you draw it. Whenever you reveal an instant or sorcery card this way, copy that card and you may cast the copy. That copy costs {2} less to cast.",
       "mode": "Drawn",
-      "params": {
-        "TriggerDescription": "You may reveal the first card you draw each turn as you draw it. Whenever you reveal an instant or sorcery card this way, copy that card and you may cast the copy. That copy costs {2} less to cast.",
-        "Static": "True",
-        "OptionalDecider": "You",
-        "ForReveal": "True",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBReveal",
-        "Number": "1",
-        "ValidCard": "Card.YouOwn"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
+      "destination": "Graveyard,Exile",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Destination": "Graveyard,Exile",
-        "Origin": "Battlefield",
-        "Execute": "TriReturn",
-        "TriggerDescription": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

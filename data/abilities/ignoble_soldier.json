@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME becomes blocked, prevent all combat damage that would be dealt by it this turn.",
       "mode": "AttackerBlocked",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME becomes blocked, prevent all combat damage that would be dealt by it this turn.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigNoDamage"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

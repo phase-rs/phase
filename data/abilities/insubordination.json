@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of the end step of enchanted creature's controller, CARDNAME deals 2 damage to that player unless that creature attacked this turn.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "Player.EnchantedController",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of the end step of enchanted creature's controller, CARDNAME deals 2 damage to that player unless that creature attacked this turn."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

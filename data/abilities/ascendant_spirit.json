@@ -2,78 +2,64 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S",
+        "type": "Mana"
+      },
+      "description": "CARDNAME becomes a Spirit Warrior with base power and toughness 2/3.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 2,
+        "target": {
+          "type": "Any"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Spirit",
           "Warrior"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "RemoveCreatureTypes": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "CARDNAME becomes a Spirit Warrior with base power and toughness 2/3.",
-        "Duration": "Permanent"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S S",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is a Warrior, put a flying counter on it and it becomes an Angel Spirit Warrior with base power and toughness 4/4.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "Flying",
         "count": 1,
+        "counter_type": "Flying",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPresent": "Card.Self+Warrior",
-        "SubAbility": "TrigAnimate",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "If CARDNAME is a Warrior, put a flying counter on it and it becomes an Angel Spirit Warrior with base power and toughness 4/4."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "S S S S",
+        "type": "Mana"
+      },
+      "description": "If CARDNAME is an Angel, put two +1/+1 counters on it and it gains \"Whenever this creature deals combat damage to a player, draw a card.\"",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "S S S S"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If CARDNAME is an Angel, put two +1/+1 counters on it and it gains \"Whenever this creature deals combat damage to a player, draw a card.\"",
-        "SubAbility": "AddTrigger",
-        "StackDescription": "SpellDescription",
-        "ConditionPresent": "Card.Self+Angel"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, exile all cards that are black or red from all graveyards.",
-        "Execute": "TrigChangeZoneAll",
-        "Destination": "Battlefield"
-      }
+      "description": "If a black or red permanent, spell, or card not on the battlefield would be put into a graveyard, exile it instead.",
+      "event": "Moved"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "Exile",
-        "ValidLKI": "Card.Black,Card.Red",
-        "Destination": "Graveyard",
-        "Description": "If a black or red permanent, spell, or card not on the battlefield would be put into a graveyard, exile it instead.",
-        "ActiveZones": "Battlefield"
+      "description": "When CARDNAME enters, exile all cards that are black or red from all graveyards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

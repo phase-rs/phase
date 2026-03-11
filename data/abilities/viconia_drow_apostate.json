@@ -1,22 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if there are four or more creature cards in your graveyard, return a creature card at random from your graveyard to your hand.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "IsPresent": "Creature.YouOwn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "GE4",
-        "PresentZone": "Graveyard",
-        "TriggerDescription": "At the beginning of your upkeep, if there are four or more creature cards in your graveyard, return a creature card at random from your graveyard to your hand.",
-        "Execute": "TrigReturn"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

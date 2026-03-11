@@ -1,32 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "Description": "NICKNAME has flying and indestructible as long as you have six or more unspent mana.",
-        "AddKeyword": "Flying & Indestructible",
-        "SVarCompare": "GE6",
-        "Affected": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you would lose unspent mana, that mana becomes red instead.",
       "event": {
         "Other": "LoseMana"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "ReplacementResult": "Replaced",
-        "ActiveZones": "Battlefield",
-        "Description": "If you would lose unspent mana, that mana becomes red instead.",
-        "ReplaceWith": "ConvertMana"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE6",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "NICKNAME has flying and indestructible as long as you have six or more unspent mana.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
+  "triggers": []
 }

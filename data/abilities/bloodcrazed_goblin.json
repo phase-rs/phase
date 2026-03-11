@@ -1,18 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "Description": "CARDNAME can't attack unless an opponent has been dealt damage this turn.",
-        "CheckSVar": "X",
-        "SVarCompare": "LT1",
-        "ValidCard": "Card.Self"
-      }
+      "condition": {
+        "compare": "LT1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "CARDNAME can't attack unless an opponent has been dealt damage this turn.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

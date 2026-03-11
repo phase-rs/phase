@@ -1,42 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "Continuous",
-          "params": {
-            "AffectedZone": "Graveyard",
-            "Affected": "Land.YouOwn",
-            "Description": "You may play lands from your graveyard.",
-            "MayPlay": "True"
-          }
+          "affected": {
+            "card_type": "Land",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouOwn"
+              }
+            ],
+            "type": "Typed"
+          },
+          "affected_zone": "Graveyard",
+          "description": "You may play lands from your graveyard.",
+          "mode": "Continuous"
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When you unlock this door, you may cast spells from your graveyard this turn, and if a card would be put into your graveyard from anywhere this turn, exile it instead.",
           "mode": "UnlockDoor",
-          "params": {
-            "Execute": "TrigPlay",
-            "TriggerDescription": "When you unlock this door, you may cast spells from your graveyard this turn, and if a card would be put into your graveyard from anywhere this turn, exile it instead.",
-            "ValidCard": "Card.Self",
-            "ValidPlayer": "You",
-            "ThisDoor": "True"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

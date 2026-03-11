@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Nonwhite creatures with power 3 or greater don't untap during their controllers' untap steps.",
       "event": {
         "Other": "Untap"
       },
-      "params": {
-        "ValidCard": "Creature.powerGE3+nonWhite",
-        "Description": "Nonwhite creatures with power 3 or greater don't untap during their controllers' untap steps.",
-        "Layer": "CantHappen",
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You"
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

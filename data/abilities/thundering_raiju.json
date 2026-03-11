@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, put a +1/+1 counter on target creature you control. Then CARDNAME deals X damage to each opponent, where X is the number of modified creatures you control other than CARDNAME. (Equipment, Auras you control, and counters are modifications.)",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigCounter",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on target creature you control. Then CARDNAME deals X damage to each opponent, where X is the number of modified creatures you control other than CARDNAME. (Equipment, Auras you control, and counters are modifications.)"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

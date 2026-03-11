@@ -2,30 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "WinSubAbility": "DBReturn",
-          "SpellDescription": "Flip a coin. If you win the flip, return CARDNAME to its owner's hand. If you lose the flip, sacrifice CARDNAME.",
-          "LoseSubAbility": "DBSacrifice"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "R"
+        "cost": "R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "WinSubAbility": "DBReturn",
-        "SpellDescription": "Flip a coin. If you win the flip, return CARDNAME to its owner's hand. If you lose the flip, sacrifice CARDNAME.",
-        "LoseSubAbility": "DBSacrifice"
-      }
+      "description": "Flip a coin. If you win the flip, return CARDNAME to its owner's hand. If you lose the flip, sacrifice CARDNAME.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, return CARDNAME to its owner's hand. If you lose the flip, sacrifice CARDNAME.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

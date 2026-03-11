@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, CARDNAME deals 3 damage to any target.",
       "mode": "Drawn",
-      "params": {
-        "Execute": "TrigDmg",
-        "TriggerZones": "Battlefield",
-        "Number": "2",
-        "TriggerDescription": "Whenever you draw your second card each turn, CARDNAME deals 3 damage to any target.",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

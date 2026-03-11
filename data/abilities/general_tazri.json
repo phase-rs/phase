@@ -2,41 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "W U B R G"
+        "cost": "W U B R G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Ally creatures you control get +X/+X until end of turn, where X is the number of colors among those creatures.",
-        "ValidCards": "Creature.Ally+YouCtrl"
-      }
+      "description": "Ally creatures you control get +X/+X until end of turn, where X is the number of colors among those creatures.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 0,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, you may search your library for an Ally creature card, reveal it, put it into your hand, then shuffle.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigChange",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, you may search your library for an Ally creature card, reveal it, put it into your hand, then shuffle."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

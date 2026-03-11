@@ -1,32 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
-      "statics": [],
       "replacements": [
         {
-          "event": "Moved",
-          "params": {
-            "ActiveZones": "Battlefield",
-            "ValidLKI": "Creature.DamagedByCard.YouCtrl;Emblem.YouCtrl",
-            "Description": "If a creature dealt damage this turn by a source you controlled would die, exile it instead.",
-            "ReplaceWith": "DBExile",
-            "Destination": "Graveyard"
-          }
+          "description": "If a creature dealt damage this turn by a source you controlled would die, exile it instead.",
+          "event": "Moved"
         }
-      ]
+      ],
+      "statics": [],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

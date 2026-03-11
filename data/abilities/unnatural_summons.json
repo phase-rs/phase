@@ -2,34 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManifestDread",
-        "params": {
-          "SpellDescription": "Manifest dread."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Manifest dread."
-      }
+      "description": "Manifest dread.",
+      "effect": {
+        "description": "Manifest dread.",
+        "name": "ManifestDread",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "If you weren't the starting player, this spell costs {1} less to cast.",
-        "ValidCard": "Card.Self",
-        "Amount": "X",
-        "Type": "Spell",
-        "EffectZone": "All"
-      }
+      "description": "If you weren't the starting player, this spell costs {1} less to cast.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

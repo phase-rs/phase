@@ -2,86 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 2,
+        "type": "Loyalty"
+      },
+      "description": "Discard up to two cards, then draw that many cards.",
       "effect": {
-        "type": "Discard",
         "count": 2,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Discard up to two cards, then draw that many cards.",
-        "Mode": "TgtChoose",
-        "RememberDiscarded": "True",
-        "Optional": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Sacrifice an artifact. If you do, return target artifact card from your graveyard to the battlefield.",
       "effect": {
-        "type": "Sacrifice",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBChangeZone",
-        "SacValid": "Artifact",
-        "RememberSacrificed": "True",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Sacrifice an artifact. If you do, return target artifact card from your graveyard to the battlefield."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Stackable": "False",
-          "Planeswalker": "True",
-          "Triggers": "TrigChangesZone",
-          "Ultimate": "True",
-          "Name": "Emblem — Daretti, Scrap Savant",
-          "SpellDescription": "You get an emblem with \"Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.\"",
-          "AILogic": "Always",
-          "Duration": "Permanent",
-          "Image": "Emblem_daretti_scrap_savant"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -10
+        "amount": -10,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Stackable": "False",
-        "Planeswalker": "True",
-        "Triggers": "TrigChangesZone",
-        "Ultimate": "True",
-        "Name": "Emblem — Daretti, Scrap Savant",
-        "SpellDescription": "You get an emblem with \"Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.\"",
-        "AILogic": "Always",
-        "Duration": "Permanent",
-        "Image": "Emblem_daretti_scrap_savant"
-      }
+      "description": "You get an emblem with \"Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

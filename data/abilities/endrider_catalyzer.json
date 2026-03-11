@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — {T}: Add {R}{R}.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "Condition": "MaxSpeed",
-        "AddAbility": "ABMana",
-        "Description": "Max speed — {T}: Add {R}{R}."
-      }
+      "modifications": [
+        {
+          "ability": "ABMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,43 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Other",
+              "value": "IsSolved"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "Solved — You may look at the top card of your library any time and you may play lands and cast spells from the top of your library.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "When this Case enters, conjure four cards named Fblthp, the Lost into your library, then shuffle. Draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Execute": "TrigConjure",
-        "TriggerDescription": "When this Case enters, conjure four cards named Fblthp, the Lost into your library, then shuffle. Draw a card.",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "To solve — You control a legendary Homunculus.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Phase": "End of Turn",
-        "IsPresent2": "Card.Self+!IsSolved",
-        "Execute": "TrigSolve",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "To solve — You control a legendary Homunculus.",
-        "IsPresent": "Homunculus.YouCtrl+Legendary"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Library",
-        "IsPresent": "Card.Self+IsSolved",
-        "MayLookAt": "You",
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "MayPlay": "True",
-        "Description": "Solved — You may look at the top card of your library any time and you may play lands and cast spells from the top of your library."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

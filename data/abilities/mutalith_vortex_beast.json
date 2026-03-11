@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Warp Vortex — When CARDNAME enters, flip a coin for each opponent you have. For each flip you win, draw a card. For each flip you lose, CARDNAME deals 3 damage to that player.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Execute": "TrigFlipCoin",
-        "TriggerDescription": "Warp Vortex — When CARDNAME enters, flip a coin for each opponent you have. For each flip you win, draw a card. For each flip you lose, CARDNAME deals 3 damage to that player."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

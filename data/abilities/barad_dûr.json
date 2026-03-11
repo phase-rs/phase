@@ -2,68 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "B",
-        "params": {
-          "SpellDescription": "Add {B}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {B}."
-      }
+      "description": "Add {B}.",
+      "effect": {
+        "produced": [
+          "Black"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Amass",
-        "params": {
-          "Num": "X",
-          "Type": "Orc",
-          "SpellDescription": "Amass Orcs X. Activate only if a creature died this turn.",
-          "CheckSVar": "Morbid"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X X B"
+            "cost": "X X B",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Num": "X",
-        "Type": "Orc",
-        "SpellDescription": "Amass Orcs X. Activate only if a creature died this turn.",
-        "CheckSVar": "Morbid"
-      }
+      "description": "Amass Orcs X. Activate only if a creature died this turn.",
+      "effect": {
+        "description": "Amass Orcs X. Activate only if a creature died this turn.",
+        "name": "Amass",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped unless you control a legendary creature.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplaceWith": "LandTapped",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped unless you control a legendary creature."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

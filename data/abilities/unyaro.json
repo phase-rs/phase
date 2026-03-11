@@ -1,28 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you planeswalked to CARDNAME this turn, untap all creatures. They phase out until a player planeswalks. (Treat them and anything attached to them as though they didn't exist.)",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Phase": "End of Turn",
-        "CheckSVar": "X",
-        "Execute": "TrigUntapAll",
-        "TriggerDescription": "At the beginning of your end step, if you planeswalked to CARDNAME this turn, untap all creatures. They phase out until a player planeswalks. (Treat them and anything attached to them as though they didn't exist.)"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, create two 2/2 white and blue Knight creature tokens with vigilance.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, create two 2/2 white and blue Knight creature tokens with vigilance."
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

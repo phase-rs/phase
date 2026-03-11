@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SacrificeAll",
-        "params": {
-          "SpellDescription": "Sacrifice all creatures you control, then create that many 4/4 red Hellion creature tokens.",
-          "RememberSacrificed": "True",
-          "SubAbility": "DBToken",
-          "ValidCards": "Creature.YouCtrl",
-          "AILogic": "HellionEruption"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Sacrifice all creatures you control, then create that many 4/4 red Hellion creature tokens.",
-        "RememberSacrificed": "True",
-        "SubAbility": "DBToken",
-        "ValidCards": "Creature.YouCtrl",
-        "AILogic": "HellionEruption"
-      }
+      "description": "Sacrifice all creatures you control, then create that many 4/4 red Hellion creature tokens.",
+      "effect": {
+        "description": "Sacrifice all creatures you control, then create that many 4/4 red Hellion creature tokens.",
+        "name": "SacrificeAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

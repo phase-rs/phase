@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast your third spell each turn, put a +1/+1 counter on CARDNAME, then it deals damage equal to its power to any target.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Whenever you cast your third spell each turn, put a +1/+1 counter on CARDNAME, then it deals damage equal to its power to any target.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Card.YouCtrl",
-        "ActivatorThisTurnCast": "EQ3",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

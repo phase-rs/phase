@@ -1,20 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            },
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
       "mode": {
         "Other": "AssignCombatDamageAsUnblocked"
-      },
-      "params": {
-        "IsPresent": "Card.Self+attacking",
-        "Description": "As long as CARDNAME is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
-        "ValidCard": "Creature.YouCtrl",
-        "Optional": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

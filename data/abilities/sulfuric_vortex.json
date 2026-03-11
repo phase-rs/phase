@@ -1,28 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDmg",
-        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals 2 damage to that player.",
-        "Phase": "Upkeep"
-      }
+      "description": "If a player would gain life, that player gains no life instead.",
+      "event": "GainLife"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "GainLife",
-      "params": {
-        "Prevent": "True",
-        "Description": "If a player would gain life, that player gains no life instead.",
-        "ActiveZones": "Battlefield",
-        "AILogic": "NoLife"
-      }
+      "description": "At the beginning of each player's upkeep, CARDNAME deals 2 damage to that player.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

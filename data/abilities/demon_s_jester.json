@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Hellbent — CARDNAME gets +2/+1 as long as you have no cards in hand.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Hellbent — CARDNAME gets +2/+1 as long as you have no cards in hand.",
-        "AddPower": "2",
-        "Condition": "Hellbent",
-        "AddToughness": "1",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

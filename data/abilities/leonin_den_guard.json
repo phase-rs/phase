@@ -1,19 +1,37 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is equipped, it gets +1/+1 and has vigilance.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "AddKeyword": "Vigilance",
-        "AddToughness": "1",
-        "Description": "As long as CARDNAME is equipped, it gets +1/+1 and has vigilance.",
-        "Affected": "Card.Self+equipped"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,62 +2,45 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "Amount": "3",
-          "SpellDescription": "Add {C}{C}{C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "3",
-        "SpellDescription": "Add {C}{C}{C}."
-      }
+      "description": "Add {C}{C}{C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "At the beginning of your upkeep, you may pay {4}. If you do, untap this artifact.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You"
-      }
-    },
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigDamage",
-        "IsPresent": "Card.tapped",
-        "ValidPlayer": "You",
-        "PresentDefined": "Self",
-        "Phase": "Draw",
-        "TriggerDescription": "At the beginning of your draw step, if this artifact is tapped, it deals 1 damage to you."
+      "description": "This artifact doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This artifact doesn't untap during your untap step."
-      }
+      "description": "At the beginning of your upkeep, you may pay {4}. If you do, untap this artifact.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "At the beginning of your draw step, if this artifact is tapped, it deals 1 damage to you.",
+      "mode": "Phase",
+      "phase": "Draw"
     }
-  ],
-  "faces": []
+  ]
 }

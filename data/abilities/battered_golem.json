@@ -1,33 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever an artifact enters, you may untap this creature.",
-        "ValidCard": "Artifact",
-        "Origin": "Any",
-        "Execute": "TrigUntap",
-        "Destination": "Battlefield"
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidStepTurnToController": "You",
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen"
+      "description": "Whenever an artifact enters, you may untap this creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "optional": true,
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

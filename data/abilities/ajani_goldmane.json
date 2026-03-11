@@ -2,75 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GainLife",
-        "amount": 2
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "You gain 2 life."
-      }
+      "description": "You gain 2 life.",
+      "effect": {
+        "amount": 2,
+        "type": "GainLife"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterType": "P1P1",
-          "ValidCards": "Creature.YouCtrl",
-          "CounterNum": "1",
-          "Planeswalker": "True",
-          "SpellDescription": "Put a +1/+1 counter on each creature you control. Those creatures gain vigilance until end of turn.",
-          "SubAbility": "DBPumpAll"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterType": "P1P1",
-        "ValidCards": "Creature.YouCtrl",
-        "CounterNum": "1",
-        "Planeswalker": "True",
-        "SpellDescription": "Put a +1/+1 counter on each creature you control. Those creatures gain vigilance until end of turn.",
-        "SubAbility": "DBPumpAll"
-      }
+      "description": "Put a +1/+1 counter on each creature you control. Those creatures gain vigilance until end of turn.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each creature you control. Those creatures gain vigilance until end of turn.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "Create a white Avatar creature token. It has \"This creature's power and toughness are each equal to your life total.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_x_x_avatar_life_total",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a white Avatar creature token. It has \"This creature's power and toughness are each equal to your life total.\"",
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "Ultimate": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

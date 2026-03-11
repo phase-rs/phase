@@ -2,32 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ValidTgts": "Player",
-          "AILogic": "BeginningOfOppTurn",
-          "RememberObjects": "Targeted",
-          "SpellDescription": "Target player can't cast creature spells this turn.",
-          "SubAbility": "DBDraw",
-          "StaticAbilities": "STCantBeCast"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "AILogic": "BeginningOfOppTurn",
-        "RememberObjects": "Targeted",
-        "SpellDescription": "Target player can't cast creature spells this turn.",
-        "SubAbility": "DBDraw",
-        "StaticAbilities": "STCantBeCast"
-      }
+      "description": "Target player can't cast creature spells this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,94 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "Pump1,PutCounter2,Destroy3,Token4,Token5,Token6,Dig7,MustAttack8,PutCounter9,Effect10,Exile11,Dig12,Animate13,Draw14,Animate15,PumpAll16,Dig17,DealDamage18,Animate19,Mana20",
-          "SpellDescription": "Head to AskUrza.com and click +1.",
-          "Planeswalker": "True",
-          "AtRandom": "Urza",
-          "StackDescription": "SpellDescription",
-          "ShowChoice": "Description"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Pump1,PutCounter2,Destroy3,Token4,Token5,Token6,Dig7,MustAttack8,PutCounter9,Effect10,Exile11,Dig12,Animate13,Draw14,Animate15,PumpAll16,Dig17,DealDamage18,Animate19,Mana20",
-        "SpellDescription": "Head to AskUrza.com and click +1.",
-        "Planeswalker": "True",
-        "AtRandom": "Urza",
-        "StackDescription": "SpellDescription",
-        "ShowChoice": "Description"
-      }
+      "description": "Head to AskUrza.com and click +1.",
+      "effect": {
+        "description": "Head to AskUrza.com and click +1.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Planeswalker": "True",
-          "ShowChoice": "Description",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Head to AskUrza.com and click -1.",
-          "Choices": "DamageAll1M,GainControl2M,DealDamage3M,Destroy4M,Effect5M,ChangeZone6M,Draw7M,Mill8M,Dig9M,Exile10M,Reveal11M,Tutor12M,Sacrifice13M,Token14M,Token15M,SetLife16M,Destroy17M,Return18M,Token19M,Draw20M",
-          "AtRandom": "Urza"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "ShowChoice": "Description",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Head to AskUrza.com and click -1.",
-        "Choices": "DamageAll1M,GainControl2M,DealDamage3M,Destroy4M,Effect5M,ChangeZone6M,Draw7M,Mill8M,Dig9M,Exile10M,Reveal11M,Tutor12M,Sacrifice13M,Token14M,Token15M,SetLife16M,Destroy17M,Return18M,Token19M,Draw20M",
-        "AtRandom": "Urza"
-      }
+      "description": "Head to AskUrza.com and click -1.",
+      "effect": {
+        "description": "Head to AskUrza.com and click -1.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Choices": "DealDamage1U,Effect2U,DestroyAll3U,Token4U,LifeGain5U,Damage6U,Effect7U,Effect8U,Token9U,Shuffle10U,Destroy11U,Effect12U,Effect13U,ControlPlayer14U,ExileLibrary15U,Token16U,Raise17U,LifeDraw18U,FlipTurns19U",
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "AtRandom": "Urza",
-          "ShowChoice": "Description",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Head to AskUrza.com and click -6."
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -6
+        "amount": -6,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "DealDamage1U,Effect2U,DestroyAll3U,Token4U,LifeGain5U,Damage6U,Effect7U,Effect8U,Token9U,Shuffle10U,Destroy11U,Effect12U,Effect13U,ControlPlayer14U,ExileLibrary15U,Token16U,Raise17U,LifeDraw18U,FlipTurns19U",
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "AtRandom": "Urza",
-        "ShowChoice": "Description",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Head to AskUrza.com and click -6."
-      }
+      "description": "Head to AskUrza.com and click -6.",
+      "effect": {
+        "description": "Head to AskUrza.com and click -6.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,21 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME and at least three other creatures attack, you choose which creatures block this combat and how those creatures block.",
       "mode": "Attacks",
-      "params": {
-        "IsPresent": "Creature.attacking+Other",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME and at least three other creatures attack, you choose which creatures block this combat and how those creatures block.",
-        "NoResolvingCheck": "True",
-        "TriggerZones": "Battlefield",
-        "PresentCompare": "GE3",
-        "Execute": "TrigOdricEffect"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

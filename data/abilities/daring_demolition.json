@@ -2,24 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature,Vehicle"
-        }
-      },
       "cost": null,
+      "description": "Destroy target creature or Vehicle.",
+      "effect": {
+        "target": {
+          "card_type": "Creature,Vehicle",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or Vehicle",
-        "SpellDescription": "Destroy target creature or Vehicle."
-      }
+      "target_prompt": "Select target creature or Vehicle"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-        "Origin": "Any",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, return up to one target creature you control with lesser mana value to its owner's hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Frog",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Frogs you control have \"{T}: Add {G} or {U}. Spend this mana only to cast a creature spell.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Frogs you control have \"{T}: Add {G} or {U}. Spend this mana only to cast a creature spell.\"",
-        "Affected": "Frog.YouCtrl",
-        "AddAbility": "AnyMana"
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another creature you control enters, return up to one target creature you control with lesser mana value to its owner's hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Other"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

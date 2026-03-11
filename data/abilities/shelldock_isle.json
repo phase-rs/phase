@@ -2,76 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "U",
-        "params": {
-          "SpellDescription": "Add {U}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {U}."
-      }
+      "description": "Add {U}.",
+      "effect": {
+        "produced": [
+          "Blue"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Play",
-        "params": {
-          "Defined": "ExiledWith",
-          "Optional": "True",
-          "Controller": "You",
-          "ConditionCheckSVar": "X",
-          "SpellDescription": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
-          "Amount": "All",
-          "WithoutManaCost": "True",
-          "ConditionSVarCompare": "LE20"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "U"
+            "cost": "U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "ExiledWith",
-        "Optional": "True",
-        "Controller": "You",
-        "ConditionCheckSVar": "X",
-        "SpellDescription": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
-        "Amount": "All",
-        "WithoutManaCost": "True",
-        "ConditionSVarCompare": "LE20"
-      }
+      "description": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+      "effect": {
+        "description": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+        "name": "Play",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped.",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

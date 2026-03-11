@@ -1,41 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked by red creatures.",
+      "mode": {
+        "Other": "CantBlockBy"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME enters or becomes the target of a spell or ability an opponent controls, you gain 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "DBGainLife",
-        "TriggerDescription": "When CARDNAME enters or becomes the target of a spell or ability an opponent controls, you gain 3 life.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or becomes the target of a spell or ability an opponent controls, you gain 3 life.",
       "mode": "BecomesTarget",
-      "params": {
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters or becomes the target of a spell or ability an opponent controls, you gain 3 life.",
-        "ValidSource": "SpellAbility.OppCtrl",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "Execute": "DBGainLife"
-      }
-    }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "SpellAbility",
+        "controller": "Opponent",
+        "type": "Typed"
       },
-      "params": {
-        "ValidBlocker": "Creature.Red",
-        "ValidAttacker": "Creature.Self",
-        "Description": "CARDNAME can't be blocked by red creatures."
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

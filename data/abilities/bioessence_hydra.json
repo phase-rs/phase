@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more loyalty counters are put on planeswalkers you control, put that many +1/+1 counters on CARDNAME.",
       "mode": "CounterAddedAll",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever one or more loyalty counters are put on planeswalkers you control, put that many +1/+1 counters on CARDNAME.",
-        "CounterType": "LOYALTY",
-        "Valid": "Planeswalker.YouCtrl"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

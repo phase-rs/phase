@@ -2,26 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Spirit"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Tap target Spirit.",
+      "effect": {
+        "target": {
+          "card_type": "Spirit",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target Spirit.",
-        "TgtPrompt": "Select target Spirit"
-      }
+      "target_prompt": "Select target Spirit"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

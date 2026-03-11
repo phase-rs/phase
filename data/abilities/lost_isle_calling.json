@@ -2,44 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4 U U"
+            "cost": "4 U U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBExtraTurn",
-        "SorcerySpeed": "True",
-        "SpellDescription": "Draw a card for each verse counter on CARDNAME. If it had seven or more verse counters on it, take an extra turn after this one. Activate only as a sorcery."
-      }
+      "description": "Draw a card for each verse counter on CARDNAME. If it had seven or more verse counters on it, take an extra turn after this one. Activate only as a sorcery.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you scry, put a verse counter on CARDNAME.",
       "mode": "Scry",
-      "params": {
-        "TriggerDescription": "Whenever you scry, put a verse counter on CARDNAME.",
-        "Execute": "TrigPutCounter",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

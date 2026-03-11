@@ -1,63 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, mill two cards.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "Execute": "TrigMill",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, mill two cards."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         },
         {
+          "description": "Whenever you cast a spell from your graveyard, tap target creature you don't control.",
           "mode": "SpellCast",
-          "params": {
-            "TriggerDescription": "Whenever you cast a spell from your graveyard, tap target creature you don't control.",
-            "ValidActivatingPlayer": "You",
-            "Execute": "TrigTap",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card.wasCastFromYourGraveyardByYou"
-          }
-        }
-      ],
-      "statics": [],
-      "replacements": []
-    },
-    {
-      "abilities": [],
-      "triggers": [],
-      "statics": [
-        {
-          "mode": {
-            "Other": "CantBlockBy"
-          },
-          "params": {
-            "Description": "CARDNAME can block only creatures with flying.",
-            "ValidBlocker": "Creature.Self",
-            "ValidAttacker": "Creature.withoutFlying"
-          }
-        }
-      ],
-      "replacements": [
-        {
-          "event": "Moved",
-          "params": {
-            "ReplaceWith": "Exile",
-            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
       ]
+    },
+    {
+      "abilities": [],
+      "replacements": [
+        {
+          "description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+          "event": "Moved",
+          "valid_card": {
+            "type": "SelfRef"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "description": "CARDNAME can block only creatures with flying.",
+          "mode": {
+            "Other": "CantBlockBy"
+          }
+        }
+      ],
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

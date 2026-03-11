@@ -1,40 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
+    }
+  ],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, they get that many rad counters.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigRadiation",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, they get that many rad counters.",
-        "ValidTarget": "Player"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever an opponent mills a nonland card, if CARDNAME is in your graveyard, you may return it to your hand.",
       "mode": "Milled",
-      "params": {
-        "PresentZone": "Graveyard",
-        "Execute": "TrigReturn",
-        "ValidPlayer": "Opponent",
-        "OptionalDecider": "You",
-        "IsPresent": "Card.StrictlySelf",
-        "TriggerDescription": "Whenever an opponent mills a nonland card, if CARDNAME is in your graveyard, you may return it to your hand.",
-        "TriggerZones": "Graveyard",
-        "ValidCard": "Card.nonLand"
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Land"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't block."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

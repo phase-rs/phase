@@ -1,21 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, you may sacrifice a Merfolk. If you do, take an extra turn after this one.",
       "mode": "DamageDone",
-      "params": {
-        "OptionalDecider": "You",
-        "CombatDamage": "True",
-        "Execute": "TrigSacrifice",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may sacrifice a Merfolk. If you do, take an extra turn after this one.",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

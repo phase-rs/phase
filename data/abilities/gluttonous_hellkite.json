@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you cast this spell, each player sacrifices X creatures. CARDNAME enters with two +1/+1 counters on it for each creature sacrificed this way.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSacrifice",
-        "TriggerDescription": "When you cast this spell, each player sacrifices X creatures. CARDNAME enters with two +1/+1 counters on it for each creature sacrificed this way."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

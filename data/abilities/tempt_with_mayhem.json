@@ -2,39 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "TgtZone": "Stack",
-          "ValidTgts": "Instant,Sorcery",
-          "RepeatOptionalForEachPlayer": "True",
-          "RepeatSubAbility": "DBCopy",
-          "RepeatPlayers": "Player.Opponent",
-          "RepeatOptionalMessage": "Do you want to copy the targeted spell?",
-          "SpellDescription": "Tempting offer — Choose target instant or sorcery spell. Each opponent may copy that spell and may choose new targets for the copy they control. You copy that spell once plus an additional time for each opponent who copied the spell this way. You may choose new targets for the copies you control.",
-          "SubAbility": "DBCopySelf",
-          "TgtPrompt": "Select target instant or sorcery spell"
-        }
-      },
       "cost": null,
+      "description": "Tempting offer — Choose target instant or sorcery spell. Each opponent may copy that spell and may choose new targets for the copy they control. You copy that spell once plus an additional time for each opponent who copied the spell this way. You may choose new targets for the copies you control.",
+      "effect": {
+        "description": "Tempting offer — Choose target instant or sorcery spell. Each opponent may copy that spell and may choose new targets for the copy they control. You copy that spell once plus an additional time for each opponent who copied the spell this way. You may choose new targets for the copies you control.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Stack",
-        "ValidTgts": "Instant,Sorcery",
-        "RepeatOptionalForEachPlayer": "True",
-        "RepeatSubAbility": "DBCopy",
-        "RepeatPlayers": "Player.Opponent",
-        "RepeatOptionalMessage": "Do you want to copy the targeted spell?",
-        "SpellDescription": "Tempting offer — Choose target instant or sorcery spell. Each opponent may copy that spell and may choose new targets for the copy they control. You copy that spell once plus an additional time for each opponent who copied the spell this way. You may choose new targets for the copies you control.",
-        "SubAbility": "DBCopySelf",
-        "TgtPrompt": "Select target instant or sorcery spell"
-      }
+      "target_prompt": "Select target instant or sorcery spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,31 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, up to one target creature gets +2/+2 and gains vigilance until end of turn. It can't be blocked this turn.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "TriggerDescription": "At the beginning of combat on your turn, up to one target creature gets +2/+2 and gains vigilance until end of turn. It can't be blocked this turn.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Execute": "TrigPump"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "At the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.",
       "mode": "Phase",
-      "params": {
-        "SVarCompare": "LTY",
-        "ValidPlayer": "Opponent",
-        "TriggerZones": "Command",
-        "Phase": "End Of Turn",
-        "Execute": "Abandon",
-        "TriggerDescription": "At the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.",
-        "CheckSVar": "X"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

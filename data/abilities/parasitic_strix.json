@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control a black permanent, target player loses 2 life and you gain 2 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "When CARDNAME enters, if you control a black permanent, target player loses 2 life and you gain 2 life.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Permanent.Black+YouCtrl",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

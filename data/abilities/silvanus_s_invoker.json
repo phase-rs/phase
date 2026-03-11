@@ -2,29 +2,26 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Untap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "8"
+        "cost": "8",
+        "type": "Mana"
       },
+      "description": "Untap target land you control. It becomes an 8/8 Elemental creature with trample and haste until end of turn. It's still a land.",
+      "effect": {
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "Untap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "PrecostDesc": "Conjure Elemental —",
-        "SpellDescription": "Untap target land you control. It becomes an 8/8 Elemental creature with trample and haste until end of turn. It's still a land.",
-        "SubAbility": "DBAnimate",
-        "TgtPrompt": "Select target land you control"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

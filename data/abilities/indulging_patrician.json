@@ -1,21 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you gained 3 or more life this turn, each opponent loses 3 life.",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "LifeGained",
-        "SVarCompare": "GE3",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, if you gained 3 or more life this turn, each opponent loses 3 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLife",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

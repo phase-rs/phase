@@ -1,57 +1,79 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME.",
-              "Mode": "Transform",
-              "Defined": "Self",
-              "AILogic": "Always"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "5 G G"
+            "cost": "5 G G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME.",
-            "Mode": "Transform",
-            "Defined": "Self",
-            "AILogic": "Always"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other creatures you control get +1/+1 and have trample and haste.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "1",
-            "Description": "Other creatures you control get +1/+1 and have trample and haste.",
-            "AddKeyword": "Trample & Haste",
-            "Affected": "Creature.YouCtrl+Other",
-            "AddToughness": "1"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            },
+            {
+              "keyword": "Trample",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "&",
+              "type": "AddKeyword"
+            },
+            {
+              "keyword": "Haste",
+              "type": "AddKeyword"
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

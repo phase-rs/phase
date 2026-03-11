@@ -2,62 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "G",
-        "params": {
-          "SpellDescription": "Add {G}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {G}."
-      }
+      "description": "Add {G}.",
+      "effect": {
+        "produced": [
+          "Green"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X G XMin1",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes an X/X green Hydra creature. It's still a land. X can't be 0.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "type": "Any"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Creature",
           "Hydra"
-        ],
-        "target": {
-          "type": "Any"
-        }
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X G XMin1"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Colors": "Green",
-        "OverwriteColors": "True",
-        "Defined": "Self",
-        "SpellDescription": "Until end of turn, CARDNAME becomes an X/X green Hydra creature. It's still a land. X can't be 0."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If you control two or more other lands, CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "LandTapped",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "If you control two or more other lands, CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

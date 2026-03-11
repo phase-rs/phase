@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control another snow permanent, exile target permanent other than CARDNAME. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Permanent.Snow+YouCtrl+Other",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "TriggerDescription": "When CARDNAME enters, if you control another snow permanent, exile target permanent other than CARDNAME. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

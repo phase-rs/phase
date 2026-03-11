@@ -1,22 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you may put a permanent card from your hand onto the battlefield.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Main",
-        "PhaseCount": "2",
-        "ValidPlayer": "You",
-        "PresentDefined": "Self",
-        "IsPresent": "Card.tapped",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you may put a permanent card from your hand onto the battlefield."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

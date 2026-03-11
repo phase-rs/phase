@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever two or more creatures your opponents control attack, CARDNAME can't block this combat.",
       "mode": "AttackersDeclared",
-      "params": {
-        "ValidAttackers": "Creature",
-        "TriggerDescription": "Whenever two or more creatures your opponents control attack, CARDNAME can't block this combat.",
-        "Execute": "TrigPump",
-        "AttackingPlayer": "Player.Opponent",
-        "TriggerZones": "Battlefield",
-        "ValidAttackersAmount": "GE2"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

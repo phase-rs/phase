@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "IsCombat": "True",
-        "ReplaceWith": "DmgTwice",
-        "ActiveZones": "Battlefield",
-        "Description": "If CARDNAME would deal combat damage to a player, it deals double that damage instead.",
-        "ValidTarget": "Player"
-      }
+      "description": "If CARDNAME would deal combat damage to a player, it deals double that damage instead.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

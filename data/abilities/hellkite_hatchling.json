@@ -1,17 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          },
+          {
+            "type": "Other",
+            "value": "HasDevoured"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "CARDNAME has flying and trample if it devoured a creature.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self+HasDevoured",
-        "Description": "CARDNAME has flying and trample if it devoured a creature.",
-        "AddKeyword": "Flying & Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,37 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "RemoveFromCombat",
-        "params": {
-          "SpellDescription": "Remove target blocking creature from combat. Creatures it was blocking that hadn't become blocked by another creature this combat become unblocked.",
-          "UnblockCreaturesBlockedOnlyBy": "Targeted",
-          "Defined": "Targeted",
-          "TgtPrompt": "Select target blocking creature",
-          "ActivationPhases": "Declare Blockers",
-          "ValidTgts": "Creature.blocking",
-          "SubAbility": "ChooseAttacker"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Remove target blocking creature from combat. Creatures it was blocking that hadn't become blocked by another creature this combat become unblocked.",
+      "effect": {
+        "description": "Remove target blocking creature from combat. Creatures it was blocking that hadn't become blocked by another creature this combat become unblocked.",
+        "name": "RemoveFromCombat",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Remove target blocking creature from combat. Creatures it was blocking that hadn't become blocked by another creature this combat become unblocked.",
-        "UnblockCreaturesBlockedOnlyBy": "Targeted",
-        "Defined": "Targeted",
-        "TgtPrompt": "Select target blocking creature",
-        "ActivationPhases": "Declare Blockers",
-        "ValidTgts": "Creature.blocking",
-        "SubAbility": "ChooseAttacker"
-      }
+      "target_prompt": "Select target blocking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

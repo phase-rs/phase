@@ -1,61 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "You",
-        "TriggerDescription": "Whenever you're dealt damage, sacrifice that many nontoken permanents. If you can't, you lose the game.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseOrSac"
+      "description": "As CARDNAME enters, you lose life equal to your life total.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, you lose the game.",
-        "Execute": "TrigLose",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard"
+      "description": "You don't lose the game for having 0 or less life.",
+      "event": {
+        "Other": "GameLoss"
       }
+    },
+    {
+      "description": "If you would gain life, draw that many cards instead.",
+      "event": "GainLife"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated",
-        "Destination": "Battlefield",
-        "Description": "As CARDNAME enters, you lose life equal to your life total.",
-        "ReplaceWith": "LoseLife"
+      "description": "Whenever you're dealt damage, sacrifice that many nontoken permanents. If you can't, you lose the game.",
+      "mode": "DamageDoneOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     },
     {
-      "event": {
-        "Other": "GameLoss"
-      },
-      "params": {
-        "Description": "You don't lose the game for having 0 or less life.",
-        "ActiveZones": "Battlefield",
-        "ValidLoseReason": "LifeReachedZero",
-        "ValidPlayer": "You",
-        "Layer": "CantHappen"
-      }
-    },
-    {
-      "event": "GainLife",
-      "params": {
-        "AILogic": "LichDraw",
-        "ReplaceWith": "Draw",
-        "Description": "If you would gain life, draw that many cards instead.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You"
+      "description": "When CARDNAME is put into a graveyard from the battlefield, you lose the game.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

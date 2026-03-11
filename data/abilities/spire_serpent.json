@@ -1,30 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +2/+2 and can attack as though it didn't have defender.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +2/+2 and can attack as though it didn't have defender.",
-        "Affected": "Card.Self",
-        "Condition": "Metalcraft"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     },
     {
+      "description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +2/+2 and can attack as though it didn't have defender.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +2/+2 and can attack as though it didn't have defender.",
-        "ValidCard": "Card.Self",
-        "Condition": "Metalcraft",
-        "Secondary": "True"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

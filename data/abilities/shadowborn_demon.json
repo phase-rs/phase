@@ -1,32 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, destroy target non-Demon creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, destroy target non-Demon creature.",
-        "Execute": "TrigDestroy",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your upkeep, if there are fewer than six creatures in your graveyard, sacrifice a creature.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "PresentZone": "Graveyard",
-        "PresentCompare": "LT6",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if there are fewer than six creatures in your graveyard, sacrifice a creature.",
-        "IsPresent": "Creature.YouCtrl",
-        "Execute": "TrigSac"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

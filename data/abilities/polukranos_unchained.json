@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Fight",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 B G"
+        "cost": "1 B G",
+        "type": "Mana"
       },
+      "description": "NICKNAME fights another target creature.",
+      "effect": {
+        "target": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "Fight"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select another target creature",
-        "SpellDescription": "NICKNAME fights another target creature.",
-        "Defined": "Self"
-      }
+      "target_prompt": "Select another target creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "AlwaysReplace": "True",
-        "ReplaceWith": "Counters",
-        "ValidTarget": "Card.Self+counters_GE1_P1P1",
-        "PreventionEffect": "True",
-        "ActiveZones": "Battlefield",
-        "Description": "If damage would be dealt to NICKNAME while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it."
-      }
+      "description": "If damage would be dealt to NICKNAME while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

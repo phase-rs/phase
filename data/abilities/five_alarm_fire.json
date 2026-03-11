@@ -2,40 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<5/BLAZE>",
+        "type": "Mana"
+      },
+      "description": "It deals 5 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 5
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<5/BLAZE>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "It deals 5 damage to any target."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever a creature you control deals combat damage, put a blaze counter on CARDNAME.",
       "mode": "DamageDealtOnce",
-      "params": {
-        "CombatDamage": "True",
-        "Execute": "TrigPutCounter",
-        "ValidSource": "Creature.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control deals combat damage, put a blaze counter on CARDNAME."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,36 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME attacks each combat if able.",
+      "mode": "MustAttack"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, flip a coin. If you lose the flip, sacrifice CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigFlipSac",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, flip a coin. If you lose the flip, sacrifice CARDNAME.",
-        "ValidTarget": "Card.Self"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, flip a coin. If you lose the flip, it deals 4 damage to each creature and each player.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, flip a coin. If you lose the flip, it deals 4 damage to each creature and each player.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigFlipDamage"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "MustAttack",
-      "params": {
-        "Description": "CARDNAME attacks each combat if able.",
-        "ValidCreature": "Card.Self"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

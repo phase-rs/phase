@@ -2,41 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "StoreSVar",
-        "params": {
-          "Expression": "CardToughness",
-          "SubAbility": "StoreTgtPW",
-          "SVar": "Limit",
-          "Type": "Targeted",
-          "ConditionPresent": "Card.Creature",
-          "ValidTgts": "Any",
-          "ConditionCompare": "GE1",
-          "XColor": "Black,Red",
-          "ConditionDefined": "Targeted",
-          "SpellDescription": "Spend only black and/or red mana on X. CARDNAME deals X damage to target creature or player. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Expression": "CardToughness",
-        "SubAbility": "StoreTgtPW",
-        "SVar": "Limit",
-        "Type": "Targeted",
-        "ConditionPresent": "Card.Creature",
-        "ValidTgts": "Any",
-        "ConditionCompare": "GE1",
-        "XColor": "Black,Red",
-        "ConditionDefined": "Targeted",
-        "SpellDescription": "Spend only black and/or red mana on X. CARDNAME deals X damage to target creature or player. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness."
-      }
+      "description": "Spend only black and/or red mana on X. CARDNAME deals X damage to target creature or player. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness.",
+      "effect": {
+        "description": "Spend only black and/or red mana on X. CARDNAME deals X damage to target creature or player. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness.",
+        "name": "StoreSVar",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

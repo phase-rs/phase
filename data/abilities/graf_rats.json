@@ -1,45 +1,40 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "At the beginning of combat on your turn, if you both own and control CARDNAME and a creature named Midnight Scavengers, exile them, then meld them into Chittering Host.",
           "mode": "Phase",
-          "params": {
-            "IsPresent2": "Creature.YouCtrl+YouOwn+namedMidnight Scavengers",
-            "Execute": "Meld",
-            "TriggerDescription": "At the beginning of combat on your turn, if you both own and control CARDNAME and a creature named Midnight Scavengers, exile them, then meld them into Chittering Host.",
-            "TriggerZones": "Battlefield",
-            "Phase": "BeginCombat",
-            "ValidPlayer": "You",
-            "IsPresent": "Card.Self+YouCtrl+YouOwn"
-          }
+          "phase": "BeginCombat",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, other creatures you control get +1/+0 and menace until end of turn.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigPumpAll",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "TriggerDescription": "When CARDNAME enters, other creatures you control get +1/+0 and menace until end of turn."
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted player is attacked, draw a card. Each opponent attacking that player does the same.",
       "mode": "AttackersDeclared",
-      "params": {
-        "AttackedTarget": "Player.EnchantedBy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted player is attacked, draw a card. Each opponent attacking that player does the same.",
-        "Execute": "TrigDraw"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

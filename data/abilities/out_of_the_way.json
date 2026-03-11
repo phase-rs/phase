@@ -2,39 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+OppCtrl"
-        }
-      },
       "cost": null,
+      "description": "Return target nonland permanent an opponent controls to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Permanent",
+          "controller": "Opponent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target nonland permanent an opponent controls",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Return target nonland permanent an opponent controls to its owner's hand."
-      }
+      "target_prompt": "Select target nonland permanent an opponent controls"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Amount": "2",
-        "Description": "This spell costs {2} less to cast if it targets a green permanent.",
-        "ValidTarget": "Permanent.Green",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {2} less to cast if it targets a green permanent.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

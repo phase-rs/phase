@@ -2,35 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "STCantBeCast",
-          "ValidTgts": "Player.wasDealtCombatDamageThisTurnBySource",
-          "RememberObjects": "Targeted",
-          "Duration": "UntilYourNextTurn",
-          "SpellDescription": "Until your next turn, target player who was dealt combat damage by CARDNAME can't cast noncreature spells."
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "STCantBeCast",
-        "ValidTgts": "Player.wasDealtCombatDamageThisTurnBySource",
-        "RememberObjects": "Targeted",
-        "Duration": "UntilYourNextTurn",
-        "SpellDescription": "Until your next turn, target player who was dealt combat damage by CARDNAME can't cast noncreature spells."
-      }
+      "description": "Until your next turn, target player who was dealt combat damage by CARDNAME can't cast noncreature spells.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

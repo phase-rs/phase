@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddPower": "X",
-        "AddToughness": "X",
-        "Description": "Domain — CARDNAME gets +1/+1 for each basic land type among lands you control."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Domain — CARDNAME gets +1/+1 for each basic land type among lands you control.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

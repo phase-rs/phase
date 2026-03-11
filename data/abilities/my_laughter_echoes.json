@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you set a non-ongoing scheme in motion, you may abandon this scheme. If you do, set that scheme in motion again.",
       "mode": "SetInMotion",
-      "params": {
-        "ValidCard": "Card.!OnGoing",
-        "Execute": "Abandon",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever you set a non-ongoing scheme in motion, you may abandon this scheme. If you do, set that scheme in motion again."
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

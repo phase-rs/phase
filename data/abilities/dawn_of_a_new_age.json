@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, remove a hope counter from CARDNAME. If you do, draw a card. Then if CARDNAME has no hope counters on it, sacrifice it and you gain 4 life.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your end step, remove a hope counter from CARDNAME. If you do, draw a card. Then if CARDNAME has no hope counters on it, sacrifice it and you gain 4 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigRemoveCtr",
-        "Phase": "End of Turn",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

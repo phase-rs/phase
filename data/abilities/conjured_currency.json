@@ -1,20 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may exchange control of CARDNAME and target permanent you neither own nor control.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "TriggerDescription": "At the beginning of your upkeep, you may exchange control of CARDNAME and target permanent you neither own nor control.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "Execute": "ExchangeCards"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

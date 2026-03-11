@@ -2,30 +2,29 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.attacking"
-        }
-      },
       "cost": null,
+      "description": "Cast CARDNAME only during the declare attackers step and only if you've been attacked this step. Return one or two target attacking creatures to their owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Attacking"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "1",
-        "TgtPrompt": "Select target attacking creature",
-        "CheckSVar": "X",
-        "TargetMax": "2",
-        "SpellDescription": "Cast CARDNAME only during the declare attackers step and only if you've been attacked this step. Return one or two target attacking creatures to their owner's hand.",
-        "ActivationPhases": "Declare Attackers"
-      }
+      "target_prompt": "Select target attacking creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

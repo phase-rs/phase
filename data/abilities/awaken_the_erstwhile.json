@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each player discards all the cards in their hand, then creates that many 2/2 black Zombie creature tokens.",
-          "RepeatPlayers": "Player",
-          "RepeatSubAbility": "DBDiscard"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each player discards all the cards in their hand, then creates that many 2/2 black Zombie creature tokens.",
-        "RepeatPlayers": "Player",
-        "RepeatSubAbility": "DBDiscard"
-      }
+      "description": "Each player discards all the cards in their hand, then creates that many 2/2 black Zombie creature tokens.",
+      "effect": {
+        "description": "Each player discards all the cards in their hand, then creates that many 2/2 black Zombie creature tokens.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

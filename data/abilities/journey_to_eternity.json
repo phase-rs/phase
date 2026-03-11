@@ -1,81 +1,78 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When enchanted creature dies, return it to the battlefield under your control, then return CARDNAME to the battlefield transformed under your control.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Destination": "Graveyard",
-            "TriggerDescription": "When enchanted creature dies, return it to the battlefield under your control, then return CARDNAME to the battlefield transformed under your control.",
-            "ValidCard": "Card.EnchantedBy",
-            "Origin": "Battlefield",
-            "Execute": "TrigChangeZone"
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "EnchantedBy"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Mana",
-            "produced": "Any",
-            "params": {
-              "Amount": "1",
-              "SpellDescription": "Add one mana of any color."
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Amount": "1",
-            "SpellDescription": "Add one mana of any color."
-          }
+          "description": "Add one mana of any color.",
+          "effect": {
+            "produced": [],
+            "type": "Mana"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.YouCtrl"
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "3 B G"
+                "cost": "3 B G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
+          "description": "Return target creature card from your graveyard to the battlefield.",
+          "effect": {
+            "destination": "Battlefield",
+            "origin": "Graveyard",
+            "target": {
+              "card_type": "Creature",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Return target creature card from your graveyard to the battlefield.",
-            "TgtPrompt": "Choose target creature card in your graveyard"
-          }
+          "target_prompt": "Choose target creature card in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

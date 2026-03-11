@@ -1,41 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTap",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this Aura enters, tap enchanted permanent.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self"
+      "description": "Enchanted permanent doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted permanent has \"Discard two artifact cards: Untap this permanent.\"",
-        "AddAbility": "Untap",
-        "Affected": "Card.EnchantedBy"
-      }
-    }
-  ],
-  "replacements": [
-    {
-      "event": {
-        "Other": "Untap"
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Card.EnchantedBy",
-        "ValidStepTurnToController": "You"
-      }
+      "description": "Enchanted permanent has \"Discard two artifact cards: Untap this permanent.\"",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "ability": "Untap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When this Aura enters, tap enchanted permanent.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

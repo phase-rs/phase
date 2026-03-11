@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a Treefolk spell, you may have target creature get +3/-3 until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Treefolk",
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You",
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever you cast a Treefolk spell, you may have target creature get +3/-3 until end of turn."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Treefolk",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

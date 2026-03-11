@@ -2,94 +2,62 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "SpellDescription": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
-          "Choices": "DBSacToDraw,DBDiscardToDraw",
-          "Planeswalker": "True"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 2
+        "amount": 2,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
-        "Choices": "DBSacToDraw,DBDiscardToDraw",
-        "Planeswalker": "True"
-      }
+      "description": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
+      "effect": {
+        "description": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 0,
+        "type": "Loyalty"
+      },
+      "description": "Create a 3/2 colorless Vehicle token with crew 1.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "c_3_2_a_vehicle_crew_1",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 0
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 3/2 colorless Vehicle token with crew 1.",
-        "Planeswalker": "True",
-        "TokenOwner": "You"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Triggers": "TrigChangesZone",
-          "Name": "Emblem — Chandra, Spark Hunter",
-          "AILogic": "Always",
-          "Duration": "Permanent",
-          "SpellDescription": "You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"",
-          "Ultimate": "True",
-          "Planeswalker": "True",
-          "Image": "emblem_chandra_spark_hunter"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -7
+        "amount": -7,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Triggers": "TrigChangesZone",
-        "Name": "Emblem — Chandra, Spark Hunter",
-        "AILogic": "Always",
-        "Duration": "Permanent",
-        "SpellDescription": "You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"",
-        "Ultimate": "True",
-        "Planeswalker": "True",
-        "Image": "emblem_chandra_spark_hunter"
-      }
+      "description": "You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, choose up to one target Vehicle you control. Until end of turn, it becomes an artifact creature and gains haste.",
       "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of combat on your turn, choose up to one target Vehicle you control. Until end of turn, it becomes an artifact creature and gains haste.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

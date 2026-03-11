@@ -1,28 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When enchanted creature dies, its controller loses 2 life.",
-        "Destination": "Graveyard",
-        "ValidCard": "Card.AttachedBy",
-        "Origin": "Battlefield",
-        "Execute": "TrigLose"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has \"Cumulative upkeep—Pay 1 life.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Cumulative upkeep:PayLife<1>:Pay 1 life.",
-        "Description": "Enchanted creature has \"Cumulative upkeep—Pay 1 life.\" (At the beginning of its controller's upkeep, that player puts an age counter on it, then sacrifices it unless they pay its upkeep cost for each age counter on it.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Cumulative",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "upkeep:PayLife<1>:Pay",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "1",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "life.",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When enchanted creature dies, its controller loses 2 life.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

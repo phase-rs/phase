@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if a player controls more creatures than each other player, the player who controls the most creatures gains control of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "CheckDefinedPlayer": "Player.withMostTypeCreatureOnly",
-        "Execute": "TrigGain",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, if a player controls more creatures than each other player, the player who controls the most creatures gains control of CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,44 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, incubate 4. (Create an Incubator token with four +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigIncubate",
-        "TriggerDescription": "When CARDNAME enters, incubate 4. (Create an Incubator token with four +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card. Do this only once each turn.",
       "mode": "Transformed",
-      "params": {
-        "ValidCard": "Permanent.YouCtrl+inZoneBattlefield",
-        "Execute": "TrigDraw",
-        "OptionalDecider": "You",
-        "ResolvedLimit": "1",
-        "TriggerDescription": "Whenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card. Do this only once each turn.",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card. Do this only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card. Do this only once each turn.",
-        "ValidCard": "Permanent.Transformed+YouCtrl",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "ResolvedLimit": "1",
-        "Origin": "Any",
-        "Execute": "TrigDraw"
+      "optional": true,
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Transformed"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

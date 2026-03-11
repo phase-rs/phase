@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Type": "Creature",
-          "SpellDescription": "Enchanted creature becomes the creature type of your choice until end of turn.",
-          "AILogic": "MostProminentComputerControls",
-          "SubAbility": "DBAnimate"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Type": "Creature",
-        "SpellDescription": "Enchanted creature becomes the creature type of your choice until end of turn.",
-        "AILogic": "MostProminentComputerControls",
-        "SubAbility": "DBAnimate"
-      }
+      "description": "Enchanted creature becomes the creature type of your choice until end of turn.",
+      "effect": {
+        "description": "Enchanted creature becomes the creature type of your choice until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

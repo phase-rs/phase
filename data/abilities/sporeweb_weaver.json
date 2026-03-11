@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME is dealt damage, you gain 1 life and create a 1/1 green Saproling creature token.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigGainLife",
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME is dealt damage, you gain 1 life and create a 1/1 green Saproling creature token.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

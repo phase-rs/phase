@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage to any target.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Fixed",
           "value": 2
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals 2 damage to any target."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an opponent gains life, you may pay {R}. If you do, return CARDNAME from your graveyard to your hand.",
       "mode": "LifeGained",
-      "params": {
-        "ValidPlayer": "Opponent",
-        "TriggerDescription": "Whenever an opponent gains life, you may pay {R}. If you do, return CARDNAME from your graveyard to your hand.",
-        "OptionalDecider": "You",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigChange"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

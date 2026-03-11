@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage divided as you choose among any number of targets. If CARDNAME's madness cost was paid, it deals X damage instead.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "Y"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "0",
-        "SpellDescription": "CARDNAME deals 2 damage divided as you choose among any number of targets. If CARDNAME's madness cost was paid, it deals X damage instead.",
-        "TgtPrompt": "Select any number of targets to distribute damage to",
-        "TargetMax": "MaxTgts",
-        "DividedAsYouChoose": "Y"
-      }
+      "target_prompt": "Select any number of targets to distribute damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

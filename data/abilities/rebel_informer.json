@@ -2,42 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Rebel.!token"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3"
+        "cost": "3",
+        "type": "Mana"
       },
+      "description": "Put target nontoken Rebel on the bottom of its owner's library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield",
+        "target": {
+          "card_type": "Rebel",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put target nontoken Rebel on the bottom of its owner's library.",
-        "IsCurse": "True",
-        "LibraryPosition": "-1",
-        "TgtPrompt": "Select target Rebel"
-      }
+      "target_prompt": "Select target Rebel"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be the target of white spells or abilities from white sources.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "Description": "CARDNAME can't be the target of white spells or abilities from white sources.",
-        "ValidTarget": "Card.Self",
-        "ValidSource": "Card.White"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

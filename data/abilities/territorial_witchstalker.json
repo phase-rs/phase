@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, if you control a creature with power 4 or greater, CARDNAME gets +1/+0 until end of turn and can attack this turn as though it didn't have defender.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of combat on your turn, if you control a creature with power 4 or greater, CARDNAME gets +1/+0 until end of turn and can attack this turn as though it didn't have defender.",
-        "Execute": "TrigPump",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Creature.YouCtrl+powerGE4"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Addendum — If you cast this spell during your main phase, put a shield counter on a creature you control. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "SHIELD",
         "count": 1,
+        "counter_type": "SHIELD",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionPlayerTurn": "True",
-        "Choices": "Creature.YouCtrl",
-        "ChoicesDesc": "creature they control",
-        "ConditionPhases": "Main1,Main2",
-        "ConditionPresent": "Card.wasCast",
-        "SubAbility": "DBPutCounter",
-        "IfDesc": "True",
-        "SpellDescription": "Addendum — If you cast this spell during your main phase, put a shield counter on a creature you control. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)",
-        "ConditionDefined": "Self"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

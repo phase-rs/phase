@@ -1,31 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, the topmost land card in your library perpetually gains \"Whenever this land is tapped for mana, add an additional {G}.\"",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigAnimate"
+      "description": "Lands you control enter the battlefield untapped.",
+      "event": "Moved",
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Land.YouCtrl",
-        "ReplaceWith": "ETBUntapped",
-        "Description": "Lands you control enter the battlefield untapped.",
-        "ReplacementResult": "Updated"
-      }
+      "description": "At the beginning of your end step, the topmost land card in your library perpetually gains \"Whenever this land is tapped for mana, add an additional {G}.\"",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

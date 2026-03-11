@@ -1,35 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Islands, you may tap two target permanents.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "PresentCompare": "GE2",
-        "IsPresent": "Island.YouCtrl",
-        "Execute": "TrigTap",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Islands, you may tap two target permanents.",
-        "Destination": "Battlefield"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters, if you control two or more Mountains, you may have CARDNAME deal 2 damage to target player or planeswalker.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "IsPresent": "Mountain.YouCtrl",
-        "Origin": "Any",
-        "PresentCompare": "GE2",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Mountains, you may have CARDNAME deal 2 damage to target player or planeswalker.",
-        "Destination": "Battlefield",
-        "Execute": "TrigDamage"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

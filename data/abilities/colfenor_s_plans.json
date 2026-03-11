@@ -1,52 +1,45 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, exile the top seven cards of your library face down. You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
-        "Execute": "TrigExile",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "description": "Skip your draw step.",
+      "event": {
+        "Other": "BeginPhase"
       }
     }
   ],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "AffectedZone": "Exile",
-        "Description": "You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
-        "Affected": "Card.ExiledWithSource",
-        "MayLookAt": "You"
-      }
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "description": "You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+      "mode": "Continuous"
     },
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Caster": "You",
-        "NumLimitEachTurn": "1",
-        "ValidCard": "Card",
-        "Description": "You can't cast more than one spell each turn."
-      }
+      "description": "You can't cast more than one spell each turn.",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "BeginPhase"
-      },
-      "params": {
-        "ValidPlayer": "You",
-        "Description": "Skip your draw step.",
-        "ActiveZones": "Battlefield",
-        "Phase": "Draw",
-        "Skip": "True"
+      "description": "When CARDNAME enters, exile the top seven cards of your library face down. You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

@@ -1,62 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "CheckSVar": "X",
-              "PrecostDesc": "Coven —",
-              "Mode": "Transform",
-              "SVarCompare": "GE3",
-              "Defined": "Self",
-              "SpellDescription": "Transform CARDNAME. Activate only if you control three or more creatures with different powers."
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "1 W W"
+            "cost": "1 W W",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "CheckSVar": "X",
-            "PrecostDesc": "Coven —",
-            "Mode": "Transform",
-            "SVarCompare": "GE3",
-            "Defined": "Self",
-            "SpellDescription": "Transform CARDNAME. Activate only if you control three or more creatures with different powers."
-          }
+          "description": "Transform CARDNAME. Activate only if you control three or more creatures with different powers.",
+          "effect": {
+            "description": "Transform CARDNAME. Activate only if you control three or more creatures with different powers.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, you may search your library for a basic Plains card, reveal it, put it into your hand, then shuffle.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "OptionalDecider": "You",
-            "Execute": "TrigChange",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "When CARDNAME enters, you may search your library for a basic Plains card, reveal it, put it into your hand, then shuffle.",
-            "Destination": "Battlefield"
+          "optional": true,
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

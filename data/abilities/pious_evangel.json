@@ -1,80 +1,86 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "Defined": "Self",
-              "Mode": "Transform",
-              "SpellDescription": "Transform CARDNAME."
-            }
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "2"
+                "cost": "2",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "type": "Sacrifice",
                 "target": {
                   "type": "None"
-                }
+                },
+                "type": "Sacrifice"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "Self",
-            "Mode": "Transform",
-            "SpellDescription": "Transform CARDNAME."
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another creature you control enters, you gain 1 life.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME or another creature you control enters, you gain 1 life.",
-            "Destination": "Battlefield",
-            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-            "Origin": "Any",
-            "Execute": "TrigGainLife"
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.Other"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another creature you control dies, target opponent loses 1 life and you gain 1 life.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-            "Execute": "TrigDrain",
-            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, target opponent loses 1 life and you gain 1 life.",
-            "Origin": "Battlefield",
-            "Destination": "Graveyard"
+          "origin": "Battlefield",
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.Other"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

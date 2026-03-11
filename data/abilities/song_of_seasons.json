@@ -2,27 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "RememberFound": "True",
-          "SubAbility": "DBChangeZone1",
-          "Types": "Mountain,Forest,Land.nonMountain+nonForest"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberFound": "True",
-        "SubAbility": "DBChangeZone1",
-        "Types": "Mountain,Forest,Land.nonMountain+nonForest"
-      }
+      "effect": {
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

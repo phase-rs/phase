@@ -1,28 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "At the beginning of your upkeep, put a spore counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have \"Remove two spore counters from this creature: Create a 1/1 green Saproling creature token.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "MakeSaproling",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have \"Remove two spore counters from this creature: Create a 1/1 green Saproling creature token.\""
-      }
+      "modifications": [
+        {
+          "ability": "MakeSaproling",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your upkeep, put a spore counter on CARDNAME.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

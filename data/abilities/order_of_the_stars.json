@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has protection from the chosen color.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
-        "Description": "CARDNAME has protection from the chosen color.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Protection:Card.ChosenColor:chosenColor",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

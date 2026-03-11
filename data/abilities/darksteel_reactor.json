@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME has twenty or more charge counters on it, you win the game.",
       "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigWinGame",
-        "IsPresent": "Card.Self+counters_GEX_CHARGE+YouCtrl",
-        "TriggerDescription": "When CARDNAME has twenty or more charge counters on it, you win the game."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "At the beginning of your upkeep, you may put a charge counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of your upkeep, you may put a charge counter on CARDNAME."
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

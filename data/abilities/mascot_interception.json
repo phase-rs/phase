@@ -2,38 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "LoseControl": "EOT",
-        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature. It gets +2/+0 and gains haste until end of turn.",
-        "SubAbility": "DBPump",
-        "Untap": "True"
-      }
+      "description": "Gain control of target creature until end of turn. Untap that creature. It gets +2/+0 and gains haste until end of turn.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "ValidTarget": "Creature.token",
-        "Description": "This spell costs {3} less to cast if it targets a creature token.",
-        "Amount": "3",
-        "EffectZone": "All"
-      }
+      "description": "This spell costs {3} less to cast if it targets a creature token.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

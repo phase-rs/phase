@@ -1,27 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, create a 1/1 white Cat Soldier creature token with vigilance that's attacking.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME attacks, create a 1/1 white Cat Soldier creature token with vigilance that's attacking.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigTokenAttacking"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME blocks a creature, create a 1/1 white Cat Soldier creature token with vigilance that's blocking that creature.",
       "mode": "AttackerBlocked",
-      "params": {
-        "ValidBlocker": "Card.Self",
-        "Execute": "TrigTokenBlocking",
-        "ValidCard": "Creature",
-        "TriggerDescription": "Whenever NICKNAME blocks a creature, create a 1/1 white Cat Soldier creature token with vigilance that's blocking that creature."
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

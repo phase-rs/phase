@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, each Dragon card in your hand perpetually gains \"This spell costs {1} less to cast.\"",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "Execute": "TrigAnimate",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, each Dragon card in your hand perpetually gains \"This spell costs {1} less to cast.\"",
-        "ValidPlayer": "You"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

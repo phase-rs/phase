@@ -1,21 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and has \"When CARDNAME becomes the target of a spell or ability, sacrifice it.\"",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "2",
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and has \"When CARDNAME becomes the target of a spell or ability, sacrifice it.\"",
-        "AddSVar": "SlasherSac & SlasherTarget",
-        "Condition": "Threshold",
-        "Affected": "Card.Self",
-        "AddToughness": "2",
-        "AddTrigger": "SpellTarget"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

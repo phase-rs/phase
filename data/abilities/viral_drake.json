@@ -2,22 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 U",
+        "type": "Mana"
+      },
+      "description": "Proliferate.",
       "effect": {
         "type": "Proliferate"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Proliferate."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

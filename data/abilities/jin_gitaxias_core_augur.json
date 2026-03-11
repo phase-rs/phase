@@ -1,28 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "At the beginning of your end step, draw seven cards.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Opponent",
-        "Description": "Each opponent's maximum hand size is reduced by seven.",
-        "RaiseMaxHandSize": "-7"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Each opponent's maximum hand size is reduced by seven.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, draw seven cards.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

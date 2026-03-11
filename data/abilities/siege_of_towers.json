@@ -2,29 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target Mountain becomes a 3/1 creature. It's still a land.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "card_type": "Mountain",
+          "type": "Typed"
+        },
         "toughness": 1,
+        "type": "Animate",
         "types": [
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Mountain"
-        }
+        ]
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target Mountain becomes a 3/1 creature. It's still a land.",
-        "Duration": "Permanent"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

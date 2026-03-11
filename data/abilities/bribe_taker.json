@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on CARDNAME.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigPutCounter"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

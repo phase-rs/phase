@@ -1,43 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card",
-        "Static": "True",
-        "TriggerDescription": "You may cast this card from your graveyard. If you do, it enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
-        "TriggerZones": "Stack",
-        "ValidSA": "Spell.MayPlaySource",
-        "Execute": "ReplEffAddCounter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are three or more different kinds of counters among creatures you control, this creature gets +2/+4.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE3",
-        "AddPower": "2",
-        "CheckSVar": "X",
-        "AddToughness": "4",
-        "Description": "As long as there are three or more different kinds of counters among creatures you control, this creature gets +2/+4.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 4
+        }
+      ]
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AffectedZone": "Graveyard",
-        "EffectZone": "Graveyard",
-        "Affected": "Card.Self",
-        "MayPlay": "True",
-        "Description": "You may cast this card from your graveyard. If you do, it enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may cast this card from your graveyard. If you do, it enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "You may cast this card from your graveyard. If you do, it enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
+      "mode": "SpellCast",
+      "secondary": true,
+      "trigger_zones": [
+        "Stack"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME becomes renowned, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle.",
       "mode": "BecomeRenowned",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "When CARDNAME becomes renowned, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle.",
-        "OptionalDecider": "You",
-        "Execute": "TrigSearch"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

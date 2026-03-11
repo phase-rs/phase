@@ -1,32 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Creature.YouCtrl+HasCounters",
-        "Execute": "TrigPutCounter",
-        "Destination": "Any",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on CARDNAME.",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "HasCounters"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of combat on your turn, if CARDNAME has counters on it, you may move all counters from CARDNAME onto target creature.",
       "mode": "Phase",
-      "params": {
-        "OptionalDecider": "You",
-        "Execute": "TrigMoveCounter",
-        "TriggerDescription": "At the beginning of combat on your turn, if CARDNAME has counters on it, you may move all counters from CARDNAME onto target creature.",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self+HasCounters",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat"
-      }
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

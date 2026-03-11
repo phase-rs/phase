@@ -2,30 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "tapXType<2/Creature>",
+        "type": "Mana"
+      },
+      "description": "You may put a creature card from your hand that shares a creature type with each creature tapped this way onto the battlefield.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Hand",
         "destination": "Battlefield",
+        "origin": "Hand",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Creature>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Optional": "True",
-        "ChangeNum": "1",
-        "SpellDescription": "You may put a creature card from your hand that shares a creature type with each creature tapped this way onto the battlefield.",
-        "ChangeType": "Creature.sharesCreatureTypeWithAll Tapped"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

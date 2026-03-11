@@ -1,31 +1,48 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AbilityResolves",
-      "params": {
-        "ActivationLimit": "1",
-        "ValidSource": "Saga.YouCtrl",
-        "TriggerDescription": "Whenever the final chapter ability of a Saga you control resolves, reveal cards from the top of your library until you reveal a Saga card. Put that onto the battlefield and the rest on the bottom of your library in a random order. This ability triggers only once each turn.",
-        "Execute": "TrigDigUntil",
-        "TriggerZones": "Battlefield",
-        "ValidSpellAbility": "Ability.LastChapter"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE4",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as there are four or more lore counters among Sagas you control, CARDNAME has hexproof and indestructible.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE4",
-        "Affected": "Card.Self",
-        "Description": "As long as there are four or more lore counters among Sagas you control, CARDNAME has hexproof and indestructible.",
-        "AddKeyword": "Hexproof & Indestructible",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Indestructible",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever the final chapter ability of a Saga you control resolves, reveal cards from the top of your library until you reveal a Saga card. Put that onto the battlefield and the rest on the bottom of your library in a random order. This ability triggers only once each turn.",
+      "mode": "AbilityResolves",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Saga",
+        "controller": "You",
+        "type": "Typed"
+      }
+    }
+  ]
 }

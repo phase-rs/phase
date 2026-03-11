@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Creature",
-          "SpellDescription": "Regenerate target creature. Draw a card. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, also regenerate each other creature you control.",
-          "SubAbility": "DBDraw"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "SpellDescription": "Regenerate target creature. Draw a card. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, also regenerate each other creature you control.",
-        "SubAbility": "DBDraw"
-      }
+      "description": "Regenerate target creature. Draw a card. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, also regenerate each other creature you control.",
+      "effect": {
+        "description": "Regenerate target creature. Draw a card. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, also regenerate each other creature you control.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

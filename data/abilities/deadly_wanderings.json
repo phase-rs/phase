@@ -1,20 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control exactly one creature, that creature gets +2/+0 and has deathtouch and lifelink.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Deathtouch & Lifelink",
-        "IsPresent": "Creature.YouCtrl",
-        "Description": "As long as you control exactly one creature, that creature gets +2/+0 and has deathtouch and lifelink.",
-        "PresentCompare": "EQ1",
-        "AddPower": "2",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Lifelink",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

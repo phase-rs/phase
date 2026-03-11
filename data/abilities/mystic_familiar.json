@@ -1,20 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1 and has protection from black.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1 and has protection from black.",
-        "AddKeyword": "Protection from black",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Condition": "Threshold"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Protection",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "from",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "black",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

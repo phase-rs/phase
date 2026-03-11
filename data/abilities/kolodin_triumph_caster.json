@@ -1,40 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Mount",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Vehicle.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Mounts and Vehicles you control have haste.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a Mount you control enters, it becomes saddled until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Execute": "TrigSaddle",
-        "TriggerDescription": "Whenever a Mount you control enters, it becomes saddled until end of turn.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Mount.YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Mount",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a Vehicle you control enters, it becomes an artifact creature until end of turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever a Vehicle you control enters, it becomes an artifact creature until end of turn.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Vehicle.YouCtrl",
-        "Origin": "Any",
-        "Execute": "TrigAnimate",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Vehicle",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Mount.YouCtrl,Vehicle.YouCtrl",
-        "AddKeyword": "Haste",
-        "Description": "Mounts and Vehicles you control have haste."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

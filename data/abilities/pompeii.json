@@ -1,45 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put an eruption counter on it.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put an eruption counter on it."
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put an eruption counter on it.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "Phase": "Upkeep",
-        "Secondary": "True",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put an eruption counter on it.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever you roll a blank on the planar die, scry 2. Then put an eruption counter on CARDNAME.",
       "mode": "PlanarDice",
-      "params": {
-        "Result": "Blank",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever you roll a blank on the planar die, scry 2. Then put an eruption counter on CARDNAME.",
-        "Execute": "TrigScry"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "When chaos ensues, CARDNAME deals damage to each creature and each player equal to the number of eruption counters on CARDNAME. Each player sacrifices a land. Then planeswalk.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "When chaos ensues, CARDNAME deals damage to each creature and each player equal to the number of eruption counters on CARDNAME. Each player sacrifices a land. Then planeswalk.",
-        "TriggerZones": "Command",
-        "Execute": "TrigDamageAll"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

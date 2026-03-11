@@ -1,31 +1,77 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 1-2 2/2 Flying",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "2",
-        "AddKeyword": "Flying",
-        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
-        "Description": "LEVEL 1-2 2/2 Flying",
-        "Affected": "Card.Self",
-        "SetPower": "2"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 3+ 4/2 Flying",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "2",
-        "AddKeyword": "Flying",
-        "IsPresent": "Card.Self+counters_GE3_LEVEL",
-        "Description": "LEVEL 3+ 4/2 Flying",
-        "Affected": "Card.Self",
-        "SetPower": "4"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

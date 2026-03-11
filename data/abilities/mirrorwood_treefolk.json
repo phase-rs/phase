@@ -2,35 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "The next time damage would be dealt to CARDNAME this turn, that damage is dealt to any target instead.",
-          "ExileOnMoved": "Battlefield",
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Any",
-          "TgtPrompt": "Select any target to redirect the damage to",
-          "ReplacementEffects": "SelflessDamage"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 R W"
+        "cost": "2 R W",
+        "type": "Mana"
       },
+      "description": "The next time damage would be dealt to CARDNAME this turn, that damage is dealt to any target instead.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The next time damage would be dealt to CARDNAME this turn, that damage is dealt to any target instead.",
-        "ExileOnMoved": "Battlefield",
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Any",
-        "TgtPrompt": "Select any target to redirect the damage to",
-        "ReplacementEffects": "SelflessDamage"
-      }
+      "target_prompt": "Select any target to redirect the damage to"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

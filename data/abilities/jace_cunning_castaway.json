@@ -2,83 +2,52 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Main1",
-          "SpellDescription": "Whenever one or more creatures you control deal combat damage to a player this turn, draw a card, then discard a card.",
-          "Triggers": "TrigDrawDiscard",
-          "Planeswalker": "True",
-          "Duration": "EndOfTurn"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Main1",
-        "SpellDescription": "Whenever one or more creatures you control deal combat damage to a player this turn, draw a card, then discard a card.",
-        "Triggers": "TrigDrawDiscard",
-        "Planeswalker": "True",
-        "Duration": "EndOfTurn"
-      }
+      "description": "Whenever one or more creatures you control deal combat damage to a player this turn, draw a card, then discard a card.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Create a 2/2 blue Illusion creature token with \"When this creature becomes the target of a spell, sacrifice it.\"",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "u_2_2_illusion_illusory",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "TokenOwner": "You",
-        "SpellDescription": "Create a 2/2 blue Illusion creature token with \"When this creature becomes the target of a spell, sacrifice it.\""
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "Planeswalker": "True",
-          "Ultimate": "True",
-          "SpellDescription": "Create two tokens that are copies of CARDNAME, except they're not legendary.",
-          "Defined": "Self",
-          "NonLegendary": "True",
-          "NumCopies": "2"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -5
+        "amount": -5,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Ultimate": "True",
-        "SpellDescription": "Create two tokens that are copies of CARDNAME, except they're not legendary.",
-        "Defined": "Self",
-        "NonLegendary": "True",
-        "NumCopies": "2"
-      }
+      "description": "Create two tokens that are copies of CARDNAME, except they're not legendary.",
+      "effect": {
+        "description": "Create two tokens that are copies of CARDNAME, except they're not legendary.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

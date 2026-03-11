@@ -2,42 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "OIL",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3 R"
+            "cost": "3 R",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromGrave<1/CARDNAME>"
+            "cost": "ExileFromGrave<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{p:You} puts a number of oil counters equal to CARDNAME's power on {c:Targeted}.",
-        "PrecostDesc": "Oil Scavenge {3}{R}",
-        "SpellDescription": "Put a number of oil counters equal to this card's power on target creature. Oil Scavenge only as a sorcery.)",
-        "SorcerySpeed": "True",
-        "CostDesc": "({3}{R}, Exile this card from your graveyard:",
-        "ActivationZone": "Graveyard"
-      }
+      "description": "Put a number of oil counters equal to this card's power on target creature. Oil Scavenge only as a sorcery.)",
+      "effect": {
+        "count": 1,
+        "counter_type": "OIL",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

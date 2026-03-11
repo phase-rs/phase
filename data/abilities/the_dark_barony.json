@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a nonblack card is put into a player's graveyard from anywhere, that player loses 1 life.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.!token+nonBlack",
-        "Execute": "TrigLoseLife",
-        "TriggerDescription": "Whenever a nonblack card is put into a player's graveyard from anywhere, that player loses 1 life.",
-        "Origin": "Any",
-        "TriggerZones": "Command"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, each opponent discards a card.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, each opponent discards a card.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

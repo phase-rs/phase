@@ -1,32 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "DelTrigReturn",
-        "ValidCard": "Creature.Other+!token+YouCtrl",
-        "TriggerDescription": "Whenever another nontoken creature you control dies, return that card to its owner's hand at the beginning of the next end step."
-      }
+      "description": "If a creature an opponent controls would die, exile it instead.",
+      "event": "Moved"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "If a creature an opponent controls would die, exile it instead.",
-        "ValidLKI": "Creature.OppCtrl",
-        "Destination": "Graveyard",
-        "Origin": "Battlefield",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "Exile"
+      "description": "Whenever another nontoken creature you control dies, return that card to its owner's hand at the beginning of the next end step.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "faces": []
+  ]
 }

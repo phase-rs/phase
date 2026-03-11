@@ -1,29 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
       "mode": "Taps",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
       "mode": "AbilityCast",
-      "params": {
-        "ValidSA": "Activated.!hasTapCost",
-        "Execute": "TrigDamage",
-        "Secondary": "True",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever an artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

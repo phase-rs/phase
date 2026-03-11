@@ -1,29 +1,59 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Mountain",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control a Mountain.",
       "mode": "Continuous",
-      "params": {
-        "AddPower": "1",
-        "Affected": "Card.Self",
-        "AddToughness": "1",
-        "IsPresent": "Mountain.YouCtrl",
-        "Description": "CARDNAME gets +1/+1 as long as you control a Mountain."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Plains",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME gets +1/+1 as long as you control a Plains.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME gets +1/+1 as long as you control a Plains.",
-        "Affected": "Card.Self",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "IsPresent": "Plains.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

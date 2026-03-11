@@ -2,46 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "Any",
-        "params": {
-          "SpellDescription": "Choose a color. Target player adds three mana of the chosen color for each artifact sacrificed this way.",
-          "XMin": "1",
-          "ValidTgts": "Player",
-          "StackDescription": "SpellDescription",
-          "Amount": "Y",
-          "Chooser": "You"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a color. Target player adds three mana of the chosen color for each artifact sacrificed this way.",
-        "XMin": "1",
-        "ValidTgts": "Player",
-        "StackDescription": "SpellDescription",
-        "Amount": "Y",
-        "Chooser": "You"
-      }
+      "description": "Choose a color. Target player adds three mana of the chosen color for each artifact sacrificed this way.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

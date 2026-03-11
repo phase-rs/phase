@@ -1,41 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Drawn",
-      "params": {
-        "Execute": "TrigToken",
-        "ValidCard": "Card.YouCtrl",
-        "OpponentTurn": "True",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw a card during an opponent's turn, create a 1/1 blue Tentacle creature token."
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "ValidCard": "Tentacle.YouCtrl",
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "Whenever a Tentacle you control dies, untap up to one target Kraken and put a stun counter on up to one target nonland permanent."
+      "description": "CARDNAME enters tapped with nine stun counters on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated",
-        "Description": "CARDNAME enters tapped with nine stun counters on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped"
+      "description": "Whenever you draw a card during an opponent's turn, create a 1/1 blue Tentacle creature token.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
+      }
+    },
+    {
+      "description": "Whenever a Tentacle you control dies, untap up to one target Kraken and put a stun counter on up to one target nonland permanent.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Tentacle",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

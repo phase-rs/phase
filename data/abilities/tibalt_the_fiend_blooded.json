@@ -2,70 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SubAbility": "DBDiscard",
-        "SpellDescription": "Draw a card, then discard a card at random."
-      }
+      "description": "Draw a card, then discard a card at random.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -4,
+        "type": "Loyalty"
+      },
+      "description": "CARDNAME deals damage equal to the number of cards in target player's hand to that player.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Player"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -4
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals damage equal to the number of cards in target player's hand to that player.",
-        "Planeswalker": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -6,
+        "type": "Loyalty"
+      },
+      "description": "Gain control of all creatures until end of turn. Untap them. They gain haste until end of turn.",
       "effect": {
-        "type": "GainControl",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "GainControl"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -6
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "Ultimate": "True",
-        "SpellDescription": "Gain control of all creatures until end of turn. Untap them. They gain haste until end of turn.",
-        "Planeswalker": "True",
-        "LoseControl": "EOT",
-        "AddKWs": "Haste",
-        "AllValid": "Creature",
-        "Untap": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

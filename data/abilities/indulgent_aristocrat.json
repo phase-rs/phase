@@ -2,47 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PutCounterAll",
-        "params": {
-          "CounterType": "P1P1",
-          "SpellDescription": "Put a +1/+1 counter on each Vampire you control.",
-          "ValidCards": "Vampire.YouCtrl",
-          "AILogic": "AtOppEOT",
-          "ValidCardsDesc": "Vampire you control",
-          "CounterNum": "1"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterType": "P1P1",
-        "SpellDescription": "Put a +1/+1 counter on each Vampire you control.",
-        "ValidCards": "Vampire.YouCtrl",
-        "AILogic": "AtOppEOT",
-        "ValidCardsDesc": "Vampire you control",
-        "CounterNum": "1"
-      }
+      "description": "Put a +1/+1 counter on each Vampire you control.",
+      "effect": {
+        "description": "Put a +1/+1 counter on each Vampire you control.",
+        "name": "PutCounterAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

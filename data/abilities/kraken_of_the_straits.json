@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures with power less than the number of Islands you control can't block CARDNAME.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidBlocker": "Creature.powerLEX",
-        "ValidAttacker": "Creature.Self",
-        "Description": "Creatures with power less than the number of Islands you control can't block CARDNAME."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

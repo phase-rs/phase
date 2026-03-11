@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDamage",
-          "SpellDescription": "Players can't gain life this turn. Damage can't be prevented this turn.",
-          "StaticAbilities": "STCantGain,STCantPrevent",
-          "AILogic": "Burn"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDamage",
-        "SpellDescription": "Players can't gain life this turn. Damage can't be prevented this turn.",
-        "StaticAbilities": "STCantGain,STCantPrevent",
-        "AILogic": "Burn"
-      }
+      "description": "Players can't gain life this turn. Damage can't be prevented this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

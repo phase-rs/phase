@@ -1,41 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigTap",
-        "TriggerDescription": "When this Aura enters, tap enchanted creature.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Permanent.EnchantedBy",
-        "Secondary": "True",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated."
-      }
+      "description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen",
-        "ValidCard": "Permanent.EnchantedBy",
-        "Description": "Enchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated."
+      "description": "When this Aura enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

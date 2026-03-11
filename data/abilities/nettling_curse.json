@@ -2,53 +2,56 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "IsCurse": "True",
-          "SpellDescription": "Enchanted creature attacks this turn if able.",
-          "StaticAbilities": "MustAttack",
-          "ExileOnMoved": "Battlefield",
-          "RememberObjects": "Enchanted"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 R"
+        "cost": "1 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "SpellDescription": "Enchanted creature attacks this turn if able.",
-        "StaticAbilities": "MustAttack",
-        "ExileOnMoved": "Battlefield",
-        "RememberObjects": "Enchanted"
-      }
+      "description": "Enchanted creature attacks this turn if able.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.AttachedBy",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLifeAttack"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
       "mode": "Blocks",
-      "params": {
-        "Secondary": "True",
-        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
-        "ValidCard": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigLoseLifeBlock"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

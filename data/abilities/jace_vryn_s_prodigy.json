@@ -1,128 +1,80 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 1
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "StackDescription": "SpellDescription",
-            "SpellDescription": "Draw a card, then discard a card. If there are five or more cards in your graveyard, exile CARDNAME, then return him to the battlefield transformed under his owner's control.",
-            "SubAbility": "DBDiscard"
-          }
+          "description": "Draw a card, then discard a card. If there are five or more cards in your graveyard, exile CARDNAME, then return him to the battlefield transformed under his owner's control.",
+          "effect": {
+            "count": 1,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": 1,
+            "type": "Loyalty"
+          },
+          "description": "Up to one target creature gets -2/-0 until your next turn.",
+          "duration": "UntilYourNextTurn",
           "effect": {
-            "type": "Pump",
             "power": -2,
-            "toughness": 0,
             "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "TargetMin": "0",
-            "IsCurse": "True",
-            "TargetMax": "1",
-            "Duration": "UntilYourNextTurn",
-            "SpellDescription": "Up to one target creature gets -2/-0 until your next turn.",
-            "Planeswalker": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "SpellDescription": "You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard this turn, exile it instead.",
-              "StaticAbilities": "Play",
-              "TgtPrompt": "Select target instant or sorcery card",
-              "ExileOnMoved": "Graveyard",
-              "TgtZone": "Graveyard",
-              "RememberObjects": "Targeted",
-              "SubAbility": "DBEffect",
-              "Planeswalker": "True",
-              "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -3
+            "amount": -3,
+            "type": "Loyalty"
           },
+          "description": "You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard this turn, exile it instead.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard this turn, exile it instead.",
-            "StaticAbilities": "Play",
-            "TgtPrompt": "Select target instant or sorcery card",
-            "ExileOnMoved": "Graveyard",
-            "TgtZone": "Graveyard",
-            "RememberObjects": "Targeted",
-            "SubAbility": "DBEffect",
-            "Planeswalker": "True",
-            "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
-          }
+          "target_prompt": "Select target instant or sorcery card"
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Image": "emblem_jace_telepath_unbound",
-              "Planeswalker": "True",
-              "Duration": "Permanent",
-              "AILogic": "Always",
-              "Name": "Emblem — Jace, Telepath Unbound",
-              "Ultimate": "True",
-              "SpellDescription": "You get an emblem with \"Whenever you cast a spell, target opponent mills five cards.\"",
-              "Triggers": "TrigSpellCast"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -9
+            "amount": -9,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Image": "emblem_jace_telepath_unbound",
-            "Planeswalker": "True",
-            "Duration": "Permanent",
-            "AILogic": "Always",
-            "Name": "Emblem — Jace, Telepath Unbound",
-            "Ultimate": "True",
-            "SpellDescription": "You get an emblem with \"Whenever you cast a spell, target opponent mills five cards.\"",
-            "Triggers": "TrigSpellCast"
-          }
+          "description": "You get an emblem with \"Whenever you cast a spell, target opponent mills five cards.\"",
+          "duration": "Permanent",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

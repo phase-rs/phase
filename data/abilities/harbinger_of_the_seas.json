@@ -1,18 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "type": "Typed"
+      },
+      "description": "Nonbasic lands are Islands.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.nonBasic",
-        "AddType": "Island",
-        "Description": "Nonbasic lands are Islands.",
-        "RemoveLandTypes": "True"
-      }
+      "modifications": [
+        {
+          "core_type": "Island",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you control a creature with a +1/+1 counter on it that attacked this turn, draw a card.",
-        "Execute": "TrigDraw",
-        "ValidPlayer": "You",
-        "IsPresent": "Creature.YouCtrl+counters_GE1_P1P1+attackedThisTurn"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have training. (Whenever a creature you control attacks with another creature with greater power, put a +1/+1 counter on the creature with lesser power.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Training",
-        "Affected": "Creature.YouCtrl",
-        "Description": "Creatures you control have training. (Whenever a creature you control attacks with another creature with greater power, put a +1/+1 counter on the creature with lesser power.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Training",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of your end step, if you control a creature with a +1/+1 counter on it that attacked this turn, draw a card.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

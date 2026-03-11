@@ -1,21 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted permanent is a colorless Clue artifact with \"{2}, Sacrifice this artifact: Draw a card\" and loses all other abilities. (It's no longer a creature or planeswalker.)",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.EnchantedBy",
-        "SetColor": "Colorless",
-        "AddType": "Clue & Artifact",
-        "RemoveCardTypes": "True",
-        "RemoveAllAbilities": "True",
-        "Description": "Enchanted permanent is a colorless Clue artifact with \"{2}, Sacrifice this artifact: Draw a card\" and loses all other abilities. (It's no longer a creature or planeswalker.)",
-        "AddAbility": "Clue"
-      }
+      "modifications": [
+        {
+          "ability": "Clue",
+          "type": "AddAbility"
+        },
+        {
+          "type": "RemoveAllAbilities"
+        },
+        {
+          "core_type": "Clue & Artifact",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

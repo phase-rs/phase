@@ -1,32 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever you cast a spell, your opponents can't cast spells with the same mana value as that spell until your next turn.",
           "mode": "SpellCast",
-          "params": {
-            "ValidCard": "Card",
-            "TriggerDescription": "Whenever you cast a spell, your opponents can't cast spells with the same mana value as that spell until your next turn.",
-            "ValidActivatingPlayer": "You",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigEffect"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

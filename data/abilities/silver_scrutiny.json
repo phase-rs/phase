@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw X cards."
-      }
+      "description": "Draw X cards.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "params": {
-        "Caster": "You",
-        "ValidSA": "Spell.XCostLE3",
-        "Description": "You may cast CARDNAME as though it had flash if X is 3 or less.",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All"
-      }
+      "description": "You may cast CARDNAME as though it had flash if X is 3 or less.",
+      "effect_zone": "Battlefield",
+      "mode": "CastWithFlash"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

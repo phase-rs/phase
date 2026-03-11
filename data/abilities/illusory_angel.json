@@ -1,19 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "SVarCompare": "LE0",
-        "ValidCard": "Card.Self",
-        "EffectZone": "All",
-        "Description": "Cast this spell only if you've cast another spell this turn.",
-        "CheckSVar": "X"
-      }
+      "condition": {
+        "compare": "LE0",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "Cast this spell only if you've cast another spell this turn.",
+      "effect_zone": "Battlefield",
+      "mode": "CantBeCast"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

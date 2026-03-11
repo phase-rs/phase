@@ -1,60 +1,63 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.DamagedBy",
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Execute": "TrigPump"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "DamagedBy"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Destination": "Any",
-        "Origin": "Graveyard",
-        "Execute": "LoseTrack",
-        "Static": "True",
-        "ValidCard": "Card.IsRemembered"
+      "origin": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Execute": "DBCleanup",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Static": "True"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
-      "mode": "TurnBegin",
-      "params": {
-        "Static": "True",
-        "Execute": "DBCleanup2"
-      }
+      "mode": "TurnBegin"
     },
     {
+      "description": "At the beginning of each end step, if a creature dealt damage by CARDNAME this turn died, put that card onto the battlefield under your control. Sacrifice it when you lose control of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each end step, if a creature dealt damage by CARDNAME this turn died, put that card onto the battlefield under your control. Sacrifice it when you lose control of CARDNAME.",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Card.Self",
-        "Execute": "TrigChange",
-        "ValidPlayer": "Player",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

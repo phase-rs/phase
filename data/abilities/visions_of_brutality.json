@@ -1,26 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDealtOnce",
-      "params": {
-        "TriggerDescription": "Whenever enchanted creature deals damage, its controller loses that much life.",
-        "ValidSource": "Card.AttachedBy",
-        "Execute": "TrigLoseLife",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "Description": "Enchanted creature can't block.",
-        "ValidCard": "Creature.EnchantedBy"
-      }
+      "description": "Enchanted creature can't block.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever enchanted creature deals damage, its controller loses that much life.",
+      "mode": "DamageDealtOnce",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more creatures attack, you may have target attacking creature gain double strike until end of turn.",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever one or more creatures attack, you may have target attacking creature gain double strike until end of turn.",
-        "Execute": "TrigPump",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

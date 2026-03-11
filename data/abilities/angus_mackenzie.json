@@ -2,38 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Fog",
-        "params": {
-          "ActivationPhases": "Upkeep->Declare Blockers",
-          "SpellDescription": "Prevent all combat damage that would be dealt this turn. Activate only before the combat damage step.",
-          "ActivationFirstCombat": "True"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G W U"
+            "cost": "G W U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Upkeep->Declare Blockers",
-        "SpellDescription": "Prevent all combat damage that would be dealt this turn. Activate only before the combat damage step.",
-        "ActivationFirstCombat": "True"
-      }
+      "description": "Prevent all combat damage that would be dealt this turn. Activate only before the combat damage step.",
+      "effect": {
+        "description": "Prevent all combat damage that would be dealt this turn. Activate only before the combat damage step.",
+        "name": "Fog",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

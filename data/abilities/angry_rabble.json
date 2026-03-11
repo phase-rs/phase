@@ -2,40 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "5 R",
+        "type": "Mana"
+      },
+      "description": "Put two +1/+1 counters on this creature. Activate only as a sorcery.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 2,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "5 R"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put two +1/+1 counters on this creature. Activate only as a sorcery.",
-        "SorcerySpeed": "True",
-        "Defined": "Self"
-      }
+      "kind": "Activated",
+      "sorcery_speed": true,
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell with mana value 4 or greater, this creature deals 1 damage to each opponent.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.cmcGE4",
-        "TriggerDescription": "Whenever you cast a spell with mana value 4 or greater, this creature deals 1 damage to each opponent."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

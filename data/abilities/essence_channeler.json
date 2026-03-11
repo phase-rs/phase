@@ -1,38 +1,52 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "LifeGained",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter1",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME dies, put its counters on target creature you control.",
-        "Execute": "TrigPutCounter2",
-        "Origin": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've lost life this turn, CARDNAME has flying and vigilance.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying & Vigilance",
-        "Description": "As long as you've lost life this turn, CARDNAME has flying and vigilance."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you gain life, put a +1/+1 counter on CARDNAME.",
+      "mode": "LifeGained",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    },
+    {
+      "description": "When CARDNAME dies, put its counters on target creature you control.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

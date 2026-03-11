@@ -1,18 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME deals damage to a creature, CARDNAME deals 3 damage to that creature's controller and 3 damage to you.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDealDamage",
-        "ValidSource": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME deals damage to a creature, CARDNAME deals 3 damage to that creature's controller and 3 damage to you.",
-        "ValidTarget": "Creature"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

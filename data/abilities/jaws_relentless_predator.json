@@ -1,39 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Whenever NICKNAME deals combat damage to a player, create that many Blood tokens.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create that many Blood tokens.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     },
     {
+      "description": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent.",
       "mode": "Sacrificed",
-      "params": {
-        "TriggerDescription": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Artifact.nonCreature",
-        "Execute": "TrigDamage"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent.",
       "mode": "Destroyed",
-      "params": {
-        "Secondary": "True",
-        "Execute": "TrigDamage",
-        "ValidCard": "Artifact.nonCreature",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "properties": [
+          {
+            "type": "NonType",
+            "value": "Creature"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

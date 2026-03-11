@@ -1,20 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an Island or Swamp you control enters, draft a card from CARDNAME's spellbook.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever an Island or Swamp you control enters, draft a card from CARDNAME's spellbook.",
-        "Execute": "TrigDraft",
-        "ValidCard": "Island.YouCtrl,Swamp.YouCtrl",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Island",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Swamp.YouCtrl"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,52 +2,40 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PumpAll",
-        "power": 3,
-        "toughness": 3,
-        "target": {
-          "type": "All",
-          "filter": ""
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G G G"
+        "cost": "2 G G G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.Elf+YouCtrl",
-        "KW": "Trample",
-        "SpellDescription": "Elf creatures you control get +3/+3 and gain trample until end of turn."
-      }
+      "description": "Elf creatures you control get +3/+3 and gain trample until end of turn.",
+      "effect": {
+        "power": 3,
+        "target": {
+          "type": "Any"
+        },
+        "toughness": 3,
+        "type": "PumpAll"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "ValidTgts": "Elf.Other",
-          "TgtPrompt": "Select another target Elf",
-          "SpellDescription": "Regenerate another target Elf."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "G"
+        "cost": "G",
+        "type": "Mana"
       },
+      "description": "Regenerate another target Elf.",
+      "effect": {
+        "description": "Regenerate another target Elf.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Elf.Other",
-        "TgtPrompt": "Select another target Elf",
-        "SpellDescription": "Regenerate another target Elf."
-      }
+      "target_prompt": "Select another target Elf"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

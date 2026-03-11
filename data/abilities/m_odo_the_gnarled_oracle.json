@@ -2,92 +2,54 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "SpellDescription": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
-          "Shuffle": "True",
-          "Valid": "Creature.cmcLEX",
-          "FoundDestination": "Battlefield",
-          "ValidTgts": "Player",
-          "GainControl": "True",
-          "CostDesc": "Eminence — {X}, Discard a card:",
-          "RevealedDestination": "Library"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
-        "Shuffle": "True",
-        "Valid": "Creature.cmcLEX",
-        "FoundDestination": "Battlefield",
-        "ValidTgts": "Player",
-        "GainControl": "True",
-        "CostDesc": "Eminence — {X}, Discard a card:",
-        "RevealedDestination": "Library"
-      }
+      "description": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
+      "effect": {
+        "description": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "ValidTgts": "Player",
-          "RevealedDestination": "Library",
-          "Shuffle": "True",
-          "Valid": "Creature.cmcLEX",
-          "GainControl": "True",
-          "ActivationZone": "Command",
-          "CostDesc": "Eminence — {X}, Discard a card:",
-          "SpellDescription": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
-          "FoundDestination": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X"
+            "cost": "X",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "RevealedDestination": "Library",
-        "Shuffle": "True",
-        "Valid": "Creature.cmcLEX",
-        "GainControl": "True",
-        "ActivationZone": "Command",
-        "CostDesc": "Eminence — {X}, Discard a card:",
-        "SpellDescription": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
-        "FoundDestination": "Battlefield"
-      }
+      "description": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
+      "effect": {
+        "description": "Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if CARDNAME is on the battlefield or in the command zone.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,54 +1,118 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Beast",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has trample as long as you control a Beast,",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "IsPresent": "Beast.YouCtrl",
-        "Description": "CARDNAME has trample as long as you control a Beast,",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Goblin",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has haste as long as you control a Goblin,",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "Haste",
-        "IsPresent": "Goblin.YouCtrl",
-        "Description": "CARDNAME has haste as long as you control a Goblin,"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Soldier",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has first strike as long as you control a Soldier,",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "AddKeyword": "First Strike",
-        "IsPresent": "Soldier.YouCtrl",
-        "Description": "CARDNAME has first strike as long as you control a Soldier,"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Wizard",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has flying as long as you control a Wizard,",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Card.Self",
-        "IsPresent": "Wizard.YouCtrl",
-        "Description": "CARDNAME has flying as long as you control a Wizard,",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Zombie",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has \"{B}: Regenerate CARDNAME\" as long as you control a Zombie.",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Regen",
-        "IsPresent": "Zombie.YouCtrl",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has \"{B}: Regenerate CARDNAME\" as long as you control a Zombie."
-      }
+      "modifications": [
+        {
+          "ability": "Regen",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

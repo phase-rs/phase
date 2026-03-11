@@ -2,30 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Equipment.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Attach target Equipment you control to target creature you control.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Equipment",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "BrassSquireAttach",
-        "StackDescription": "None",
-        "TgtPrompt": "Select target equipment you control",
-        "SpellDescription": "Attach target Equipment you control to target creature you control."
-      }
+      "target_prompt": "Select target equipment you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

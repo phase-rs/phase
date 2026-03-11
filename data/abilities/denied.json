@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "NameCard",
-        "params": {
-          "SpellDescription": "Choose a card name,",
-          "SubAbility": "DBTarget",
-          "Defined": "You",
-          "AILogic": "MostProminentInHumanDeck"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose a card name,",
-        "SubAbility": "DBTarget",
-        "Defined": "You",
-        "AILogic": "MostProminentInHumanDeck"
-      }
+      "description": "Choose a card name,",
+      "effect": {
+        "description": "Choose a card name,",
+        "name": "NameCard",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,79 +1,88 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
-            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-            "Origin": "Battlefield",
-            "Destination": "Graveyard",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigGainLife1"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.Other"
+              }
+            ],
+            "type": "Typed"
           }
         },
         {
+          "description": "At the beginning of your end step, if you gained 3 or more life this turn, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Execute": "TrigTransform",
-            "Phase": "End of Turn",
-            "TriggerDescription": "At the beginning of your end step, if you gained 3 or more life this turn, transform CARDNAME.",
-            "TriggerZones": "Battlefield",
-            "SVarCompare": "GE3",
-            "ValidPlayer": "You",
-            "CheckSVar": "YouLifeGained"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 B",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gains deathtouch until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 0,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 B"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "Deathtouch",
-            "SpellDescription": "CARDNAME gains deathtouch until end of turn.",
-            "Defined": "Self"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
-            "Destination": "Graveyard",
-            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
-            "Origin": "Battlefield",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigGainLife2"
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self,Creature.Other"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

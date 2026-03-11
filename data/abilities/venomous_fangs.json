@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature deals damage to a creature, destroy the other creature.",
       "mode": "DamageDone",
-      "params": {
-        "ValidTarget": "Creature",
-        "ValidSource": "Card.AttachedBy",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever enchanted creature deals damage to a creature, destroy the other creature.",
-        "Execute": "TrigDestroy"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

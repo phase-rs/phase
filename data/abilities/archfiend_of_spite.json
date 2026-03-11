@@ -1,19 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a source an opponent controls deals damage to CARDNAME, that source's controller loses that much life unless they sacrifice that many permanents.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
-        "ValidTarget": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBLoseLife",
-        "TriggerDescription": "Whenever a source an opponent controls deals damage to CARDNAME, that source's controller loses that much life unless they sacrifice that many permanents."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppCtrl,Emblem.OppCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

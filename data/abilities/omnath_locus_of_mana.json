@@ -1,28 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You don't lose unspent green mana as steps and phases end.",
       "mode": {
         "Other": "UnspentMana"
-      },
-      "params": {
-        "ManaType": "Green",
-        "ValidPlayer": "You",
-        "Description": "You don't lose unspent green mana as steps and phases end."
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "AddToughness": "X",
-        "Description": "CARDNAME gets +1/+1 for each unspent green mana you have."
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each unspent green mana you have.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

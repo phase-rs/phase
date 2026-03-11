@@ -2,32 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Repeat",
-        "params": {
-          "SpellDescription": "For each number between 1 and X, conjure a duplicate of a random creature card with that mana value onto the battlefield. X can't be 0.",
-          "RepeatSubAbility": "DBNameCard",
-          "MaxRepeat": "X",
-          "StackDescription": "REP . X can't be 0._."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "XMin1 X G U"
+        "cost": "XMin1 X G U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "For each number between 1 and X, conjure a duplicate of a random creature card with that mana value onto the battlefield. X can't be 0.",
-        "RepeatSubAbility": "DBNameCard",
-        "MaxRepeat": "X",
-        "StackDescription": "REP . X can't be 0._."
-      }
+      "description": "For each number between 1 and X, conjure a duplicate of a random creature card with that mana value onto the battlefield. X can't be 0.",
+      "effect": {
+        "description": "For each number between 1 and X, conjure a duplicate of a random creature card with that mana value onto the battlefield. X can't be 0.",
+        "name": "Repeat",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

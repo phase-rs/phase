@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen type in addition to its other types.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME is the chosen type in addition to its other types.",
-        "Affected": "Card.Self",
-        "AddType": "ChosenType"
-      }
+      "modifications": [
+        {
+          "core_type": "ChosenType",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

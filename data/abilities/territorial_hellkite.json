@@ -1,38 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, choose an opponent at random that CARDNAME didn't attack during your last combat. CARDNAME attacks that player this combat if able. If you can't choose an opponent this way, tap CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigChoose",
-        "TriggerDescription": "At the beginning of combat on your turn, choose an opponent at random that CARDNAME didn't attack during your last combat. CARDNAME attacks that player this combat if able. If you can't choose an opponent this way, tap CARDNAME.",
-        "ValidPlayer": "You",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Execute": "TrigClearRem",
-        "Static": "True"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "Execute": "DBCleanup",
-        "Phase": "EndCombat",
-        "ValidPlayer": "You",
-        "IsPresent": "Card.!attackedThisTurn+Self"
-      }
+      "phase": "EndCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

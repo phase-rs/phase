@@ -2,41 +2,46 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Cleric.Other"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 W"
+        "cost": "2 W",
+        "type": "Mana"
       },
+      "description": "Another target Cleric gains lifelink until end of turn.",
+      "effect": {
+        "power": 0,
+        "target": {
+          "filters": [
+            {
+              "card_type": "Cleric",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Another target Cleric gains lifelink until end of turn.",
-        "TgtPrompt": "Select another target Cleric",
-        "KW": "Lifelink"
-      }
+      "target_prompt": "Select another target Cleric"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life for the first time each turn, create a 1/1 white Cat creature token.",
       "mode": "LifeGained",
-      "params": {
-        "TriggerDescription": "Whenever you gain life for the first time each turn, create a 1/1 white Cat creature token.",
-        "Execute": "DBToken",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "FirstTime": "True"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

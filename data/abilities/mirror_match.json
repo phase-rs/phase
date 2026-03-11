@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "ActivationPhases": "Declare Blockers",
-          "UseImprinted": "True",
-          "RepeatSubAbility": "DBCloneAndBlock",
-          "RepeatCards": "Creature.attackingYouOrYourPW",
-          "ChangeZoneTable": "True",
-          "SubAbility": "DelTrig",
-          "SpellDescription": "Cast this spell only during the declare blockers step. For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationPhases": "Declare Blockers",
-        "UseImprinted": "True",
-        "RepeatSubAbility": "DBCloneAndBlock",
-        "RepeatCards": "Creature.attackingYouOrYourPW",
-        "ChangeZoneTable": "True",
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Cast this spell only during the declare blockers step. For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat."
-      }
+      "description": "Cast this spell only during the declare blockers step. For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.",
+      "effect": {
+        "description": "Cast this spell only during the declare blockers step. For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

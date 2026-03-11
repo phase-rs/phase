@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Heroic — Whenever you cast a spell that targets CARDNAME, CARDNAME gets +2/+0 and gains intimidate until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, CARDNAME gets +2/+0 and gains intimidate until end of turn.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPump",
-        "TargetsValid": "Card.Self"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

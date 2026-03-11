@@ -2,32 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player chooses from among the permanents they control an artifact, a creature, an enchantment, and a land, then sacrifices the rest.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Permanent"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Mandatory": "True",
-        "StackDescription": "SpellDescription",
-        "Defined": "Player",
-        "ControlledByPlayer": "Chooser",
-        "Reveal": "True",
-        "SubAbility": "SacAllOthers",
-        "ChooseEach": "Artifact & Creature & Enchantment & Land",
-        "SpellDescription": "Each player chooses from among the permanents they control an artifact, a creature, an enchantment, and a land, then sacrifices the rest."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

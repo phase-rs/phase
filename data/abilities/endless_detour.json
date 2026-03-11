@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield,Stack,Graveyard",
-        "destination": "Library",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.inZoneStack,Permanent.nonLand,Card.inZoneGraveyard"
-        }
-      },
       "cost": null,
+      "description": "The owner of target spell, nonland permanent, or card in a graveyard puts it on the top or bottom of their library.",
+      "effect": {
+        "destination": "Library",
+        "origin": "Battlefield,Stack,Graveyard",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The owner of target spell, nonland permanent, or card in a graveyard puts it on the top or bottom of their library.",
-        "TgtZone": "Battlefield,Stack,Graveyard",
-        "AlternativeDecider": "TargetedOwner",
-        "LibraryPositionAlternative": "-1",
-        "TgtPrompt": "Select target spell, nonland permanent, or card in a graveyard",
-        "DestinationAlternative": "Library",
-        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library."
-      }
+      "target_prompt": "Select target spell, nonland permanent, or card in a graveyard"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

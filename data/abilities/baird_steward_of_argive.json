@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
       "mode": {
         "Other": "CantAttackUnless"
-      },
-      "params": {
-        "ValidCard": "Creature",
-        "Cost": "1",
-        "Description": "Creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
-        "Target": "You,Planeswalker.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

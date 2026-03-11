@@ -1,18 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control get +1/+0 and have \"At the beginning of your upkeep, this creature deals 1 damage to you.\"",
       "mode": "Continuous",
-      "params": {
-        "AddTrigger": "JuzamTrigger",
-        "Description": "Creatures you control get +1/+0 and have \"At the beginning of your upkeep, this creature deals 1 damage to you.\"",
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

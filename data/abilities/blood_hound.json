@@ -1,29 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you're dealt damage, you may put that many +1/+1 counters on CARDNAME.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever you're dealt damage, you may put that many +1/+1 counters on CARDNAME.",
-        "TriggerZones": "Battlefield",
-        "ValidTarget": "You",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, remove all +1/+1 counters from CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, remove all +1/+1 counters from CARDNAME.",
-        "Execute": "TrigRemove"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "Draw",
-      "params": {
-        "ReplaceWith": "DrawTwo",
-        "Description": "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
-        "ActiveZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Hellbent": "True"
-      }
+      "description": "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+      "event": "Draw"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

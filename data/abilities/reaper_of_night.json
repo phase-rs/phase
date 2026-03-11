@@ -1,51 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever CARDNAME attacks, if defending player has two or fewer cards in hand, it gains flying until end of turn.",
           "mode": "Attacks",
-          "params": {
-            "PresentZone": "Hand",
-            "TriggerDescription": "Whenever CARDNAME attacks, if defending player has two or fewer cards in hand, it gains flying until end of turn.",
-            "Execute": "TrigPump",
-            "IsPresent": "Card.DefenderCtrl",
-            "PresentCompare": "LE2",
-            "ValidCard": "Card.Self"
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Target opponent discards two cards. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Discard",
             "count": 2,
             "target": {
-              "type": "Filtered",
-              "filter": "Opponent"
-            }
+              "type": "Player"
+            },
+            "type": "Discard"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Target opponent discards two cards. (Then exile this card. You may cast the creature later from exile.)",
-            "Mode": "TgtChoose"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

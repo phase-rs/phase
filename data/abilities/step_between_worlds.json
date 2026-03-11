@@ -2,37 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Defined": "Player",
-          "StackDescription": "SpellDescription",
-          "ShowChoice": "ExceptSelf",
-          "TempRemember": "Chooser",
-          "Choices": "Stargate,Homebody",
-          "SpellDescription": "Each player may shuffle their hand and graveyard into their library. Each player who does draws seven cards. Exile CARDNAME.",
-          "AILogic": "Timetwister",
-          "SubAbility": "DBTimetwister"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "StackDescription": "SpellDescription",
-        "ShowChoice": "ExceptSelf",
-        "TempRemember": "Chooser",
-        "Choices": "Stargate,Homebody",
-        "SpellDescription": "Each player may shuffle their hand and graveyard into their library. Each player who does draws seven cards. Exile CARDNAME.",
-        "AILogic": "Timetwister",
-        "SubAbility": "DBTimetwister"
-      }
+      "description": "Each player may shuffle their hand and graveyard into their library. Each player who does draws seven cards. Exile CARDNAME.",
+      "effect": {
+        "description": "Each player may shuffle their hand and graveyard into their library. Each player who does draws seven cards. Exile CARDNAME.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

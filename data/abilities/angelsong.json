@@ -2,23 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Fog",
-        "params": {
-          "SpellDescription": "Prevent all combat damage that would be dealt this turn."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent all combat damage that would be dealt this turn."
-      }
+      "description": "Prevent all combat damage that would be dealt this turn.",
+      "effect": {
+        "description": "Prevent all combat damage that would be dealt this turn.",
+        "name": "Fog",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

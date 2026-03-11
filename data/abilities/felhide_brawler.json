@@ -1,18 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "PresentCompare": "EQ0",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Minotaur.Other+YouCtrl",
-        "Description": "CARDNAME can't block unless you control another Minotaur."
-      }
+      "condition": {
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Minotaur",
+              "controller": "You",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME can't block unless you control another Minotaur.",
+      "mode": "CantBlock"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,30 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, return target nonland permanent card with mana value 2 or less from your graveyard to the your hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigChange",
-        "TriggerDescription": "When this creature enters, return target nonland permanent card with mana value 2 or less from your graveyard to the your hand.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Flurry — Whenever you cast your second spell each turn, tap target creature an opponent controls.",
       "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "EQ2",
-        "TriggerDescription": "Flurry — Whenever you cast your second spell each turn, tap target creature an opponent controls.",
-        "ValidActivatingPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl",
-        "Execute": "TrigTap"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

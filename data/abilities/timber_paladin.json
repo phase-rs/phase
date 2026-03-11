@@ -1,44 +1,91 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as CARDNAME is enchanted by exactly one Aura, it has base power and toughness 3/3.",
       "mode": "Continuous",
-      "params": {
-        "CheckSVar": "X",
-        "SVarCompare": "EQ1",
-        "SetToughness": "3",
-        "Description": "As long as CARDNAME is enchanted by exactly one Aura, it has base power and toughness 3/3.",
-        "Affected": "Card.Self",
-        "SetPower": "3"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 3
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "EQ2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as CARDNAME is enchanted by exactly two Auras, it has base power and toughness 5/5 and vigilance.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "EQ2",
-        "Affected": "Card.Self",
-        "SetPower": "5",
-        "CheckSVar": "X",
-        "AddKeyword": "Vigilance",
-        "Description": "As long as CARDNAME is enchanted by exactly two Auras, it has base power and toughness 5/5 and vigilance.",
-        "SetToughness": "5"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 5
+        },
+        {
+          "type": "SetToughness",
+          "value": 5
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE3",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as CARDNAME is enchanted by three or more Auras, it has base power and toughness 10/10, vigilance, and trample.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE3",
-        "SetPower": "10",
-        "SetToughness": "10",
-        "Affected": "Card.Self",
-        "AddKeyword": "Vigilance & Trample",
-        "CheckSVar": "X",
-        "Description": "As long as CARDNAME is enchanted by three or more Auras, it has base power and toughness 10/10, vigilance, and trample."
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 10
+        },
+        {
+          "type": "SetToughness",
+          "value": 10
+        },
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

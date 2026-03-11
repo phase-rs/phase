@@ -2,35 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "GenericChoice",
-        "params": {
-          "Defined": "Opponent",
-          "TempRemember": "Chooser",
-          "Secretly": "True",
-          "SubAbility": "DBSilenceBranch",
-          "StackDescription": "SpellDescription",
-          "Choices": "Silence,Snitch",
-          "SpellDescription": "Each opponent secretly chooses silence or snitch, then the choices are revealed. If each opponent chose silence, CARDNAME deals 4 damage to each of them. If each opponent chose snitch, CARDNAME deals 8 damage to each of them. Otherwise, CARDNAME deals 12 damage to each opponent who chose silence."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Opponent",
-        "TempRemember": "Chooser",
-        "Secretly": "True",
-        "SubAbility": "DBSilenceBranch",
-        "StackDescription": "SpellDescription",
-        "Choices": "Silence,Snitch",
-        "SpellDescription": "Each opponent secretly chooses silence or snitch, then the choices are revealed. If each opponent chose silence, CARDNAME deals 4 damage to each of them. If each opponent chose snitch, CARDNAME deals 8 damage to each of them. Otherwise, CARDNAME deals 12 damage to each opponent who chose silence."
-      }
+      "description": "Each opponent secretly chooses silence or snitch, then the choices are revealed. If each opponent chose silence, CARDNAME deals 4 damage to each of them. If each opponent chose snitch, CARDNAME deals 8 damage to each of them. Otherwise, CARDNAME deals 12 damage to each opponent who chose silence.",
+      "effect": {
+        "description": "Each opponent secretly chooses silence or snitch, then the choices are revealed. If each opponent chose silence, CARDNAME deals 4 damage to each of them. If each opponent chose snitch, CARDNAME deals 8 damage to each of them. Otherwise, CARDNAME deals 12 damage to each opponent who chose silence.",
+        "name": "GenericChoice",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

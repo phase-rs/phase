@@ -2,81 +2,58 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": 1,
+        "type": "Loyalty"
+      },
+      "description": "Choose up to one target creature. Put a +1/+1 counter and a counter from among flying, first strike, lifelink, or vigilance on it.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "",
         "count": 1,
+        "counter_type": "",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": 1
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "CounterTypes": "P1P1,ChosenFromList",
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "TargetMax": "1",
-        "TypeList": "Flying,First Strike,Lifelink,Vigilance",
-        "SpellDescription": "Choose up to one target creature. Put a +1/+1 counter and a counter from among flying, first strike, lifelink, or vigilance on it."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -3,
+        "type": "Loyalty"
+      },
+      "description": "Look at the top seven cards of your library. You may put a permanent card with mana value 3 or less from among them onto the battlefield with a shield counter on it. Put the rest on the bottom of your library in a random order.",
       "effect": {
-        "type": "Dig",
         "count": 7,
-        "destination": "Battlefield"
+        "destination": "Battlefield",
+        "type": "Dig"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -3
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "WithCounters": "Shield",
-        "ForceRevealToController": "True",
-        "RestRandomOrder": "True",
-        "Optional": "True",
-        "ChangeValid": "Permanent.cmcLE3",
-        "Planeswalker": "True",
-        "SpellDescription": "Look at the top seven cards of your library. You may put a permanent card with mana value 3 or less from among them onto the battlefield with a shield counter on it. Put the rest on the bottom of your library in a random order.",
-        "ChangeValidDesc": "permanent card with mana value 3 or less",
-        "ChangeNum": "1",
-        "PrimaryPrompt": "You may choose a permanent card with mana value 3 or less to put on the battlefield"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -7,
+        "type": "Loyalty"
+      },
+      "description": "Create five 3/3 white Angel creature tokens with flying.",
       "effect": {
-        "type": "Token",
+        "colors": [],
+        "keywords": [],
         "name": "w_3_3_angel_flying",
         "power": 0,
         "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
+        "type": "Token",
+        "types": []
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -7
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create five 3/3 white Angel creature tokens with flying.",
-        "Planeswalker": "True",
-        "TokenAmount": "5",
-        "Ultimate": "True"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,58 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ExileOnMoved": "Battlefield",
-          "AILogic": "Pump",
-          "ValidTgts": "Creature.powerLE2+YouCtrl",
-          "TgtPrompt": "Select target creature you control with power 2 or less",
-          "StaticAbilities": "Unblockable",
-          "RememberObjects": "Targeted",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "SpellDescription": "Target creature with power 2 or less can't be blocked this turn."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1"
+            "cost": "1",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Target creature with power 2 or less can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ExileOnMoved": "Battlefield",
-        "AILogic": "Pump",
-        "ValidTgts": "Creature.powerLE2+YouCtrl",
-        "TgtPrompt": "Select target creature you control with power 2 or less",
-        "StaticAbilities": "Unblockable",
-        "RememberObjects": "Targeted",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "SpellDescription": "Target creature with power 2 or less can't be blocked this turn."
-      }
+      "target_prompt": "Select target creature you control with power 2 or less"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, create a 1/1 red Goblin creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When this creature enters, create a 1/1 red Goblin creature token.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigToken",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

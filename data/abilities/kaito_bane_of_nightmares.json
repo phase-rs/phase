@@ -2,88 +2,84 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "Permanent",
-          "Planeswalker": "True",
-          "SpellDescription": "You get an emblem with \"Ninjas you control get +1/+1.\"",
-          "Name": "Emblem — Kaito, Bane of Nightmares",
-          "Image": "emblem_kaito_bane_of_nightmares",
-          "StaticAbilities": "STNinjaBoost"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "Planeswalker": "True",
-        "SpellDescription": "You get an emblem with \"Ninjas you control get +1/+1.\"",
-        "Name": "Emblem — Kaito, Bane of Nightmares",
-        "Image": "emblem_kaito_bane_of_nightmares",
-        "StaticAbilities": "STNinjaBoost"
-      }
+      "description": "You get an emblem with \"Ninjas you control get +1/+1.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Surveil",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "Amount": "2",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "Surveil 2. Then draw a card for each opponent who lost life this turn."
-      }
+      "description": "Surveil 2. Then draw a card for each opponent who lost life this turn.",
+      "effect": {
+        "count": 1,
+        "type": "Surveil"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "amount": -2,
+        "type": "Loyalty"
+      },
+      "description": "Tap target creature. Put two stun counters on it.",
       "effect": {
-        "type": "Tap",
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
       },
-      "cost": {
-        "type": "Loyalty",
-        "amount": -2
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Tap target creature. Put two stun counters on it.",
-        "TgtPrompt": "Choose target creature to tap.",
-        "SubAbility": "DBPutCounter"
-      }
+      "target_prompt": "Choose target creature to tap."
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "During your turn, as long as NICKNAME has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent.Self+counters_GE1_LOYALTY",
-        "SetToughness": "4",
-        "Condition": "PlayerTurn",
-        "AddType": "Creature & Ninja",
-        "SetPower": "3",
-        "AddKeyword": "Hexproof",
-        "Description": "During your turn, as long as NICKNAME has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof.",
-        "RemoveCardTypes": "True"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        },
+        {
+          "keyword": "Hexproof",
+          "type": "AddKeyword"
+        },
+        {
+          "core_type": "Creature & Ninja",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

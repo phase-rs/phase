@@ -1,30 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you tap a land for mana, add one mana of any type that land produced.",
       "mode": "TapsForMana",
-      "params": {
-        "Activator": "You",
-        "TriggerZones": "Battlefield",
-        "Static": "True",
-        "TriggerDescription": "Whenever you tap a land for mana, add one mana of any type that land produced.",
-        "Execute": "TrigMana",
-        "ValidCard": "Land"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an opponent taps a land for mana, that land doesn't untap during its controller's next untap step.",
       "mode": "TapsForMana",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerDescription": "Whenever an opponent taps a land for mana, that land doesn't untap during its controller's next untap step.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Land",
-        "Activator": "Opponent"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Land",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

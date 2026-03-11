@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "MinTotalCMC": "20",
-          "StackDescription": "SpellDescription",
-          "SpellDescription": "Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or more.",
-          "FoundDestination": "Exile",
-          "Defined": "Opponent",
-          "RevealedDestination": "Exile"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "MinTotalCMC": "20",
-        "StackDescription": "SpellDescription",
-        "SpellDescription": "Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or more.",
-        "FoundDestination": "Exile",
-        "Defined": "Opponent",
-        "RevealedDestination": "Exile"
-      }
+      "description": "Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or more.",
+      "effect": {
+        "description": "Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or more.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

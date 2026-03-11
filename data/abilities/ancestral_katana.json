@@ -1,29 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigImmediateTrig",
-        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
-        "Alone": "True",
-        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, you may pay {1}. When you do, attach CARDNAME to it."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +2/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +2/+1.",
-        "AddPower": "2",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a Samurai or Warrior you control attacks alone, you may pay {1}. When you do, attach CARDNAME to it.",
+      "mode": "Attacks",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Samurai",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Warrior.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

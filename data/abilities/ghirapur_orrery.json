@@ -1,31 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "IsPresent": "Card.ActivePlayerCtrl",
-        "ValidPlayer": "Player",
-        "PresentCompare": "EQ0",
-        "Phase": "Upkeep",
-        "TriggerDescription": "At the beginning of each player's upkeep, if that player has no cards in hand, that player draws three cards.",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigDraw",
-        "PresentZone": "Hand"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Each player may play an additional land on each of their turns.",
-        "AdjustLandPlays": "1",
-        "Affected": "Player"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "Each player may play an additional land on each of their turns.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of each player's upkeep, if that player has no cards in hand, that player draws three cards.",
+      "mode": "Phase",
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

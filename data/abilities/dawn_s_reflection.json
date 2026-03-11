@@ -1,19 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted land is tapped for mana, its controller adds an additional two mana in any combination of colors.",
       "mode": "TapsForMana",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.EnchantedBy",
-        "TriggerDescription": "Whenever enchanted land is tapped for mana, its controller adds an additional two mana in any combination of colors.",
-        "Execute": "TrigMana",
-        "Static": "True"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

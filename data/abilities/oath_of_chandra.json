@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, it deals 3 damage to target creature an opponent controls.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to target creature an opponent controls.",
-        "Execute": "TrigDealDamage1",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of each end step, if a planeswalker entered the battlefield under your control this turn, CARDNAME deals 2 damage to each opponent.",
       "mode": "Phase",
-      "params": {
-        "CheckSVar": "X",
-        "TriggerDescription": "At the beginning of each end step, if a planeswalker entered the battlefield under your control this turn, CARDNAME deals 2 damage to each opponent.",
-        "Execute": "TrigDealDamage2",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,19 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has first strike and \"{T}, Unattach CARDNAME: This creature deals damage equal to its power to target player or planeswalker.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddKeyword": "First Strike",
-        "Description": "Equipped creature has first strike and \"{T}, Unattach CARDNAME: This creature deals damage equal to its power to target player or planeswalker.\"",
-        "AddAbility": "SurestrikeTridentDmg",
-        "AddSVar": "SurestrikeTridentX"
-      }
+      "modifications": [
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "ability": "SurestrikeTridentDmg",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

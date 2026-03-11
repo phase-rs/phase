@@ -2,42 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "ActivationFirstCombat": "True",
-          "StaticAbilities": "Unblockable",
-          "ActivationPhases": "Upkeep->BeginCombat",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "SpellDescription": "Target creature can't be blocked this turn. Activate only during your turn, before attackers are declared.",
-          "RememberObjects": "Targeted",
-          "ExileOnMoved": "Battlefield",
-          "ValidTgts": "Creature",
-          "AILogic": "Pump",
-          "PlayerTurn": "True"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ActivationFirstCombat": "True",
-        "StaticAbilities": "Unblockable",
-        "ActivationPhases": "Upkeep->BeginCombat",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "SpellDescription": "Target creature can't be blocked this turn. Activate only during your turn, before attackers are declared.",
-        "RememberObjects": "Targeted",
-        "ExileOnMoved": "Battlefield",
-        "ValidTgts": "Creature",
-        "AILogic": "Pump",
-        "PlayerTurn": "True"
-      }
+      "description": "Target creature can't be blocked this turn. Activate only during your turn, before attackers are declared.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

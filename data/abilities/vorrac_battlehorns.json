@@ -1,28 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature has trample and can't be blocked by more than one creature.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Trample",
-        "Description": "Equipped creature has trample and can't be blocked by more than one creature.",
-        "Affected": "Creature.EquippedBy"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "description": "Equipped creature can't be blocked by more than one creature.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Secondary": "True",
-        "Max": "1",
-        "ValidCard": "Creature.EquippedBy",
-        "Description": "Equipped creature can't be blocked by more than one creature."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

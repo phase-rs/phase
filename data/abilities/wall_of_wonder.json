@@ -2,28 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 U U",
+        "type": "Mana"
+      },
+      "description": "CARDNAME gets +4/-4 until end of turn and can attack this turn as though it didn't have defender.",
       "effect": {
-        "type": "Pump",
         "power": 4,
-        "toughness": -4,
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": -4,
+        "type": "Pump"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 U U"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "SpellDescription": "CARDNAME gets +4/-4 until end of turn and can attack this turn as though it didn't have defender."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

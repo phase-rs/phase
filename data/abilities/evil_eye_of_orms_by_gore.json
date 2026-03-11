@@ -1,26 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "ValidCard": "Creature.nonEye+YouCtrl",
-        "Description": "Non-Eye creatures you control can't attack."
-      }
+      "description": "Non-Eye creatures you control can't attack.",
+      "mode": "CantAttack"
     },
     {
+      "description": "CARDNAME can't be blocked except by Walls.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Creature.nonWall",
-        "Description": "CARDNAME can't be blocked except by Walls."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

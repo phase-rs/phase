@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a kicked spell, you may remove two +1/+1 counters from NICKNAME. If you do, copy that spell. You may choose new targets for that copy. (A copy of a permanent spell becomes a token.)",
       "mode": "SpellCast",
-      "params": {
-        "Execute": "DBRemoveCounters",
-        "ValidSA": "Spell.Kicked",
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a kicked spell, you may remove two +1/+1 counters from NICKNAME. If you do, copy that spell. You may choose new targets for that copy. (A copy of a permanent spell becomes a token.)"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

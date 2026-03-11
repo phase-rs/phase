@@ -1,30 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Execute": "TrigDealDamage",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
-        "ValidCard": "Card.Self,Creature.Lhurgoyf+YouCtrl",
-        "Origin": "Any"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "SetToughness": "Y",
-        "CharacteristicDefining": "True",
-        "Description": "CARDNAME's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
-        "SetPower": "X"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.Lhurgoyf"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

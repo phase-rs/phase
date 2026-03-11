@@ -2,63 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "Choose target creature. Until your next turn, if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead.",
-          "Duration": "UntilYourNextTurn",
-          "RememberObjects": "Targeted",
-          "ReplacementEffects": "TripleCombatDamage",
-          "Planeswalker": "True",
-          "ValidTgts": "Creature",
-          "AILogic": "Pump"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 0
+        "amount": 0,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target creature. Until your next turn, if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead.",
-        "Duration": "UntilYourNextTurn",
-        "RememberObjects": "Targeted",
-        "ReplacementEffects": "TripleCombatDamage",
-        "Planeswalker": "True",
-        "ValidTgts": "Creature",
-        "AILogic": "Pump"
-      }
+      "description": "Choose target creature. Until your next turn, if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead.",
+      "duration": "UntilYourNextTurn",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "SubCounter<X/LOYALTY>",
+        "type": "Mana"
+      },
+      "description": "CARDNAME deals X damage to each of up to three targets.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "DealDamage"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<X/LOYALTY>"
-      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "CARDNAME deals X damage to each of up to three targets.",
-        "TargetMax": "3",
-        "Planeswalker": "True",
-        "TargetMin": "0",
-        "Ultimate": "True",
-        "TgtPrompt": "Choose up to three targets"
-      }
+      "target_prompt": "Choose up to three targets"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

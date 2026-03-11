@@ -1,19 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Forest",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is in your graveyard and you control a Forest, creatures you control have trample.",
+      "effect_zone": "Graveyard",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "Affected": "Creature.YouCtrl",
-        "IsPresent": "Forest.YouCtrl",
-        "Description": "As long as CARDNAME is in your graveyard and you control a Forest, creatures you control have trample.",
-        "AddKeyword": "Trample"
-      }
+      "modifications": [
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

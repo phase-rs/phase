@@ -2,39 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Charm",
-        "params": {
-          "Choices": "Pump,Coward,Trample",
-          "ChoiceRestriction": "ThisTurn"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1"
+        "cost": "1",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Pump,Coward,Trample",
-        "ChoiceRestriction": "ThisTurn"
-      }
+      "effect": {
+        "name": "Charm",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Cowards can't block Warriors.",
       "mode": {
         "Other": "CantBlockBy"
-      },
-      "params": {
-        "Description": "Cowards can't block Warriors.",
-        "ValidBlocker": "Creature.Coward",
-        "ValidAttacker": "Creature.Warrior"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

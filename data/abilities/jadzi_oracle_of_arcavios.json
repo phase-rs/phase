@@ -1,73 +1,66 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "Discard<1/Card>",
+            "type": "Mana"
+          },
+          "description": "Return CARDNAME to its owner's hand.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
             "destination": "Hand",
+            "origin": "Battlefield",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "Discard<1/Card>"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Return CARDNAME to its owner's hand."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, reveal the top card of your library. If it's a nonland card, you may cast it by paying {1} rather than paying its mana cost. If it's a land card, put it onto the battlefield.",
           "mode": "SpellCastOrCopy",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigDig",
-            "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, reveal the top card of your library. If it's a nonland card, you may cast it by paying {1} rather than paying its mana cost. If it's a land card, put it onto the battlefield.",
-            "ValidActivatingPlayer": "You",
-            "ValidCard": "Instant,Sorcery"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Instant,Sorcery",
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "You may put any number of land cards from your hand onto the battlefield.",
           "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
             "destination": "Battlefield",
+            "origin": "Hand",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "ChangeZone"
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeNum": "X",
-            "ChangeType": "Land",
-            "SpellDescription": "You may put any number of land cards from your hand onto the battlefield.",
-            "SubAbility": "DBBounce",
-            "StackDescription": "{p:You} puts any number of land cards from your hand onto the battlefield."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

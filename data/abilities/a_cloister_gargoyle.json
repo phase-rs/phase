@@ -1,31 +1,41 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBVenture",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, venture into the dungeon."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE1",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you've completed a dungeon, CARDNAME gets +3/+0 and has flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "As long as you've completed a dungeon, CARDNAME gets +3/+0 and has flying.",
-        "AddPower": "3",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying",
-        "CheckSVar": "X",
-        "SVarCompare": "GE1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, venture into the dungeon.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

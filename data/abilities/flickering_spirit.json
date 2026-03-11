@@ -2,29 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "3 W",
+        "type": "Mana"
+      },
+      "description": "Exile CARDNAME, then return it to the battlefield under its owner's control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Battlefield",
         "destination": "Exile",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "3 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBReturn",
-        "RememberChanged": "True",
-        "SpellDescription": "Exile CARDNAME, then return it to the battlefield under its owner's control."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

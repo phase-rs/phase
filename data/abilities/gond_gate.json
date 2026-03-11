@@ -2,62 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "Amount": "1",
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "1",
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "ColorOrType": "Color",
-          "Valid": "Gate.YouCtrl",
-          "SpellDescription": "Add one mana of any color that a Gate you control could produce.",
-          "ReflectProperty": "Produce"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ColorOrType": "Color",
-        "Valid": "Gate.YouCtrl",
-        "SpellDescription": "Add one mana of any color that a Gate you control could produce.",
-        "ReflectProperty": "Produce"
-      }
+      "description": "Add one mana of any color that a Gate you control could produce.",
+      "effect": {
+        "description": "Add one mana of any color that a Gate you control could produce.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "Gates you control enter untapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "Description": "Gates you control enter untapped.",
-        "ReplaceWith": "ETBUntapped",
-        "ValidCard": "Gate.YouCtrl",
-        "ActiveZones": "Battlefield",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "card_type": "Gate",
+        "controller": "You",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

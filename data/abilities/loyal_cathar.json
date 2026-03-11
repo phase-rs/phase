@@ -1,40 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME dies, return it to the battlefield transformed under your control at the beginning of the next end step.",
+          "destination": "Graveyard",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigDelay",
-            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under your control at the beginning of the next end step.",
-            "Origin": "Battlefield",
-            "Destination": "Graveyard",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBlock",
-          "params": {
-            "Description": "CARDNAME can't block.",
-            "ValidCard": "Card.Self"
-          }
+          "description": "CARDNAME can't block.",
+          "mode": "CantBlock"
         }
       ],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

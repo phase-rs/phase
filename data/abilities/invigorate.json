@@ -2,38 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 4,
-        "toughness": 4,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target creature gets +4/+4 until end of turn."
-      }
+      "description": "Target creature gets +4/+4 until end of turn.",
+      "effect": {
+        "power": 4,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 4,
+        "type": "Pump"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "condition": {
+        "filter": {
+          "card_type": "Forest",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "Cost": "GainLife<3/Player.Opponent>",
-        "ValidSA": "Spell.Self",
-        "IsPresent": "Forest.YouCtrl",
-        "EffectZone": "All",
-        "Description": "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

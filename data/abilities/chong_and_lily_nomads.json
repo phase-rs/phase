@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever one or more Bards you control attack, ABILITY",
       "mode": "AttackersDeclared",
-      "params": {
-        "TriggerDescription": "Whenever one or more Bards you control attack, ABILITY",
-        "ValidAttackers": "Bard.YouCtrl",
-        "Execute": "TrigCharm",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

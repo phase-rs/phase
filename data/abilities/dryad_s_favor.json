@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has forestwalk. (It can't be blocked as long as defending player controls a Forest.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted creature has forestwalk. (It can't be blocked as long as defending player controls a Forest.)",
-        "Affected": "Creature.EnchantedBy",
-        "AddKeyword": "Landwalk:Forest"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Forest",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

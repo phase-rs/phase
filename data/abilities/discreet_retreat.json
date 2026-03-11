@@ -1,29 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ActivatorThisTurnCast": "EQ1",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever you cast your first outlaw spell each turn, you draw a card and you lose 1 life.",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Outlaw",
-        "ValidActivatingPlayer": "You"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Add two mana of any one color. Spend this mana only to cast outlaw spells or activate abilities from outlaw sources.\" (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws.)",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "RetreatTap",
-        "Affected": "Card.EnchantedBy",
-        "Description": "Enchanted land has \"{T}: Add two mana of any one color. Spend this mana only to cast outlaw spells or activate abilities from outlaw sources.\" (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws.)"
-      }
+      "modifications": [
+        {
+          "ability": "RetreatTap",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast your first outlaw spell each turn, you draw a card and you lose 1 life.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Outlaw"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME is the chosen color. (It's still an artifact.)",
-        "Affected": "Card.Self",
-        "SetColor": "ChosenColor"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME is the chosen color. (It's still an artifact.)",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

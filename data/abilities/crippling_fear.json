@@ -2,31 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseType",
-        "params": {
-          "Type": "Creature",
-          "SubAbility": "DBPumpOther",
-          "SpellDescription": "Choose a creature type. Creatures that aren't of the chosen type get -3/-3 until end of turn.",
-          "AILogic": "MostProminentComputerControls",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Type": "Creature",
-        "SubAbility": "DBPumpOther",
-        "SpellDescription": "Choose a creature type. Creatures that aren't of the chosen type get -3/-3 until end of turn.",
-        "AILogic": "MostProminentComputerControls",
-        "Defined": "You"
-      }
+      "description": "Choose a creature type. Creatures that aren't of the chosen type get -3/-3 until end of turn.",
+      "effect": {
+        "description": "Choose a creature type. Creatures that aren't of the chosen type get -3/-3 until end of turn.",
+        "name": "ChooseType",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

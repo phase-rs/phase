@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If an instant or sorcery would be put in a graveyard from anywhere, exile it instead.",
       "event": "Moved",
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Destination": "Graveyard",
-        "ReplaceWith": "Exile",
-        "Description": "If an instant or sorcery would be put in a graveyard from anywhere, exile it instead.",
-        "ValidCard": "Instant,Sorcery"
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

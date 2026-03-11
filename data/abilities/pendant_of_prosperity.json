@@ -2,43 +2,37 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "Draw a card, then you may put a land card from your hand onto the battlefield. CARDNAME's owner draws a card, then that player may put a land card from their hand onto the battlefield."
-      }
+      "description": "Draw a card, then you may put a land card from your hand onto the battlefield. CARDNAME's owner draws a card, then that player may put a land card from their hand onto the battlefield.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters under the control of an opponent of your choice.",
       "event": "Moved",
-      "params": {
-        "Layer": "Control",
-        "Description": "CARDNAME enters under the control of an opponent of your choice.",
-        "ReplaceWith": "DBChooseOpp",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a Pirate you control attacks, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Pirate.YouCtrl",
-        "TriggerDescription": "Whenever a Pirate you control attacks, ABILITY",
-        "Execute": "TrigCharm",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Pirate",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

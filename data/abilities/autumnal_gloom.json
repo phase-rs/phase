@@ -1,53 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "B",
+            "type": "Mana"
+          },
+          "description": "Mill a card.",
           "effect": {
-            "type": "Mill",
             "count": 1,
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Mill"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "B"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "Defined": "You",
-            "SpellDescription": "Mill a card."
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Delirium — At the beginning of your end step, if there are four or more card types among cards in your graveyard, transform CARDNAME.",
           "mode": "Phase",
-          "params": {
-            "Delirium": "True",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "TriggerDescription": "Delirium — At the beginning of your end step, if there are four or more card types among cards in your graveyard, transform CARDNAME.",
-            "Phase": "End of Turn",
-            "ValidPlayer": "You"
-          }
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

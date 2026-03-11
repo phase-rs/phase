@@ -2,59 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R R",
-        "params": {
-          "SpellDescription": "Add {R}{R}."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}{R}."
-      }
+      "description": "Add {R}{R}.",
+      "effect": {
+        "produced": [
+          "Red",
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "ExiledWithSource"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Exile",
+      "condition": {
+        "compare": "",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with this creature.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "Whenever you sacrifice a nontoken permanent, exile the top card of your library.",
       "mode": "Sacrificed",
-      "params": {
-        "ValidCard": "Permanent.!token",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigExile",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you sacrifice a nontoken permanent, exile the top card of your library."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Permanent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "MayPlay": "True",
-        "CheckSVar": "X",
-        "Description": "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with this creature.",
-        "Affected": "Card.ExiledWithSource",
-        "AffectedZone": "Exile",
-        "Condition": "PlayerTurn"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

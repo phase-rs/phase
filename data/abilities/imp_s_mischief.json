@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChangeTargets",
-        "params": {
-          "TargetType": "Spell.singleTarget",
-          "SpellDescription": "Change the target of target spell with a single target. You lose life equal to that spell's mana value.",
-          "TgtPrompt": "Select target spell with a single target",
-          "ValidTgts": "Card",
-          "SubAbility": "DBLoseLife"
-        }
-      },
       "cost": null,
+      "description": "Change the target of target spell with a single target. You lose life equal to that spell's mana value.",
+      "effect": {
+        "description": "Change the target of target spell with a single target. You lose life equal to that spell's mana value.",
+        "name": "ChangeTargets",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Spell.singleTarget",
-        "SpellDescription": "Change the target of target spell with a single target. You lose life equal to that spell's mana value.",
-        "TgtPrompt": "Select target spell with a single target",
-        "ValidTgts": "Card",
-        "SubAbility": "DBLoseLife"
-      }
+      "target_prompt": "Select target spell with a single target"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

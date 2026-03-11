@@ -1,32 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Cleric.Other+YouCtrl,Angel.Other+YouCtrl",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "Whenever another Angel or Cleric you control enters, you gain life equal to that creature's toughness.",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "condition": {
+        "compare": "GEY",
+        "type": "CheckSVar",
+        "var": "Z"
+      },
+      "description": "As long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "2",
-        "CheckSVar": "Z",
-        "AddToughness": "2",
-        "SVarCompare": "GEY",
-        "Description": "As long as you have at least 7 life more than your starting life total, creatures you control get +2/+2."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever another Angel or Cleric you control enters, you gain life equal to that creature's toughness.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Cleric",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "YouCtrl,Angel.Other"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      }
+    }
+  ]
 }

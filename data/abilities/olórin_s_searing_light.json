@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "RepeatEach",
-        "params": {
-          "SpellDescription": "Each opponent exiles a creature with the greatest power among creatures that player controls. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, CARDNAME deals damage to each opponent equal to the power of the creature they exiled.",
-          "SubAbility": "DBExile",
-          "RepeatSubAbility": "DBChooseCard",
-          "RepeatPlayers": "Player.Opponent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Each opponent exiles a creature with the greatest power among creatures that player controls. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, CARDNAME deals damage to each opponent equal to the power of the creature they exiled.",
-        "SubAbility": "DBExile",
-        "RepeatSubAbility": "DBChooseCard",
-        "RepeatPlayers": "Player.Opponent"
-      }
+      "description": "Each opponent exiles a creature with the greatest power among creatures that player controls. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, CARDNAME deals damage to each opponent equal to the power of the creature they exiled.",
+      "effect": {
+        "description": "Each opponent exiles a creature with the greatest power among creatures that player controls. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, CARDNAME deals damage to each opponent equal to the power of the creature they exiled.",
+        "name": "RepeatEach",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

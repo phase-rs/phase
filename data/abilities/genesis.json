@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may pay {2}{G}. If you do, return target creature card from your graveyard to your hand.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may pay {2}{G}. If you do, return target creature card from your graveyard to your hand.",
-        "Execute": "TrigChange",
-        "PresentZone": "Graveyard",
-        "Phase": "Upkeep",
-        "TriggerZones": "Graveyard",
-        "IsPresent": "Card.StrictlySelf"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Graveyard"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

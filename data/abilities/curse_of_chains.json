@@ -1,18 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each upkeep, tap enchanted creature.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigTap",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of each upkeep, tap enchanted creature.",
-        "Phase": "Upkeep"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Archer.YouCtrl+inZoneBattlefield",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBDraw",
-        "TriggerDescription": "Whenever an Archer you control deals damage to a creature, you may pay {2}. If you do, draw a card.",
-        "ValidTarget": "Creature"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap all Archers you control during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "Description": "Untap all Archers you control during each other player's untap step.",
-        "ValidCard": "Archer.YouCtrl"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever an Archer you control deals damage to a creature, you may pay {2}. If you do, draw a card.",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Archer",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "Creature",
+        "type": "Typed"
+      }
+    }
+  ]
 }

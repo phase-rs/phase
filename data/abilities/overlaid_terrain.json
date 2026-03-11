@@ -1,17 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Lands you control have \"{T}: Add two mana of any one color.\"",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Land.YouCtrl",
-        "AddAbility": "AnyMana",
-        "Description": "Lands you control have \"{T}: Add two mana of any one color.\""
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

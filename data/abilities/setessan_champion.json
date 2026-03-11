@@ -1,20 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Constellation — Whenever an enchantment you control enters, put a +1/+1 counter on CARDNAME and draw a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigCounter",
-        "ValidCard": "Enchantment.YouCtrl",
-        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, put a +1/+1 counter on CARDNAME and draw a card.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "TriggerZones": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Enchantment",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

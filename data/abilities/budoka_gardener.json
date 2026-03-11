@@ -1,74 +1,65 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Any"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ChangeNum": "1",
-            "SubAbility": "DBFlip",
-            "SpellDescription": "You may put a land card from your hand onto the battlefield. If you control ten or more lands, flip CARDNAME.",
-            "ChangeType": "Land",
-            "Optional": "You"
-          }
+          "description": "You may put a land card from your hand onto the battlefield. If you control ten or more lands, flip CARDNAME.",
+          "effect": {
+            "destination": "Battlefield",
+            "origin": "Hand",
+            "target": {
+              "type": "Any"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "g_x_x_elemental",
-            "power": 0,
-            "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
-          },
           "cost": {
-            "type": "Composite",
             "costs": [
               {
-                "type": "Mana",
-                "cost": "4 G G"
+                "cost": "4 G G",
+                "type": "Mana"
               },
               {
                 "type": "Tap"
               }
-            ]
+            ],
+            "type": "Composite"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create an X/X green Elemental creature token, where X is the number of lands you control."
-          }
+          "description": "Create an X/X green Elemental creature token, where X is the number of lands you control.",
+          "effect": {
+            "colors": [],
+            "keywords": [],
+            "name": "g_x_x_elemental",
+            "power": 0,
+            "toughness": 0,
+            "type": "Token",
+            "types": []
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

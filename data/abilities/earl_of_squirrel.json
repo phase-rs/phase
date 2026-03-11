@@ -1,39 +1,72 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "DamageDone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Card.Self",
-        "Execute": "TrigToken",
-        "Static": "True",
-        "TriggerDescription": "Squirrellink (Damage dealt by this creature also causes you to create that many 1/1 green Squirrel creature tokens.)"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Token"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Creature tokens you control are Squirrels in addition to their other creature types.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "Description": "Creature tokens you control are Squirrels in addition to their other creature types.",
-        "Affected": "Creature.token+YouCtrl",
-        "EffectZone": "Battlefield",
-        "AddType": "Squirrel"
-      }
+      "modifications": [
+        {
+          "core_type": "Squirrel",
+          "type": "AddType"
+        }
+      ]
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Squirrel",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Squirrels you control get +1/+1.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Affected": "Squirrel.Other+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Other Squirrels you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Squirrellink (Damage dealt by this creature also causes you to create that many 1/1 green Squirrel creature tokens.)",
+      "mode": "DamageDone",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

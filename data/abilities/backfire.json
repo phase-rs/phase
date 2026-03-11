@@ -1,19 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever enchanted creature deals damage to you, CARDNAME deals that much damage to that creature's controller.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.AttachedBy",
-        "ValidTarget": "You",
-        "Execute": "TrigDealDamage",
-        "TriggerDescription": "Whenever enchanted creature deals damage to you, CARDNAME deals that much damage to that creature's controller.",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "AttachedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

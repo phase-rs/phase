@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipOntoBattlefield",
-        "params": {
-          "SpellDescription": "Flip CARDNAME onto the playing area from a height of at least one foot. CARDNAME deals 3 damage to each creature it lands on. Tap all creatures dealt damage by CARDNAME. If CARDNAME doesn't turn completely over at least once during the flip, it has no effect.",
-          "AILogic": "DamageCreatures",
-          "StackDescription": "SpellDescription",
-          "SubAbility": "DBDamageTouched"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Flip CARDNAME onto the playing area from a height of at least one foot. CARDNAME deals 3 damage to each creature it lands on. Tap all creatures dealt damage by CARDNAME. If CARDNAME doesn't turn completely over at least once during the flip, it has no effect.",
-        "AILogic": "DamageCreatures",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBDamageTouched"
-      }
+      "description": "Flip CARDNAME onto the playing area from a height of at least one foot. CARDNAME deals 3 damage to each creature it lands on. Tap all creatures dealt damage by CARDNAME. If CARDNAME doesn't turn completely over at least once during the flip, it has no effect.",
+      "effect": {
+        "description": "Flip CARDNAME onto the playing area from a height of at least one foot. CARDNAME deals 3 damage to each creature it lands on. Tap all creatures dealt damage by CARDNAME. If CARDNAME doesn't turn completely over at least once during the flip, it has no effect.",
+        "name": "FlipOntoBattlefield",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

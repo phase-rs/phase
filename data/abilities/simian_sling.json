@@ -1,27 +1,47 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "AttackerBlocked",
-      "params": {
-        "Execute": "TrigDamage",
-        "ValidCard": "Card.Self,Creature.EquippedBy",
-        "TriggerDescription": "Whenever CARDNAME or equipped creature becomes blocked, it deals 1 damage to defending player."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "1",
-        "Description": "Equipped creature gets +1/+1.",
-        "AddPower": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever CARDNAME or equipped creature becomes blocked, it deals 1 damage to defending player.",
+      "mode": "AttackerBlocked",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self,Creature.EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      }
+    }
+  ]
 }

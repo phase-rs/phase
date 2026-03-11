@@ -1,20 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you clash and win, you may draw a card. (This ability triggers after the clash ends.)",
       "mode": "Clashed",
-      "params": {
-        "TriggerDescription": "Whenever you clash and win, you may draw a card. (This ability triggers after the clash ends.)",
-        "ValidPlayer": "You",
-        "OptionalDecider": "You",
-        "Execute": "TrigDraw",
-        "Won": "True",
-        "TriggerZones": "Battlefield"
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

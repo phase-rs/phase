@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "You may cast sorcery spells this turn as though they had flash.",
-          "StaticAbilities": "STPlay",
-          "SubAbility": "DBDelayTrig"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "You may cast sorcery spells this turn as though they had flash.",
-        "StaticAbilities": "STPlay",
-        "SubAbility": "DBDelayTrig"
-      }
+      "description": "You may cast sorcery spells this turn as though they had flash.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

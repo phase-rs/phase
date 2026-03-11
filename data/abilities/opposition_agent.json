@@ -1,29 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "ControlOpponentsSearchingLibrary": "You",
-        "Affected": "Opponent",
-        "Description": "You control your opponents while they're searching their libraries."
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "RepExile",
-        "Origin": "Library",
-        "ActiveZones": "Battlefield",
-        "FoundSearchingLibrary": "True",
-        "Description": "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
-        "ValidCard": "Card.OppOwn"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "Player"
+      },
+      "description": "You control your opponents while they're searching their libraries.",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

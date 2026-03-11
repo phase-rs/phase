@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "AILogic": "MostExcessOpponentControls",
-          "SpellDescription": "Return all permanents of the color of your choice to their owners' hands.",
-          "SubAbility": "DBWash",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "MostExcessOpponentControls",
-        "SpellDescription": "Return all permanents of the color of your choice to their owners' hands.",
-        "SubAbility": "DBWash",
-        "Defined": "You"
-      }
+      "description": "Return all permanents of the color of your choice to their owners' hands.",
+      "effect": {
+        "description": "Return all permanents of the color of your choice to their owners' hands.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

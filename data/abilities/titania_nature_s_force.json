@@ -1,40 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Forest",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouOwn"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Graveyard",
+      "description": "You may play Forests from your graveyard.",
+      "mode": "Continuous"
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever a Forest you control enters, create a 5/3 green Elemental creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a Forest you control enters, create a 5/3 green Elemental creature token.",
-        "Origin": "Any",
-        "ValidCard": "Forest.YouCtrl",
-        "Execute": "TrigToken",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Forest",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever an Elemental you control dies, you may mill three cards.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Whenever an Elemental you control dies, you may mill three cards.",
-        "ValidCard": "Elemental.YouCtrl",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigMill"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Elemental",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "You may play Forests from your graveyard.",
-        "AffectedZone": "Graveyard",
-        "MayPlay": "True",
-        "Affected": "Forest.YouOwn"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if CARDNAME isn't saddled. Otherwise, each opponent loses that much life.",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigDig",
-        "TriggerDescription": "Whenever CARDNAME attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if CARDNAME isn't saddled. Otherwise, each opponent loses that much life.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

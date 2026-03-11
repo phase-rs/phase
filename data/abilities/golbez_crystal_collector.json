@@ -1,32 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever an artifact you control enters, surveil 1.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever an artifact you control enters, surveil 1.",
-        "ValidCard": "Artifact.YouCtrl",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigSurveil"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
+      "description": "At the beginning of your end step, if you control four or more artifacts, return target creature card from your graveyard to your hand. Then if you control eight or more artifacts, each opponent loses life equal to that card's power.",
       "mode": "Phase",
-      "params": {
-        "SVarCompare": "GE4",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "At the beginning of your end step, if you control four or more artifacts, return target creature card from your graveyard to your hand. Then if you control eight or more artifacts, each opponent loses life equal to that card's power.",
-        "Execute": "TrigReturn",
-        "ValidPlayer": "You",
-        "CheckSVar": "X",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

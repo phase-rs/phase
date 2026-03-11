@@ -1,37 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Phase",
-      "params": {
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token attacks this combat if able."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Goblin",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Goblins you control have haste.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Goblins you control have haste.",
-        "AddKeyword": "Haste",
-        "Affected": "Goblin.YouCtrl+Other"
-      }
+      "modifications": [
+        {
+          "keyword": "Haste",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Max speed — {T}: Add {R} for each Goblin you control.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Max speed — {T}: Add {R} for each Goblin you control.",
-        "Condition": "MaxSpeed",
-        "AddAbility": "ABMana",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "ability": "ABMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token attacks this combat if able.",
+      "mode": "Phase",
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

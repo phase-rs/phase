@@ -1,19 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a white spell, CARDNAME loses defender until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidCard": "Card.White",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast a white spell, CARDNAME loses defender until end of turn.",
-        "Execute": "TrigDebuff",
-        "ValidActivatingPlayer": "You"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "White"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

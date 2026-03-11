@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "AILogic": "MostProminentInHumanDeck",
-          "SpellDescription": "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.",
-          "SubAbility": "DBRevealDiscard",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "MostProminentInHumanDeck",
-        "SpellDescription": "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.",
-        "SubAbility": "DBRevealDiscard",
-        "Defined": "You"
-      }
+      "description": "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.",
+      "effect": {
+        "description": "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

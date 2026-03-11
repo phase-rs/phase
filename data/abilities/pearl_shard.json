@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "SpellDescription": "Prevent the next 2 damage that would be dealt to any target this turn.",
-          "AlternateCost": "W T",
-          "Amount": "2",
-          "ValidTgts": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Prevent the next 2 damage that would be dealt to any target this turn.",
-        "AlternateCost": "W T",
-        "Amount": "2",
-        "ValidTgts": "Any"
-      }
+      "description": "Prevent the next 2 damage that would be dealt to any target this turn.",
+      "effect": {
+        "description": "Prevent the next 2 damage that would be dealt to any target this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

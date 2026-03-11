@@ -1,29 +1,68 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Card.TopLibrary+YouCtrl",
-        "Description": "Play with the top card of your library revealed.",
-        "AffectedZone": "Library",
-        "MayLookAt": "Player"
-      }
+      "affected": {
+        "card_type": "Card",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "TopLibrary"
+          }
+        ],
+        "type": "Typed"
+      },
+      "affected_zone": "Library",
+      "description": "Play with the top card of your library revealed.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Vampire"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Card.Self"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "As long as the top card of your library is black, CARDNAME and other Vampire creatures you control get +2/+1 and have flying.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "1",
-        "TopCardOfLibraryIs": "Card.Black",
-        "Description": "As long as the top card of your library is black, CARDNAME and other Vampire creatures you control get +2/+1 and have flying.",
-        "Affected": "Creature.Vampire+Other+YouCtrl,Card.Self",
-        "AddPower": "2",
-        "AddKeyword": "Flying"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        },
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

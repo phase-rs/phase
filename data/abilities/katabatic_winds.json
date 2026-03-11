@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected_zone": "Battlefield",
+      "description": "Creatures with flying can't attack or block, and their activated abilities with {T} in their costs can't be activated.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantBeActivated"
-      },
-      "params": {
-        "AffectedZone": "Battlefield",
-        "ValidCard": "Creature.withFlying",
-        "Description": "Creatures with flying can't attack or block, and their activated abilities with {T} in their costs can't be activated.",
-        "ValidSA": "Activated.hasTapCost"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

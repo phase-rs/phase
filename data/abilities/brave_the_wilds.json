@@ -2,36 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "If this spell was bargained, target land you control becomes a 3/3 Elemental creature with haste that's still a land.",
+      "duration": "Permanent",
       "effect": {
-        "type": "Animate",
         "power": 3,
+        "target": {
+          "card_type": "Land",
+          "controller": "You",
+          "type": "Typed"
+        },
         "toughness": 3,
+        "type": "Animate",
         "types": [
           "Creature",
           "Elemental"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Land.YouCtrl"
-        }
+        ]
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target land you control",
-        "TargetMin": "X",
-        "SubAbility": "DBChangeZone",
-        "SpellDescription": "If this spell was bargained, target land you control becomes a 3/3 Elemental creature with haste that's still a land.",
-        "Keywords": "Haste",
-        "Condition": "Bargain",
-        "TargetMax": "X",
-        "Duration": "Permanent"
-      }
+      "target_prompt": "Select target land you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

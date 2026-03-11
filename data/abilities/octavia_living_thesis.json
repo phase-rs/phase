@@ -1,33 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCastOrCopy",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, target creature has base power and toughness 8/8 until end of turn.",
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant,Sorcery",
-        "Execute": "TrigOctify"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {8} less to cast if you have eight or more instant and/or sorcery cards in your graveyard.",
-        "Amount": "8",
-        "Type": "Spell",
-        "EffectZone": "All",
-        "PresentZone": "Graveyard",
-        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "GE8"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Instant",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn,Sorcery.YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {8} less to cast if you have eight or more instant and/or sorcery cards in your graveyard.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, target creature has base power and toughness 8/8 until end of turn.",
+      "mode": "SpellCastOrCopy",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
+      }
+    }
+  ]
 }

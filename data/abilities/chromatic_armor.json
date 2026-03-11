@@ -2,40 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "X",
+        "type": "Mana"
+      },
+      "description": "Put a sleight counter on CARDNAME and choose a color. X is the number of sleight counters on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "SLEIGHT",
         "count": 1,
+        "counter_type": "SLEIGHT",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "X"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a sleight counter on CARDNAME and choose a color. X is the number of sleight counters on CARDNAME.",
-        "Defined": "Self",
-        "SubAbility": "ChooseColor"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "Prevent": "True",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Creature.EnchantedBy",
-        "Description": "Prevent all damage that would be dealt to enchanted creature by sources of the chosen color.",
-        "ValidSource": "Card.ChosenColor"
-      }
+      "description": "Prevent all damage that would be dealt to enchanted creature by sources of the chosen color.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

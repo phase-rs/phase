@@ -1,102 +1,73 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, create X 2/2 white and blue Knight creature tokens with vigilance.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "TriggerDescription": "When CARDNAME enters, create X 2/2 white and blue Knight creature tokens with vigilance.",
-            "Execute": "TrigToken",
-            "Destination": "Battlefield",
-            "Origin": "Any",
-            "ValidCard": "Card.Self"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": 2
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": 1
+            "amount": 1,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Planeswalker": "True",
-            "SubAbility": "DBDiscard",
-            "SpellDescription": "Draw two cards."
-          }
+          "description": "Draw two cards.",
+          "effect": {
+            "count": 2,
+            "type": "Draw"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "Name": "Emblem — Teferi Akosa of Zhalfir",
-              "Duration": "Permanent",
-              "Planeswalker": "True",
-              "StaticAbilities": "STPump",
-              "SpellDescription": "You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"",
-              "Image": "emblem_teferi_akosa_of_zhalfir"
-            }
-          },
           "cost": {
-            "type": "Loyalty",
-            "amount": -2
+            "amount": -2,
+            "type": "Loyalty"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "Name": "Emblem — Teferi Akosa of Zhalfir",
-            "Duration": "Permanent",
-            "Planeswalker": "True",
-            "StaticAbilities": "STPump",
-            "SpellDescription": "You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"",
-            "Image": "emblem_teferi_akosa_of_zhalfir"
-          }
+          "description": "You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"",
+          "duration": "Permanent",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
+          "cost": {
+            "amount": -3,
+            "type": "Loyalty"
+          },
+          "description": "Tap any number of untapped creatures you control.",
           "effect": {
-            "type": "Tap",
             "target": {
               "type": "Any"
-            }
+            },
+            "type": "Tap"
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -3
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "ChoicePrompt": "Tap any number of untapped creatures you control",
-            "StackDescription": "Tap any number of untapped creatures you control.",
-            "Planeswalker": "True",
-            "CardChoices": "Creature.YouCtrl+untapped",
-            "SpellDescription": "Tap any number of untapped creatures you control.",
-            "SubAbility": "DBImmediateTrig",
-            "ChoiceAmount": "Count$Valid Creature.YouCtrl+untapped",
-            "RememberTapped": "True",
-            "AnyNumber": "True"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

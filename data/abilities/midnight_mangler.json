@@ -1,18 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "During turns other than yours, this Vehicle is an artifact creature.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "NotPlayerTurn",
-        "AddType": "Artifact & Creature",
-        "Description": "During turns other than yours, this Vehicle is an artifact creature.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "core_type": "Artifact & Creature",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

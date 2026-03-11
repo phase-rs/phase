@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you control a Dwarf, sacrifice CARDNAME.",
       "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "IsPresent": "Dwarf.YouCtrl",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When you control a Dwarf, sacrifice CARDNAME."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

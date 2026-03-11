@@ -2,46 +2,49 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopyPermanent",
-        "params": {
-          "ValidTgts": "Artifact.YouCtrl",
-          "SetPower": "1",
-          "TgtPrompt": "Select target artifact you control",
-          "SetToughness": "1",
-          "SpellDescription": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
-          "AddTypes": "Creature & Soldier"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "6"
+        "cost": "6",
+        "type": "Mana"
       },
+      "description": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
+      "effect": {
+        "description": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
+        "name": "CopyPermanent",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Artifact.YouCtrl",
-        "SetPower": "1",
-        "TgtPrompt": "Select target artifact you control",
-        "SetToughness": "1",
-        "SpellDescription": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
-        "AddTypes": "Creature & Soldier"
-      }
+      "target_prompt": "Select target artifact you control"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Artifact"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Artifact creatures you control get +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Artifact creatures you control get +2/+2.",
-        "AddPower": "2",
-        "AddToughness": "2",
-        "Affected": "Creature.Artifact+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

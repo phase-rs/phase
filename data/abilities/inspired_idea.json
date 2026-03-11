@@ -2,39 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Draw three cards. [Your maximum hand size is reduced by three for the rest of the game.]",
-        "SubAbility": "DBEffect"
-      }
+      "description": "Draw three cards. [Your maximum hand size is reduced by three for the rest of the game.]",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     },
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Draw",
-        "count": 3
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 U U"
+        "cost": "3 U U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "NonBasicSpell": "True",
-        "PrecostDesc": "Cleave",
-        "CostDesc": "{3}{U}{U}",
-        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
-      }
+      "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+      "effect": {
+        "count": 3,
+        "type": "Draw"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

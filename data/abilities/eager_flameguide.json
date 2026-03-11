@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, add {C}{C}{C}. Spend this mana only to cast creature spells.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, add {C}{C}{C}. Spend this mana only to cast creature spells.",
-        "Execute": "TrigAddMana",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, exile the top two cards of your library. Until the end of your next turn, you may cast creature spells from among the exiled cards.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard",
-        "Execute": "TrigDig",
-        "TriggerDescription": "When CARDNAME dies, exile the top two cards of your library. Until the end of your next turn, you may cast creature spells from among the exiled cards."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

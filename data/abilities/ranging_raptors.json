@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Enrage — Whenever CARDNAME is dealt damage, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Execute": "TrigSearchLand",
-        "OptionalDecider": "You",
-        "ValidTarget": "Card.Self",
-        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_target": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

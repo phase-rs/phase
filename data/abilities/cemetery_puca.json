@@ -1,20 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a creature dies, you may pay {1}. If you do, CARDNAME becomes a copy of that creature, except it has this ability.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature",
-        "Execute": "CemeteryPucaCopy",
-        "Origin": "Battlefield",
-        "TriggerDescription": "Whenever a creature dies, you may pay {1}. If you do, CARDNAME becomes a copy of that creature, except it has this ability."
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

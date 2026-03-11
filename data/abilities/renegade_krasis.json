@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME evolves, put a +1/+1 counter on each other creature you control with a +1/+1 counter on it.",
       "mode": "Evolved",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME evolves, put a +1/+1 counter on each other creature you control with a +1/+1 counter on it.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounterAll"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

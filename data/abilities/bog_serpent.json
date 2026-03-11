@@ -1,28 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "Always",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigSac",
-        "TriggerDescription": "When you control no Swamps, sacrifice CARDNAME.",
-        "PresentCompare": "EQ0",
-        "IsPresent": "Swamp.YouCtrl"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantAttack",
-      "params": {
-        "UnlessDefender": "controlsSwamp",
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't attack unless defending player controls a Swamp."
-      }
+      "description": "CARDNAME can't attack unless defending player controls a Swamp.",
+      "mode": "CantAttack"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When you control no Swamps, sacrifice CARDNAME.",
+      "mode": "Always",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

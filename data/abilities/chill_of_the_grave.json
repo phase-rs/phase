@@ -2,36 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Tap target creature. It doesn't untap during its controller's next untap step.",
-        "SubAbility": "DBPump"
-      }
+      "description": "Tap target creature. It doesn't untap during its controller's next untap step.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "IsPresent": "Zombie.YouCtrl",
-        "Description": "This spell costs {1} less to cast if you control a Zombie.",
-        "ValidCard": "Card.Self",
-        "Type": "Spell",
-        "Amount": "1",
-        "EffectZone": "All"
-      }
+      "condition": {
+        "filter": {
+          "card_type": "Zombie",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "This spell costs {1} less to cast if you control a Zombie.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

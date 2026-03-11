@@ -1,18 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "Player"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as CARDNAME is untapped, players can't untap more than one land during their untap steps.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+untapped",
-        "Description": "As long as CARDNAME is untapped, players can't untap more than one land during their untap steps.",
-        "Affected": "Player",
-        "AddKeyword": "UntapAdjust:Land:1"
-      }
+      "modifications": [
+        {
+          "keyword": "UntapAdjust:Land:1",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

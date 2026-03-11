@@ -1,17 +1,22 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "Player"
+      },
+      "description": "If an opponent would search a library, that player searches the top four cards of that library instead.",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "LimitSearchLibrary",
-        "Affected": "Player.Opponent",
-        "Description": "If an opponent would search a library, that player searches the top four cards of that library instead."
-      }
+      "modifications": [
+        {
+          "keyword": "LimitSearchLibrary",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

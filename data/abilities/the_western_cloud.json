@@ -1,27 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "RolledChaos",
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, create three tapped Treasure tokens. They each deal 1 damage to each creature and each planeswalker."
-      }
+      "description": "Prevent all damage that would be dealt to creatures and planeswalkers you control.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Planeswalker.YouCtrl,Creature.YouCtrl",
-        "Prevent": "True",
-        "ActiveZones": "Command",
-        "Description": "Prevent all damage that would be dealt to creatures and planeswalkers you control."
-      }
+      "description": "Whenever chaos ensues, create three tapped Treasure tokens. They each deal 1 damage to each creature and each planeswalker.",
+      "mode": "ChaosEnsues",
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

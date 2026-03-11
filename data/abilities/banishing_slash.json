@@ -2,27 +2,27 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Enchantment,Creature.tapped"
-        }
-      },
       "cost": null,
+      "description": "Destroy up to one target artifact, enchantment, or tapped creature.",
+      "effect": {
+        "target": {
+          "card_type": "Artifact,Enchantment,Creature",
+          "properties": [
+            {
+              "type": "Tapped"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBToken",
-        "TargetMax": "1",
-        "TgtPrompt": "Select up to one target artifact, enchantment or tapped creature",
-        "TargetMin": "0",
-        "SpellDescription": "Destroy up to one target artifact, enchantment, or tapped creature."
-      }
+      "target_prompt": "Select up to one target artifact, enchantment or tapped creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

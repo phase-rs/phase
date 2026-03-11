@@ -1,19 +1,14 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidSA": "Activated",
-        "Description": "Activated abilities of creatures can't be activated.",
-        "ValidCard": "Creature",
-        "Activator": "Player",
-        "AffectedZone": "Battlefield"
-      }
+      "affected_zone": "Battlefield",
+      "description": "Activated abilities of creatures can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

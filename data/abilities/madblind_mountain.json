@@ -2,51 +2,38 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Shuffle",
-        "params": {
-          "SpellDescription": "Shuffle your library. Activate only if you control two or more red permanents.",
-          "Defined": "You",
-          "PresentCompare": "GE2",
-          "IsPresent": "Permanent.Red+YouCtrl"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "R"
+            "cost": "R",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Shuffle your library. Activate only if you control two or more red permanents.",
-        "Defined": "You",
-        "PresentCompare": "GE2",
-        "IsPresent": "Permanent.Red+YouCtrl"
-      }
+      "description": "Shuffle your library. Activate only if you control two or more red permanents.",
+      "effect": {
+        "description": "Shuffle your library. Activate only if you control two or more red permanents.",
+        "name": "Shuffle",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "CARDNAME enters tapped.",
       "event": "Moved",
-      "params": {
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "ReplaceWith": "ETBTapped",
-        "Destination": "Battlefield",
-        "Description": "CARDNAME enters tapped."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

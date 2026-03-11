@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "7 G",
+        "type": "Mana"
+      },
+      "description": "Return CARDNAME from your graveyard to the battlefield tapped. It gains \"If this permanent would leave the battlefield, exile it instead.\" This ability costs {1} less to activate for each basic land type among lands you control.",
       "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
         "destination": "Battlefield",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChangeZone"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "7 G"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "ReduceCost": "X",
-        "ActivationZone": "Graveyard",
-        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield tapped. It gains \"If this permanent would leave the battlefield, exile it instead.\" This ability costs {1} less to activate for each basic land type among lands you control.",
-        "Tapped": "True",
-        "SubAbility": "DBAnimate",
-        "PrecostDesc": "Domain —"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,47 +2,41 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": ""
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "NoReveal": "True",
-        "SpellDescription": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
-        "ChangeNum": "1"
-      }
+      "description": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
+      "effect": {
+        "count": 3,
+        "destination": "",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "IsPresent": "Giant.YouCtrl",
-        "Affected": "Card.Self",
-        "AffectedZone": "Graveyard",
-        "MayPlay": "True",
-        "Description": "As long as you control a Giant, you may cast CARDNAME from your graveyard by paying {U} rather than paying its mana cost. If you cast CARDNAME this way and it would be put into your graveyard, exile it instead.",
-        "MayPlayAltManaCost": "U"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
-      "event": "Moved",
-      "params": {
-        "Destination": "Graveyard",
-        "Origin": "Stack",
-        "ValidLKI": "Card.CastSa Spell.MayPlaySource",
-        "ReplaceWith": "MoveExile"
-      }
+      "event": "Moved"
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "condition": {
+        "filter": {
+          "card_type": "Giant",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "As long as you control a Giant, you may cast CARDNAME from your graveyard by paying {U} rather than paying its mana cost. If you cast CARDNAME this way and it would be put into your graveyard, exile it instead.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
+    }
+  ],
+  "triggers": []
 }

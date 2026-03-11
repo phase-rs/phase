@@ -1,18 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Creatures you control have shadow. (They can block and be blocked only by creatures with shadow.)",
+      "effect_zone": "Command",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Shadow",
-        "Description": "Creatures you control have shadow. (They can block and be blocked only by creatures with shadow.)",
-        "Affected": "Creature.YouCtrl",
-        "EffectZone": "Command"
-      }
+      "modifications": [
+        {
+          "keyword": "Shadow",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

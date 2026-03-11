@@ -1,24 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "MustBlock",
-      "params": {
-        "Description": "All creatures block each combat if able.",
-        "ValidCreature": "Creature"
-      }
+      "description": "All creatures block each combat if able.",
+      "mode": "MustBlock"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "DeclaresBlockers": "AttackingPlayer",
-        "Description": "The attacking player chooses how each creature blocks each combat.",
-        "Affected": "Player"
-      }
+      "affected": {
+        "type": "Player"
+      },
+      "description": "The attacking player chooses how each creature blocks each combat.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

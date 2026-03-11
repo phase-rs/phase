@@ -1,43 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "Execute": "TrigMoveCounter",
-        "TriggerDescription": "At the beginning of combat on your turn, you may move a +1/+1 counter from CARDNAME onto target creature.",
-        "Phase": "BeginCombat",
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You"
+      "description": "CARDNAME enters tapped with two +1/+1 counters on it.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "CARDNAME doesn't untap during your untap step if it has a +1/+1 counter on it.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "Description": "CARDNAME enters tapped with two +1/+1 counters on it.",
-        "ReplaceWith": "CamelTapped",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "ReplacementResult": "Updated"
-      }
-    },
-    {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "ActiveZones": "Battlefield",
-        "Layer": "CantHappen",
-        "ValidStepTurnToController": "You",
-        "Description": "CARDNAME doesn't untap during your untap step if it has a +1/+1 counter on it.",
-        "ValidCard": "Card.Self+counters_GE1_P1P1"
-      }
+      "description": "At the beginning of combat on your turn, you may move a +1/+1 counter from CARDNAME onto target creature.",
+      "mode": "Phase",
+      "optional": true,
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

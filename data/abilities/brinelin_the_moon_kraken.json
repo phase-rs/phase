@@ -1,32 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters or whenever you cast a spell with mana value 6 or greater, you may return target nonland permanent to its owner's hand.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigReturn",
-        "OptionalDecider": "You",
-        "TriggerDescription": "When CARDNAME enters or whenever you cast a spell with mana value 6 or greater, you may return target nonland permanent to its owner's hand."
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters or whenever you cast a spell with mana value 6 or greater, you may return target nonland permanent to its owner's hand.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "When CARDNAME enters or whenever you cast a spell with mana value 6 or greater, you may return target nonland permanent to its owner's hand.",
-        "Secondary": "True",
-        "Execute": "TrigReturn",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.cmcGE6",
-        "TriggerZones": "Battlefield"
+      "optional": true,
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -1,29 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "LifeGained",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigPutCounter",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE25",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you have 25 or more life, CARDNAME has double strike. (It deals both first-strike and regular combat damage.)",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE25",
-        "Description": "As long as you have 25 or more life, CARDNAME has double strike. (It deals both first-strike and regular combat damage.)",
-        "AddKeyword": "Double Strike",
-        "Affected": "Card.Self",
-        "CheckSVar": "X"
-      }
+      "modifications": [
+        {
+          "keyword": "Double",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you gain life, put a +1/+1 counter on CARDNAME.",
+      "mode": "LifeGained",
+      "trigger_zones": [
+        "Battlefield"
+      ]
+    }
+  ]
 }

@@ -1,42 +1,44 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attacks, you may put an artifact creature card from your hand onto the battlefield tapped and attacking. If you do, convert NICKNAME at end of combat.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "OptionalDecider": "You",
-            "Execute": "TrigChange",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever NICKNAME attacks, you may put an artifact creature card from your hand onto the battlefield tapped and attacking. If you do, convert NICKNAME at end of combat."
+          "optional": true,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Formidable — Whenever NICKNAME attacks, attacking creatures you control gain indestructible until end of turn. If those creatures have total power 8 or greater, convert NICKNAME.",
           "mode": "Attacks",
-          "params": {
-            "Execute": "TrigPump",
-            "TriggerDescription": "Formidable — Whenever NICKNAME attacks, attacking creatures you control gain indestructible until end of turn. If those creatures have total power 8 or greater, convert NICKNAME.",
-            "ValidCard": "Card.Self",
-            "TriggerZones": "Battlefield"
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

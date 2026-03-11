@@ -2,40 +2,32 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Enchantment,Artifact"
-        }
-      },
       "cost": {
-        "type": "Sacrifice",
         "target": {
           "type": "None"
-        }
+        },
+        "type": "Sacrifice"
       },
+      "description": "Destroy target artifact or enchantment.",
+      "effect": {
+        "target": {
+          "card_type": "Enchantment,Artifact",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target artifact or enchantment.",
-        "TgtPrompt": "Select target artifact or enchantment"
-      }
+      "target_prompt": "Select target artifact or enchantment"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "ValidCard": "Artifact,Enchantment",
-        "Activator": "Opponent",
-        "Amount": "2",
-        "Description": "Artifact and enchantment spells your opponents cast cost {2} more to cast."
-      }
+      "description": "Artifact and enchantment spells your opponents cast cost {2} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

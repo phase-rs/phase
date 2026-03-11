@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever this creature attacks, it gets +1/+0 until end of turn for each other attacking creature.",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever this creature attacks, it gets +1/+0 until end of turn for each other attacking creature.",
-        "Execute": "TrigPump",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

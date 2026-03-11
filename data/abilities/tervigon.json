@@ -1,19 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "combat_damage": true,
+      "description": "Spawn Termagants — Whenever CARDNAME deals combat damage to a player, create that many 1/1 green Tyranid creature tokens.",
       "mode": "DamageDone",
-      "params": {
-        "ValidSource": "Card.Self",
-        "Execute": "TrigToken",
-        "ValidTarget": "Player",
-        "TriggerDescription": "Spawn Termagants — Whenever CARDNAME deals combat damage to a player, create that many 1/1 green Tyranid creature tokens.",
-        "CombatDamage": "True"
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

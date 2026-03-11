@@ -1,17 +1,33 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "PairedWith,Creature.Self"
+          },
+          {
+            "type": "Other",
+            "value": "Paired"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "As long as CARDNAME is paired with another creature, each of those creatures have \"{T}: Target player mills two cards.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "Mill",
-        "Description": "As long as CARDNAME is paired with another creature, each of those creatures have \"{T}: Target player mills two cards.\"",
-        "Affected": "Creature.PairedWith,Creature.Self+Paired"
-      }
+      "modifications": [
+        {
+          "ability": "Mill",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

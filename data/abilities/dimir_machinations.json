@@ -2,24 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Dig",
-        "count": 3,
-        "destination": "Exile"
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Player",
-        "LibraryPosition2": "0",
-        "SpellDescription": "Look at the top three cards of target player's library. Exile any number of those cards, then put the rest back in any order.",
-        "ChangeNum": "Any"
-      }
+      "description": "Look at the top three cards of target player's library. Exile any number of those cards, then put the rest back in any order.",
+      "effect": {
+        "count": 3,
+        "destination": "Exile",
+        "type": "Dig"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

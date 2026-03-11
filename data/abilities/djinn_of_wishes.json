@@ -2,41 +2,31 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "SubAbility": "DBPlay",
-          "ImprintRevealed": "True",
-          "NoPeek": "True",
-          "SpellDescription": "Reveal the top card of your library."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U U"
+            "cost": "2 U U",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "SubCounter<1/WISH>"
+            "cost": "SubCounter<1/WISH>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPlay",
-        "ImprintRevealed": "True",
-        "NoPeek": "True",
-        "SpellDescription": "Reveal the top card of your library."
-      }
+      "description": "Reveal the top card of your library.",
+      "effect": {
+        "description": "Reveal the top card of your library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

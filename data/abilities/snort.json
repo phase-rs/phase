@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Each player may discard their hand and draw five cards. Then CARDNAME deals 5 damage to each opponent who discarded their hand this way.",
       "effect": {
-        "type": "Discard",
         "count": 1,
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "Discard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Player",
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBDraw",
-        "Mode": "Hand",
-        "Optional": "True",
-        "RememberDiscardingPlayers": "True",
-        "SpellDescription": "Each player may discard their hand and draw five cards. Then CARDNAME deals 5 damage to each opponent who discarded their hand this way."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

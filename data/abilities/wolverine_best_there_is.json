@@ -2,48 +2,35 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "1 G"
+        "cost": "1 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)"
-      }
+      "description": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)",
+      "effect": {
+        "description": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each end step, if NICKNAME dealt damage to another creature this turn, put a +1/+1 counter on him.",
-        "CheckSVar": "Y",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "Execute": "TrigPutCounter"
-      }
+      "description": "Unrivaled Lethality — Double all damage NICKNAME would deal.",
+      "event": "DamageDone"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidTarget": "Permanent,Player",
-        "Description": "Unrivaled Lethality — Double all damage NICKNAME would deal.",
-        "ValidSource": "Card.Self",
-        "ActiveZones": "Battlefield",
-        "ReplaceWith": "DmgTwice"
-      }
+      "description": "At the beginning of each end step, if NICKNAME dealt damage to another creature this turn, put a +1/+1 counter on him.",
+      "mode": "Phase",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "faces": []
+  ]
 }

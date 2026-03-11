@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Choose up to X creatures and/or planeswalkers you control, where X is the number of times this spell was kicked. Those permanents phase out. CARDNAME deals 5 damage to each creature and each planeswalker.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.YouCtrl",
           "Planeswalker.YouCtrl"
         ],
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "SpellDescription",
-        "SubAbility": "DBPhase",
-        "Amount": "X",
-        "ChoiceTitle": "Choose up to X creatures and/or planeswalkers you control",
-        "MinAmount": "0",
-        "SpellDescription": "Choose up to X creatures and/or planeswalkers you control, where X is the number of times this spell was kicked. Those permanents phase out. CARDNAME deals 5 damage to each creature and each planeswalker."
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

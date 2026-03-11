@@ -2,41 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals 2 damage to target creature or planeswalker. If this spell's additional cost was paid, CARDNAME deals 4 damage instead.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature,Planeswalker"
-        }
+          "card_type": "Creature,Planeswalker",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature or planeswalker",
-        "SpellDescription": "CARDNAME deals 2 damage to target creature or planeswalker. If this spell's additional cost was paid, CARDNAME deals 4 damage instead."
-      }
+      "target_prompt": "Select target creature or planeswalker"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may sacrifice an artifact.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "EffectZone": "All",
-        "ValidSA": "Spell",
-        "ValidCard": "Card.Self",
-        "Description": "As an additional cost to cast this spell, you may sacrifice an artifact.",
-        "Cost": "Sac<1/Artifact>"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

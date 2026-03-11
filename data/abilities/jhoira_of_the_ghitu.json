@@ -2,40 +2,34 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "TIME",
-        "count": 4,
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2"
+            "cost": "2",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "ExileFromHand<1/Card.nonLand/nonland card>"
+            "cost": "ExileFromHand<1/Card.nonLand/nonland card>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{2}, Exile a nonland card from your hand:",
-        "StackDescription": "Put four time counters on the exiled card.",
-        "SpellDescription": "Put four time counters on the exiled card. If it doesn't have suspend, it gains suspend. (At the beginning of your upkeep, remove a time counter from that card. When the last is removed, you may cast it without paying its mana cost. If it's a creature, it has haste.)",
-        "SubAbility": "GiveSuspend",
-        "Defined": "ExiledCards"
-      }
+      "description": "Put four time counters on the exiled card. If it doesn't have suspend, it gains suspend. (At the beginning of your upkeep, remove a time counter from that card. When the last is removed, you may cast it without paying its mana cost. If it's a creature, it has haste.)",
+      "effect": {
+        "count": 4,
+        "counter_type": "TIME",
+        "target": {
+          "type": "Any"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

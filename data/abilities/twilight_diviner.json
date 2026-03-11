@@ -1,30 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the resto on top of your library in any order.)",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSurveil",
-        "Destination": "Battlefield",
-        "TriggerDescription": "When this creature enters, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the resto on top of your library in any order.)"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+      "destination": "Battlefield",
       "mode": "ChangesZoneAll",
-      "params": {
-        "TriggerDescription": "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
-        "Destination": "Battlefield",
-        "TriggerZones": "Battlefield",
-        "ValidCards": "Creature.Other+YouCtrl+wasCastFromGraveyard,Creature.Other+YouCtrl+ThisTurnEnteredFrom_Graveyard",
-        "Execute": "TrigCopy",
-        "ActivationLimit": "1"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

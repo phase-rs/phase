@@ -1,62 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 1,
-            "toughness": 1,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
             "type": "Tap"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Creatures you control get +1/+1 until end of turn.",
-            "ValidCards": "Creature.YouCtrl"
-          }
+          "description": "Creatures you control get +1/+1 until end of turn.",
+          "effect": {
+            "power": 1,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 1,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create two 1/1 white Human creature tokens. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "w_1_1_human",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenAmount": "2",
-            "SpellDescription": "Create two 1/1 white Human creature tokens. (Then exile this card. You may cast the creature later from exile.)",
-            "TokenOwner": "You"
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

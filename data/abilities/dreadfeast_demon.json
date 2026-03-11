@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, sacrifice a non-Demon creature. If you do, create a token that's a copy of CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigSac",
-        "TriggerDescription": "At the beginning of your end step, sacrifice a non-Demon creature. If you do, create a token that's a copy of CARDNAME.",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

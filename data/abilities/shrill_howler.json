@@ -1,77 +1,62 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "Other",
-            "api_type": "SetState",
-            "params": {
-              "SpellDescription": "Transform CARDNAME.",
-              "Defined": "Self",
-              "Mode": "Transform"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "5 G"
+            "cost": "5 G",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "Transform CARDNAME.",
-            "Defined": "Self",
-            "Mode": "Transform"
-          }
+          "description": "Transform CARDNAME.",
+          "effect": {
+            "description": "Transform CARDNAME.",
+            "name": "SetState",
+            "type": "Unimplemented"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [
         {
+          "description": "Creatures with power less than CARDNAME's power can't block it.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "ValidBlocker": "Creature.powerLTX",
-            "ValidAttacker": "Creature.Self",
-            "Description": "Creatures with power less than CARDNAME's power can't block it."
           }
         }
       ],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "DamageDone",
-          "params": {
-            "ValidSource": "Card.Self",
-            "Execute": "TrigToken",
-            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a 3/2 colorless Eldrazi Horror creature token.",
-            "ValidTarget": "Player",
-            "CombatDamage": "True"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "description": "Creatures with power less than CARDNAME's power can't block it.",
           "mode": {
             "Other": "CantBlockBy"
-          },
-          "params": {
-            "Description": "Creatures with power less than CARDNAME's power can't block it.",
-            "ValidBlocker": "Creature.powerLTX",
-            "ValidAttacker": "Creature.Self"
           }
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "combat_damage": true,
+          "description": "Whenever CARDNAME deals combat damage to a player, create a 3/2 colorless Eldrazi Horror creature token.",
+          "mode": "DamageDone",
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "valid_target": {
+            "type": "Player"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

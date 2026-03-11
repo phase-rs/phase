@@ -1,29 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidSpell": "Activated.Ninjutsu",
-        "Activator": "You",
-        "Description": "Ninjutsu abilities you activate cost {1} less to activate.",
-        "Amount": "1",
-        "ValidCard": "Card"
-      }
+      "description": "Ninjutsu abilities you activate cost {1} less to activate.",
+      "mode": "ReduceCost"
     },
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Ninja"
+              },
+              {
+                "type": "Other",
+                "value": "YouCtrl,Creature.Rogue"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Ninja and Rogue creatures you control get +1/+1.",
+      "effect_zone": "Battlefield",
       "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "AddToughness": "1",
-        "Affected": "Creature.Ninja+Other+YouCtrl,Creature.Rogue+Other+YouCtrl",
-        "AddPower": "1",
-        "Description": "Other Ninja and Rogue creatures you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

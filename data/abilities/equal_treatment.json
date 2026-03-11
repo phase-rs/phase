@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDraw",
-          "SpellDescription": "If any source would deal 1 or more damage to a permanent or player this turn, it deals 2 damage to that permanent or player instead. Draw a card.",
-          "ReplacementEffects": "EqualEvent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDraw",
-        "SpellDescription": "If any source would deal 1 or more damage to a permanent or player this turn, it deals 2 damage to that permanent or player instead. Draw a card.",
-        "ReplacementEffects": "EqualEvent"
-      }
+      "description": "If any source would deal 1 or more damage to a permanent or player this turn, it deals 2 damage to that permanent or player instead. Draw a card.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

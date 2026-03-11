@@ -2,56 +2,51 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChooseCard",
-        "choices": [
-          "Card.OppOwn+counters_GE1_VOID"
-        ],
-        "target": {
-          "type": "Any"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "AtLeast1",
-        "SubAbility": "DBEffect",
-        "ChoiceZone": "Exile",
-        "Mandatory": "True",
-        "ChoiceTitle": "Choose an exiled card an opponent owns with a void counter on it",
-        "Defined": "You",
-        "Amount": "1",
-        "SpellDescription": "Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost."
-      }
+      "description": "Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.",
+      "effect": {
+        "choices": [
+          "Card.OppOwn+counters_GE1_VOID"
+        ],
+        "target": {
+          "type": "Any"
+        },
+        "type": "ChooseCard"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.",
       "event": "Moved",
-      "params": {
-        "ValidCard": "Card.!token+OppOwn",
-        "ReplaceWith": "Exile",
-        "Description": "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.",
-        "Destination": "Graveyard",
-        "ActiveZones": "Battlefield"
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

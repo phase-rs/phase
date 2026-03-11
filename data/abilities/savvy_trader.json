@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME enters, exile target permanent card from your graveyard. You may play that card for as long as it remains exiled.",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigExile",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.!wasCastFromYourHand",
-        "Description": "Spells you cast from anywhere other than your hand cost {1} less to cast.",
-        "Type": "Spell",
-        "Amount": "1",
-        "Activator": "You"
-      }
+      "description": "Spells you cast from anywhere other than your hand cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, exile target permanent card from your graveyard. You may play that card for as long as it remains exiled.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

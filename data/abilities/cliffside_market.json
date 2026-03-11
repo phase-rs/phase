@@ -1,38 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may exchange life totals with target player.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may exchange life totals with target player.",
-        "OptionalDecider": "You",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigLife"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may exchange life totals with target player.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may exchange life totals with target player.",
-        "TriggerZones": "Command",
-        "Phase": "Upkeep",
-        "OptionalDecider": "You",
-        "Secondary": "True",
-        "ValidPlayer": "You",
-        "Execute": "TrigLife"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, exchange control of two target permanents that share a card type.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "Whenever chaos ensues, exchange control of two target permanents that share a card type.",
-        "Execute": "RolledChaos"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

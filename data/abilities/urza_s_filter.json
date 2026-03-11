@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "ValidCard": "Card.MultiColor",
-        "Description": "Multicolored spells cost up to {2} less to cast.",
-        "Amount": "2",
-        "Type": "Spell",
-        "UpTo": "True"
-      }
+      "description": "Multicolored spells cost up to {2} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

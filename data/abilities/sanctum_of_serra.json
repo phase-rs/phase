@@ -1,26 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk away from CARDNAME, destroy all nonland permanents.",
       "mode": "PlaneswalkedFrom",
-      "params": {
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "When you planeswalk away from CARDNAME, destroy all nonland permanents.",
-        "ValidCard": "Plane.Self"
+      "valid_card": {
+        "card_type": "Plane",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, you may have your life total become 20.",
       "mode": "ChaosEnsues",
-      "params": {
-        "OptionalDecider": "You",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos",
-        "TriggerDescription": "Whenever chaos ensues, you may have your life total become 20."
-      }
+      "optional": true,
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

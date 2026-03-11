@@ -2,86 +2,55 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Planeswalker": "True",
-          "SpellDescription": "Up to X target Beebles can't be blocked this turn, where X is the number of cards in your hand.",
-          "ValidTgts": "Beeble",
-          "TgtPrompt": "Select up to X target Beebles",
-          "StaticAbilities": "Unblockable",
-          "StackDescription": "SpellDescription",
-          "RememberObjects": "Targeted",
-          "TargetMax": "NHand",
-          "ExileOnMoved": "Battlefield",
-          "TargetMin": "0"
-        }
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": 1
+        "amount": 1,
+        "type": "Loyalty"
       },
+      "description": "Up to X target Beebles can't be blocked this turn, where X is the number of cards in your hand.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Up to X target Beebles can't be blocked this turn, where X is the number of cards in your hand.",
-        "ValidTgts": "Beeble",
-        "TgtPrompt": "Select up to X target Beebles",
-        "StaticAbilities": "Unblockable",
-        "StackDescription": "SpellDescription",
-        "RememberObjects": "Targeted",
-        "TargetMax": "NHand",
-        "ExileOnMoved": "Battlefield",
-        "TargetMin": "0"
-      }
+      "target_prompt": "Select up to X target Beebles"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Draw",
-        "count": 1
-      },
       "cost": {
-        "type": "Loyalty",
-        "amount": -1
+        "amount": -1,
+        "type": "Loyalty"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Planeswalker": "True",
-        "SpellDescription": "Draw a card."
-      }
+      "description": "Draw a card.",
+      "effect": {
+        "count": 1,
+        "type": "Draw"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "The number of loyalty counters on B.O.B. is equal to the number of Beebles you control. (Create or sacrifice Beebles whenever B.O.B. gains or loses loyalty.)",
       "mode": "CounterRemovedOnce",
-      "params": {
-        "TriggerDescription": "The number of loyalty counters on B.O.B. is equal to the number of Beebles you control. (Create or sacrifice Beebles whenever B.O.B. gains or loses loyalty.)",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "Beeb",
-        "CounterType": "LOYALTY",
-        "SVarCompare": "GTLoy",
-        "Execute": "TrigSac"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
       "mode": "CounterAddedOnce",
-      "params": {
-        "CounterType": "LOYALTY",
-        "ValidCard": "Card.Self",
-        "Static": "True",
-        "Execute": "TrigCreate",
-        "TriggerZones": "Battlefield",
-        "Secondary": "True",
-        "SVarCompare": "GTBeeb",
-        "CheckSVar": "Loy"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

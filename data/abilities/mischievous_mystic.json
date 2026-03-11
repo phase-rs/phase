@@ -1,19 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you draw your second card each turn, create a 1/1 blue Faerie token with flying.",
       "mode": "Drawn",
-      "params": {
-        "Number": "2",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you draw your second card each turn, create a 1/1 blue Faerie token with flying.",
-        "Execute": "TrigToken",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

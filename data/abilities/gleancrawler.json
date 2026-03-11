@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, return to your hand all creature cards in your graveyard that were put there from the battlefield this turn.",
       "mode": "Phase",
-      "params": {
-        "Execute": "TrigChangeZone",
-        "ValidPlayer": "You",
-        "TriggerDescription": "At the beginning of your end step, return to your hand all creature cards in your graveyard that were put there from the battlefield this turn.",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

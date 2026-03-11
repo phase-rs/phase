@@ -1,17 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Land",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "YouCtrl,Ally.YouCtrl"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Each land and Ally you control has \"{T}: Add one mana of any color.\"",
       "mode": "Continuous",
-      "params": {
-        "AddAbility": "AnyMana",
-        "Affected": "Land.YouCtrl,Ally.YouCtrl",
-        "Description": "Each land and Ally you control has \"{T}: Add one mana of any color.\""
-      }
+      "modifications": [
+        {
+          "ability": "AnyMana",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

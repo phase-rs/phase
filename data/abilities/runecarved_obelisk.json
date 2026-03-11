@@ -2,59 +2,44 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "Amount": "2",
-          "SpellDescription": "Add {C}{C}.",
-          "SubAbility": "DBPutCounter"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Amount": "2",
-        "SpellDescription": "Add {C}{C}.",
-        "SubAbility": "DBPutCounter"
-      }
+      "description": "Add {C}{C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "Type": "Card.cmcEQY",
-          "SpellDescription": "Seek a card with the highest mana value among cards in your library with mana value X or less, where X is the number of charge counters on CARDNAME."
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Type": "Card.cmcEQY",
-        "SpellDescription": "Seek a card with the highest mana value among cards in your library with mana value X or less, where X is the number of charge counters on CARDNAME."
-      }
+      "description": "Seek a card with the highest mana value among cards in your library with mana value X or less, where X is the number of charge counters on CARDNAME.",
+      "effect": {
+        "description": "Seek a card with the highest mana value among cards in your library with mana value X or less, where X is the number of charge counters on CARDNAME.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

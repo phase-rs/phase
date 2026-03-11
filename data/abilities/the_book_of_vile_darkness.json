@@ -2,59 +2,50 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "vecna",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/CARDNAME>"
+            "cost": "Exile<1/CARDNAME>",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/Artifact.YouCtrl+namedEye of Vecna>"
+            "cost": "Exile<1/Artifact.YouCtrl+namedEye of Vecna>",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Exile<1/Artifact.YouCtrl+namedHand of Vecna>"
+            "cost": "Exile<1/Artifact.YouCtrl+namedHand of Vecna>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "AddTriggersFrom": "ExiledCards",
-        "SpellDescription": "Create Vecna, a legendary 8/8 black Zombie God creature token with indestructible and all triggered abilities of the exiled cards.",
-        "CostDesc": "{T}, Exile CARDNAME and artifacts you control named Eye of Vecna and Hand of Vecna:"
-      }
+      "description": "Create Vecna, a legendary 8/8 black Zombie God creature token with indestructible and all triggered abilities of the exiled cards.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "vecna",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your end step, if you lost 2 or more life this turn, create a 2/2 black Zombie creature token.",
       "mode": "Phase",
-      "params": {
-        "ValidPlayer": "You",
-        "SVarCompare": "GE2",
-        "CheckSVar": "X",
-        "TriggerZones": "Battlefield",
-        "Phase": "End of Turn",
-        "TriggerDescription": "At the beginning of your end step, if you lost 2 or more life this turn, create a 2/2 black Zombie creature token.",
-        "Execute": "TrigToken"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

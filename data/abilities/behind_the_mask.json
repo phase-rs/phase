@@ -2,43 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Until end of turn, target artifact or creature becomes an artifact creature with base power and toughness 4/3.",
       "effect": {
-        "type": "Animate",
         "power": null,
+        "target": {
+          "card_type": "Artifact,Creature",
+          "type": "Typed"
+        },
         "toughness": null,
+        "type": "Animate",
         "types": [
           "Artifact",
           "Creature"
-        ],
-        "target": {
-          "type": "Filtered",
-          "filter": "Artifact,Creature"
-        }
+        ]
       },
-      "cost": null,
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact or creature",
-        "SpellDescription": "Until end of turn, target artifact or creature becomes an artifact creature with base power and toughness 4/3."
-      }
+      "target_prompt": "Select target artifact or creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may collect evidence 6. (Exile cards with total mana value 6 or greater from your graveyard.)",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "ValidSA": "Spell",
-        "EffectZone": "All",
-        "Cost": "CollectEvidence<6>",
-        "Description": "As an additional cost to cast this spell, you may collect evidence 6. (Exile cards with total mana value 6 or greater from your graveyard.)"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

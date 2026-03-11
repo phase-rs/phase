@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "If this spell was kicked, put a +1/+1 counter on a creature you control. All creatures get -2/-2 until end of turn.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "P1P1",
         "count": 1,
+        "counter_type": "P1P1",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "If this spell was kicked, put a +1/+1 counter on a creature you control. All creatures get -2/-2 until end of turn.",
-        "Condition": "Kicked",
-        "ChoiceTitle": "Choose a creature you control",
-        "SubAbility": "DBPumpAll",
-        "Choices": "Creature.YouCtrl"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

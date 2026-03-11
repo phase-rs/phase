@@ -1,19 +1,18 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Corrupted — When CARDNAME enters, sacrifice a creature unless an opponent has three or more poison counters.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "Corrupted — When CARDNAME enters, sacrifice a creature unless an opponent has three or more poison counters.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigSacrifice",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

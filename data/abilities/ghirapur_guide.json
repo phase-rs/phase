@@ -2,31 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "RememberObjects": "Targeted",
-          "ValidTgts": "Creature.YouCtrl",
-          "StaticAbilities": "KWPump",
-          "SpellDescription": "Target creature you control can't be blocked by creatures with power 2 or less this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 G"
+        "cost": "2 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "RememberObjects": "Targeted",
-        "ValidTgts": "Creature.YouCtrl",
-        "StaticAbilities": "KWPump",
-        "SpellDescription": "Target creature you control can't be blocked by creatures with power 2 or less this turn."
-      }
+      "description": "Target creature you control can't be blocked by creatures with power 2 or less this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

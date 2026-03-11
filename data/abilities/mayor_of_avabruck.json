@@ -1,73 +1,124 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "Execute": "TrigTransform",
-            "Phase": "Upkeep",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
-            "WerewolfTransformCondition": "True"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Human"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Other Human creatures you control get +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "AddPower": "1",
-            "Description": "Other Human creatures you control get +1/+1.",
-            "Affected": "Creature.Human+Other+YouCtrl",
-            "AddToughness": "1"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "Phase",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigToken",
-            "TriggerDescription": "At the beginning of your end step, create a 2/2 green Wolf creature token.",
-            "ValidPlayer": "You",
-            "Phase": "End of Turn"
-          }
-        },
-        {
-          "mode": "Phase",
-          "params": {
-            "WerewolfUntransformCondition": "True",
-            "TriggerZones": "Battlefield",
-            "Execute": "TrigTransform",
-            "Phase": "Upkeep",
-            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME."
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
+          "affected": {
+            "filters": [
+              {
+                "card_type": "Creature",
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Other",
+                    "value": "Werewolf"
+                  },
+                  {
+                    "type": "Other",
+                    "value": "YouCtrl,Creature.Wolf"
+                  }
+                ],
+                "type": "Typed"
+              },
+              {
+                "filter": {
+                  "type": "SelfRef"
+                },
+                "type": "Not"
+              }
+            ],
+            "type": "And"
+          },
+          "description": "Each other creature you control that's a Werewolf or a Wolf gets +1/+1.",
           "mode": "Continuous",
-          "params": {
-            "Description": "Each other creature you control that's a Werewolf or a Wolf gets +1/+1.",
-            "AddToughness": "1",
-            "Affected": "Creature.Werewolf+Other+YouCtrl,Creature.Wolf+Other+YouCtrl",
-            "AddPower": "1"
-          }
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ]
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "At the beginning of your end step, create a 2/2 green Wolf creature token.",
+          "mode": "Phase",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        },
+        {
+          "description": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+          "mode": "Phase",
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

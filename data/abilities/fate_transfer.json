@@ -2,35 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "MoveCounter",
-        "params": {
-          "TargetMin": "2",
-          "TgtPrompt": "Select target creatures to move counters",
-          "TargetMax": "2",
-          "SpellDescription": "Move all counters from target creature onto another target creature.",
-          "CounterType": "All",
-          "CounterNum": "All",
-          "ValidTgts": "Creature"
-        }
-      },
       "cost": null,
+      "description": "Move all counters from target creature onto another target creature.",
+      "effect": {
+        "description": "Move all counters from target creature onto another target creature.",
+        "name": "MoveCounter",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "2",
-        "TgtPrompt": "Select target creatures to move counters",
-        "TargetMax": "2",
-        "SpellDescription": "Move all counters from target creature onto another target creature.",
-        "CounterType": "All",
-        "CounterNum": "All",
-        "ValidTgts": "Creature"
-      }
+      "target_prompt": "Select target creatures to move counters"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

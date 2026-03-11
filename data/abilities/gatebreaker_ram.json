@@ -1,28 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME gets +1/+1 for each Gate you control.",
-        "AddToughness": "X"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME gets +1/+1 for each Gate you control.",
+      "mode": "Continuous"
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "compare": "GE2",
+        "type": "CheckSVar",
+        "var": "X"
+      },
+      "description": "As long as you control two or more Gates, CARDNAME has vigilance and trample.",
       "mode": "Continuous",
-      "params": {
-        "SVarCompare": "GE2",
-        "AddKeyword": "Vigilance & Trample",
-        "CheckSVar": "X",
-        "Description": "As long as you control two or more Gates, CARDNAME has vigilance and trample.",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Vigilance",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

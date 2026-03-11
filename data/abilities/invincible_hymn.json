@@ -2,27 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "SetLife",
-        "params": {
-          "SpellDescription": "Count the number of cards in your library. Your life total becomes that number.",
-          "LifeAmount": "X",
-          "Defined": "You"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Count the number of cards in your library. Your life total becomes that number.",
-        "LifeAmount": "X",
-        "Defined": "You"
-      }
+      "description": "Count the number of cards in your library. Your life total becomes that number.",
+      "effect": {
+        "description": "Count the number of cards in your library. Your life total becomes that number.",
+        "name": "SetLife",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

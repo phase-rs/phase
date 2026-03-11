@@ -1,20 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ValidSource": "Creature.inZoneBattlefield",
-        "RelativeToSource": "Creature.SharesColorWith",
-        "ValidTarget": "Creature",
-        "Description": "Prevent all damage that would be dealt to a creature by another creature if they share a color.",
-        "Prevent": "True",
-        "ActiveZones": "Battlefield"
-      }
+      "description": "Prevent all damage that would be dealt to a creature by another creature if they share a color.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

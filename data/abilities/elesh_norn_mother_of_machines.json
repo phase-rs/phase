@@ -1,31 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Panharmonicon",
-      "params": {
-        "ValidMode": "ChangesZone,ChangesZoneAll",
-        "ValidCard": "Permanent.YouCtrl",
-        "ValidCause": "Permanent",
-        "Description": "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-        "Destination": "Battlefield"
-      }
+      "description": "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+      "mode": "Panharmonicon"
     },
     {
+      "description": "Permanents entering don't cause abilities of permanents your opponents control to trigger.",
       "mode": {
         "Other": "DisableTriggers"
-      },
-      "params": {
-        "Description": "Permanents entering don't cause abilities of permanents your opponents control to trigger.",
-        "ValidCause": "Permanent",
-        "Destination": "Battlefield",
-        "ValidCard": "Permanent.OppCtrl+inZoneBattlefield",
-        "ValidMode": "ChangesZone,ChangesZoneAll"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

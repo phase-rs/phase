@@ -2,37 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "R",
-        "params": {
-          "SpellDescription": "Add {R}. Spend this mana only to cast an Equipment spell or activate an equip ability.",
-          "RestrictValid": "Spell.Equipment,Activated.Equip"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {R}. Spend this mana only to cast an Equipment spell or activate an equip ability.",
-        "RestrictValid": "Spell.Equipment,Activated.Equip"
-      }
+      "description": "Add {R}. Spend this mana only to cast an Equipment spell or activate an equip ability.",
+      "effect": {
+        "produced": [
+          "Red"
+        ],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "Jump — During your turn, CARDNAME has flying.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Jump — During your turn, CARDNAME has flying.",
-        "Condition": "PlayerTurn",
-        "AddKeyword": "Flying",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

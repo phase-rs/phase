@@ -2,26 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "StaticAbilities": "KWPump",
-          "AILogic": "Evasion",
-          "SpellDescription": "Monocolored creatures can't block this turn."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "StaticAbilities": "KWPump",
-        "AILogic": "Evasion",
-        "SpellDescription": "Monocolored creatures can't block this turn."
-      }
+      "description": "Monocolored creatures can't block this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

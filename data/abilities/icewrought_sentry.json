@@ -1,27 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME attacks, you may pay {1}{U}. When you do, tap target creature an opponent controls.",
       "mode": "Attacks",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {1}{U}. When you do, tap target creature an opponent controls.",
-        "Execute": "TrigTrigger"
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever you tap an untapped creature an opponent controls, CARDNAME gets +2/+1 until end of turn.",
       "mode": "Taps",
-      "params": {
-        "Execute": "TrigPump",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Creature.OppCtrl",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you tap an untapped creature an opponent controls, CARDNAME gets +2/+1 until end of turn."
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

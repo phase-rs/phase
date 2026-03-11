@@ -2,39 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Attach",
-        "target": {
-          "type": "Filtered",
-          "filter": "Aura.AttachedTo Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Attach target Aura attached to a creature to another creature.",
+      "effect": {
+        "target": {
+          "card_type": "Aura",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedTo Creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Attach"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "Choices": "Creature",
-        "Object": "Targeted",
-        "SpellDescription": "Attach target Aura attached to a creature to another creature.",
-        "TgtPrompt": "Select target Aura attached to a creature",
-        "Move": "True",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target Aura attached to a creature"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

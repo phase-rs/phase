@@ -2,28 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withoutFlying+attackingYou"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Tap target creature without flying that's attacking you. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBEffect",
-        "TgtPrompt": "Select target creature without flying that's attacking you",
-        "SpellDescription": "Tap target creature without flying that's attacking you. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
-        "StackDescription": "SpellDescription"
-      }
+      "target_prompt": "Select target creature without flying that's attacking you"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

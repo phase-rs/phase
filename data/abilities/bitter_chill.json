@@ -1,42 +1,43 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
-        "Execute": "TrigTap"
-      }
-    },
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, you may pay {1}. If you do, scry 1, then draw a card.",
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard"
+      "description": "Enchanted creature doesn't untap during its controller's untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": {
-        "Other": "Untap"
-      },
-      "params": {
-        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Creature.EnchantedBy",
-        "ValidStepTurnToController": "You",
-        "Layer": "CantHappen"
+      "description": "When CARDNAME enters, tap enchanted creature.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, you may pay {1}. If you do, scry 1, then draw a card.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "faces": []
+  ]
 }

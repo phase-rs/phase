@@ -2,45 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DelayedTrigger",
-        "params": {
-          "TgtPrompt": "Select target creature other than CARDNAME",
-          "ValidTgts": "Creature.Other",
-          "Destination": "Graveyard",
-          "Mode": "ChangesZone",
-          "RememberObjects": "Targeted",
-          "Execute": "TrigChangeZone",
-          "SpellDescription": "When target creature other than CARDNAME dies this turn, return that card to the battlefield under your control.",
-          "ThisTurn": "True",
-          "StackDescription": "When {c:Targeted} dies this turn, return that card to the battlefield under your control.",
-          "ValidCard": "Card.IsTriggerRemembered",
-          "Origin": "Battlefield"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "When target creature other than CARDNAME dies this turn, return that card to the battlefield under your control.",
+      "effect": {
+        "description": "When target creature other than CARDNAME dies this turn, return that card to the battlefield under your control.",
+        "name": "DelayedTrigger",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target creature other than CARDNAME",
-        "ValidTgts": "Creature.Other",
-        "Destination": "Graveyard",
-        "Mode": "ChangesZone",
-        "RememberObjects": "Targeted",
-        "Execute": "TrigChangeZone",
-        "SpellDescription": "When target creature other than CARDNAME dies this turn, return that card to the battlefield under your control.",
-        "ThisTurn": "True",
-        "StackDescription": "When {c:Targeted} dies this turn, return that card to the battlefield under your control.",
-        "ValidCard": "Card.IsTriggerRemembered",
-        "Origin": "Battlefield"
-      }
+      "target_prompt": "Select target creature other than CARDNAME"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

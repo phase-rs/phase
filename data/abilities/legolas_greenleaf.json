@@ -1,41 +1,58 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "CARDNAME can't be blocked by creatures with power 2 or less.",
+      "mode": {
+        "Other": "CantBlockBy"
+      }
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever another legendary creature you control enters, put a +1/+1 counter on CARDNAME.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "Whenever another legendary creature you control enters, put a +1/+1 counter on CARDNAME.",
-        "Destination": "Battlefield",
-        "ValidCard": "Creature.Legendary+Other+YouCtrl"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Legendary"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     },
     {
+      "combat_damage": true,
+      "description": "Whenever CARDNAME deals combat damage to a player, draw a card.",
       "mode": "DamageDone",
-      "params": {
-        "Execute": "TrigDraw",
-        "ValidTarget": "Player",
-        "ValidSource": "Card.Self",
-        "CombatDamage": "True",
-        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card."
-      }
-    }
-  ],
-  "statics": [
-    {
-      "mode": {
-        "Other": "CantBlockBy"
+      "valid_source": {
+        "type": "SelfRef"
       },
-      "params": {
-        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
-        "ValidAttacker": "Creature.Self",
-        "ValidBlocker": "Creature.powerLE2"
+      "valid_target": {
+        "type": "Player"
       }
     }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

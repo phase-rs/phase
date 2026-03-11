@@ -2,37 +2,33 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Instant,Aura"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "3"
+            "cost": "3",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Counter target instant or Aura spell that targets a permanent you control.",
+      "effect": {
+        "target": {
+          "card_type": "Instant,Aura",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetValidTargeting": "Permanent.YouCtrl+inRealZoneBattlefield",
-        "TgtPrompt": "Select target instant or Aura spell",
-        "SpellDescription": "Counter target instant or Aura spell that targets a permanent you control.",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target instant or Aura spell"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,91 +1,76 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever one or more land cards are put into your graveyard from anywhere, you gain 2 life.",
+          "destination": "Graveyard",
           "mode": "ChangesZoneAll",
-          "params": {
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "Whenever one or more land cards are put into your graveyard from anywhere, you gain 2 life.",
-            "Execute": "TrigGainLife",
-            "ValidCards": "Land.YouOwn+!token",
-            "Origin": "Any",
-            "Destination": "Graveyard"
-          }
+          "origin": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         },
         {
+          "description": "At the beginning of your upkeep, if there are four or more land cards in your graveyard and you both own and control CARDNAME and a land named Argoth, Sanctum of Nature, exile them, then meld them into Titania, Gaea Incarnate.",
           "mode": "Phase",
-          "params": {
-            "CheckSVar": "X",
-            "IsPresent": "Card.Self+YouCtrl+YouOwn",
-            "TriggerZones": "Battlefield",
-            "TriggerDescription": "At the beginning of your upkeep, if there are four or more land cards in your graveyard and you both own and control CARDNAME and a land named Argoth, Sanctum of Nature, exile them, then meld them into Titania, Gaea Incarnate.",
-            "Phase": "Upkeep",
-            "Execute": "Meld",
-            "IsPresent2": "Land.YouCtrl+YouOwn+namedArgoth; Sanctum of Nature",
-            "SVarCompare": "GE4",
-            "ValidPlayer": "You"
-          }
+          "phase": "Upkeep",
+          "trigger_zones": [
+            "Battlefield"
+          ]
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": 4,
-            "target": {
-              "type": "Filtered",
-              "filter": "Land.YouCtrl"
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "3 G"
+            "cost": "3 G",
+            "type": "Mana"
           },
+          "description": "Put 4 +1/+1 counters on target land you control. That land becomes a 0/0 Elemental creature with haste. It's still a land.",
+          "effect": {
+            "count": 4,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Land",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "PutCounter"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtPrompt": "Select target land you control",
-            "SubAbility": "DBAnimate",
-            "SpellDescription": "Put 4 +1/+1 counters on target land you control. That land becomes a 0/0 Elemental creature with haste. It's still a land."
-          }
+          "target_prompt": "Select target land you control"
+        }
+      ],
+      "replacements": [],
+      "statics": [
+        {
+          "characteristic_defining": true,
+          "description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+          "mode": "Continuous"
         }
       ],
       "triggers": [
         {
+          "description": "When NICKNAME enters, return all land cards from your graveyard to the battlefield tapped.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Execute": "TrigChangeZoneAll",
-            "TriggerDescription": "When NICKNAME enters, return all land cards from your graveyard to the battlefield tapped.",
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "Destination": "Battlefield"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [
-        {
-          "mode": "Continuous",
-          "params": {
-            "CharacteristicDefining": "True",
-            "SetPower": "X",
-            "SetToughness": "X",
-            "Description": "CARDNAME's power and toughness are each equal to the number of lands you control."
-          }
-        }
-      ],
-      "replacements": []
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

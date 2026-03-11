@@ -1,21 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each player's upkeep, if there are four or more basic land types among lands that player controls, CARDNAME deals 3 damage to that player.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "ValidPlayer": "Player",
-        "SVarCompare": "GE4",
-        "TriggerZones": "Battlefield",
-        "CheckSVar": "CheckLandTypes",
-        "TriggerDescription": "At the beginning of each player's upkeep, if there are four or more basic land types among lands that player controls, CARDNAME deals 3 damage to that player.",
-        "Execute": "TrigDamage"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

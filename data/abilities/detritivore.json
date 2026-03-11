@@ -1,29 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "CounterRemoved",
-      "params": {
-        "Execute": "TrigDestroy",
-        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, destroy target nonbasic land.",
-        "ValidCard": "Card.Self",
-        "TriggerZones": "Exile",
-        "CounterType": "TIME"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME's power and toughness are each equal to the number of nonbasic land cards in your opponents' graveyards.",
-        "SetToughness": "Y",
-        "CharacteristicDefining": "True",
-        "SetPower": "Y"
-      }
+      "characteristic_defining": true,
+      "description": "CARDNAME's power and toughness are each equal to the number of nonbasic land cards in your opponents' graveyards.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever a time counter is removed from CARDNAME while it's exiled, destroy target nonbasic land.",
+      "mode": "CounterRemoved",
+      "trigger_zones": [
+        "Exile"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

@@ -2,44 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "Discard<1/Card>",
+        "type": "Mana"
+      },
+      "description": "Until end of turn, CARDNAME becomes a Human with base power and toughness 1/1, loses all abilities, and gains hexproof. It can't be blocked this turn.",
       "effect": {
-        "type": "Animate",
         "power": 1,
-        "toughness": 1,
-        "types": [
-          "Human"
-        ],
         "target": {
           "type": "Any"
-        }
+        },
+        "toughness": 1,
+        "type": "Animate",
+        "types": [
+          "Human"
+        ]
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "Discard<1/Card>"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Until end of turn, CARDNAME becomes a Human with base power and toughness 1/1, loses all abilities, and gains hexproof. It can't be blocked this turn.",
-        "RemoveCreatureTypes": "True",
-        "Keywords": "Hexproof",
-        "RemoveAllAbilities": "True",
-        "SubAbility": "DBUnblockable"
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "Layer": "CantHappen",
-        "ValidSA": "Spell",
-        "Description": "This spell can't be countered.",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

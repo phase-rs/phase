@@ -1,19 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Delirium — CARDNAME can attack as though it didn't have defender as long as there are four or more card types among cards in your graveyard.",
       "mode": {
         "Other": "CanAttackDefender"
-      },
-      "params": {
-        "Condition": "Delirium",
-        "ValidCard": "Card.Self",
-        "Description": "Delirium — CARDNAME can attack as though it didn't have defender as long as there are four or more card types among cards in your graveyard."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,37 +1,53 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other creatures you control have ward {3}.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "keyword": "Ward:3",
+          "type": "AddKeyword"
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "Whenever NICKNAME enters or attacks, ABILITY",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigCharm",
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever NICKNAME enters or attacks, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
-        "Secondary": "True",
-        "Execute": "TrigCharm",
-        "ValidCard": "Card.Self"
+      "secondary": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Other+YouCtrl",
-        "AddKeyword": "Ward:3",
-        "Description": "Other creatures you control have ward {3}."
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

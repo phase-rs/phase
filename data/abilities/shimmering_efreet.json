@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME phases in, target creature phases out.",
       "mode": "PhaseIn",
-      "params": {
-        "TriggerDescription": "Whenever CARDNAME phases in, target creature phases out.",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigWarp"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

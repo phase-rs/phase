@@ -1,39 +1,32 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Graveyard",
-        "Execute": "TrigExile",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME dies, exile it and each player returns all creature cards from their graveyard to their hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "CARDNAME can't be blocked except by three or more creatures.",
       "mode": {
         "Other": "MinMaxBlocker"
-      },
-      "params": {
-        "Min": "3",
-        "ValidCard": "Creature.Self",
-        "Description": "CARDNAME can't be blocked except by three or more creatures."
       }
     },
     {
+      "affected_zone": "Graveyard",
+      "description": "Cards in graveyards can't be the targets of spells or abilities.",
       "mode": {
         "Other": "CantTarget"
-      },
-      "params": {
-        "AffectedZone": "Graveyard",
-        "Description": "Cards in graveyards can't be the targets of spells or abilities."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME dies, exile it and each player returns all creature cards from their graveyard to their hand.",
+      "destination": "Graveyard",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

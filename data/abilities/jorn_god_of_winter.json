@@ -1,63 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Whenever NICKNAME attacks, untap each snow permanent you control.",
           "mode": "Attacks",
-          "params": {
-            "ValidCard": "Card.Self",
-            "Execute": "TrigUntapAllSnow",
-            "TriggerDescription": "Whenever NICKNAME attacks, untap each snow permanent you control."
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "params": {
-              "TgtZone": "Graveyard",
-              "ValidTgts": "Permanent.Snow+YouCtrl",
-              "RememberObjects": "Targeted",
-              "SpellDescription": "You may play target snow permanent card from your graveyard this turn. If you do, it enters tapped.",
-              "TgtPrompt": "Choose target snow permanent card in your graveyard",
-              "ForgetOnMoved": "Graveyard,Stack",
-              "ForgetOnCast": "False",
-              "StaticAbilities": "STPlay",
-              "ReplacementEffects": "ETBCreat"
-            }
-          },
           "cost": {
             "type": "Tap"
           },
+          "description": "You may play target snow permanent card from your graveyard this turn. If you do, it enters tapped.",
+          "effect": {
+            "type": "GenericEffect"
+          },
+          "kind": "Activated",
           "sub_ability": null,
-          "remaining_params": {
-            "TgtZone": "Graveyard",
-            "ValidTgts": "Permanent.Snow+YouCtrl",
-            "RememberObjects": "Targeted",
-            "SpellDescription": "You may play target snow permanent card from your graveyard this turn. If you do, it enters tapped.",
-            "TgtPrompt": "Choose target snow permanent card in your graveyard",
-            "ForgetOnMoved": "Graveyard,Stack",
-            "ForgetOnCast": "False",
-            "StaticAbilities": "STPlay",
-            "ReplacementEffects": "ETBCreat"
-          }
+          "target_prompt": "Choose target snow permanent card in your graveyard"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

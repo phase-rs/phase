@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Seek",
-        "params": {
-          "SubAbility": "DBChangeZone",
-          "Type": "Land.nonBasic",
-          "RememberFound": "True",
-          "SpellDescription": "Seek a nonbasic land card."
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBChangeZone",
-        "Type": "Land.nonBasic",
-        "RememberFound": "True",
-        "SpellDescription": "Seek a nonbasic land card."
-      }
+      "description": "Seek a nonbasic land card.",
+      "effect": {
+        "description": "Seek a nonbasic land card.",
+        "name": "Seek",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,29 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "Target opponent chooses a creature they control. Other creatures they control can't block this turn.",
       "effect": {
-        "type": "ChooseCard",
         "choices": [
           "Creature.TargetedPlayerCtrl"
         ],
         "target": {
-          "type": "Filtered",
-          "filter": "Opponent"
-        }
+          "type": "Player"
+        },
+        "type": "ChooseCard"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target opponent chooses a creature they control. Other creatures they control can't block this turn.",
-        "SubAbility": "DBPumpAll",
-        "Mandatory": "True",
-        "AILogic": "BestBlocker"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,75 +2,67 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Dig",
-        "count": 4,
-        "destination": "Battlefield"
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 G"
+            "cost": "1 G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "type": "Mana",
-            "cost": "Return<1/CARDNAME>"
+            "cost": "Return<1/CARDNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "DestinationZone2": "Graveyard",
-        "ChangeNum": "1",
-        "Tapped": "True",
-        "Optional": "True",
-        "ChangeValid": "Land",
-        "Reveal": "True",
-        "SpellDescription": "Reveal the top four cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest into your graveyard."
-      }
+      "description": "Reveal the top four cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest into your graveyard.",
+      "effect": {
+        "count": 4,
+        "destination": "Battlefield",
+        "type": "Dig"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Graveyard",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card.nonLegendary+YouOwn"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "X X G G"
+            "cost": "X X G G",
+            "type": "Mana"
           },
           {
-            "type": "Mana",
-            "cost": "Discard<1/NICKNAME>"
+            "cost": "Discard<1/NICKNAME>",
+            "type": "Mana"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "X",
-        "ActivationZone": "Hand",
-        "SpellDescription": "Return X target nonlegendary cards from your graveyard to your hand.",
-        "TargetMin": "X",
-        "PrecostDesc": "Channel —"
-      }
+      "description": "Return X target nonlegendary cards from your graveyard to your hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "Graveyard",
+        "target": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouOwn"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

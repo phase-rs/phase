@@ -1,25 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Goblin",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Goblin creatures you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Goblin creatures you control have menace.",
-        "AddKeyword": "Menace",
-        "Affected": "Goblin.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Elemental",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Elemental creatures you control have menace.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Elemental.YouCtrl",
-        "Description": "Elemental creatures you control have menace.",
-        "AddKeyword": "Menace"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

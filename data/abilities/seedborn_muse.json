@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap all permanents you control during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "ValidCard": "Permanent.YouCtrl",
-        "Description": "Untap all permanents you control during each other player's untap step."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -2,48 +2,57 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "AILogic": "Pump",
-          "ValidTgts": "Creature.Merfolk",
-          "StackDescription": "{c:Targeted} can't be blocked this turn.",
-          "RememberObjects": "Targeted",
-          "StaticAbilities": "Unblockable",
-          "TgtPrompt": "Select target Merfolk creature",
-          "SpellDescription": "Target Merfolk creature can't be blocked this turn.",
-          "ExileOnMoved": "Battlefield"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Target Merfolk creature can't be blocked this turn.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "AILogic": "Pump",
-        "ValidTgts": "Creature.Merfolk",
-        "StackDescription": "{c:Targeted} can't be blocked this turn.",
-        "RememberObjects": "Targeted",
-        "StaticAbilities": "Unblockable",
-        "TgtPrompt": "Select target Merfolk creature",
-        "SpellDescription": "Target Merfolk creature can't be blocked this turn.",
-        "ExileOnMoved": "Battlefield"
-      }
+      "target_prompt": "Select target Merfolk creature"
     }
   ],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "filters": [
+          {
+            "card_type": "Creature",
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Merfolk"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "description": "Other Merfolk creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Description": "Other Merfolk creatures you control get +1/+1.",
-        "Affected": "Creature.Merfolk+Other+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

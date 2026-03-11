@@ -1,39 +1,57 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Equipped creature gets +3/+1.",
+      "mode": "Continuous",
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
+    }
+  ],
   "triggers": [
     {
+      "description": "When CARDNAME is put into a graveyard from the battlefield, exile equipped creature.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Execute": "TrigChangeZone",
-        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, exile equipped creature.",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever equipped creature dies, return that card to the battlefield under your control if it's a Samurai card.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Graveyard",
-        "Execute": "TrigReturn",
-        "Origin": "Battlefield",
-        "ValidCard": "Card.EquippedBy",
-        "TriggerDescription": "Whenever equipped creature dies, return that card to the battlefield under your control if it's a Samurai card."
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "Description": "Equipped creature gets +3/+1.",
-        "Affected": "Creature.EquippedBy",
-        "AddToughness": "1",
-        "AddPower": "3"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

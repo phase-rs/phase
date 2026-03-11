@@ -1,19 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cycle another card, you may pay {1}{W}. If you do, return CARDNAME from your graveyard to the battlefield tapped and it perpetually gets +1/+0.",
       "mode": "Cycled",
-      "params": {
-        "ValidCard": "Card.Other",
-        "TriggerZones": "Graveyard",
-        "Execute": "TrigReturn",
-        "TriggerDescription": "Whenever you cycle another card, you may pay {1}{W}. If you do, return CARDNAME from your graveyard to the battlefield tapped and it perpetually gets +1/+0.",
-        "ValidPlayer": "You"
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "valid_card": {
+        "filters": [
+          {
+            "card_type": "Card",
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

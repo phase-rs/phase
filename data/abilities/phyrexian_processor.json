@@ -2,48 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "b_x_x_phyrexian_minion",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "4"
+            "cost": "4",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "TokenOwner": "You",
-        "SpellDescription": "Create an X/X black Phyrexian Minion creature token, where X is the life paid as CARDNAME entered."
-      }
+      "description": "Create an X/X black Phyrexian Minion creature token, where X is the life paid as CARDNAME entered.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "b_x_x_phyrexian_minion",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, pay any amount of life.",
       "event": "Moved",
-      "params": {
-        "ReplaceWith": "PayLife",
-        "ReplacementResult": "Updated",
-        "Description": "As CARDNAME enters, pay any amount of life.",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,19 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of each opponent's upkeep, CARDNAME deals 2 damage to that player unless they have exactly three or exactly four cards in hand.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of each opponent's upkeep, CARDNAME deals 2 damage to that player unless they have exactly three or exactly four cards in hand.",
-        "Phase": "Upkeep",
-        "Execute": "TrigDamage",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "Opponent"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,36 +2,23 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "TargetType": "Triggered.YouCtrl",
-          "SpellDescription": "Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
-          "ValidTgts": "Card,Emblem",
-          "MayChooseTarget": "True",
-          "TgtPrompt": "Choose target triggered ability you control",
-          "ActivationLimit": "1"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "tapXType<2/Creature>"
+        "cost": "tapXType<2/Creature>",
+        "type": "Mana"
       },
+      "description": "Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
+      "effect": {
+        "description": "Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetType": "Triggered.YouCtrl",
-        "SpellDescription": "Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
-        "ValidTgts": "Card,Emblem",
-        "MayChooseTarget": "True",
-        "TgtPrompt": "Choose target triggered ability you control",
-        "ActivationLimit": "1"
-      }
+      "target_prompt": "Choose target triggered ability you control"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

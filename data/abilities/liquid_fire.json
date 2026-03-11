@@ -2,32 +2,25 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
+      "cost": null,
+      "description": "CARDNAME deals X damage to target creature and 5 minus X damage to that creature's controller, where X is the chosen number.",
       "effect": {
-        "type": "DealDamage",
         "amount": {
           "type": "Variable",
           "value": "X"
         },
         "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "DealDamage"
       },
-      "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDmg",
-        "CostDesc": "As an additional cost to cast this spell, choose a number between 0 and 5.",
-        "SpellDescription": "CARDNAME deals X damage to target creature and 5 minus X damage to that creature's controller, where X is the chosen number.",
-        "AnnounceType": "ChooseNumber",
-        "Max": "5",
-        "Min": "0"
-      }
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

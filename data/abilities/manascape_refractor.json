@@ -1,41 +1,31 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [
+    {
+      "description": "CARDNAME enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ],
   "statics": [
     {
+      "description": "You may spend mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
       "mode": {
         "Other": "ManaConvert"
-      },
-      "params": {
-        "Description": "You may spend mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
-        "ValidCard": "Card.Self",
-        "ValidPlayer": "You",
-        "ValidSA": "Activated",
-        "ManaConversion": "AnyType->AnyColor"
       }
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Battlefield",
-        "Description": "CARDNAME has all activated abilities of all lands on the battlefield.",
-        "Affected": "Card.Self",
-        "GainsAbilitiesOf": "Land"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "CARDNAME has all activated abilities of all lands on the battlefield.",
+      "effect_zone": "Battlefield",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [
-    {
-      "event": "Moved",
-      "params": {
-        "ReplaceWith": "ETBTapped",
-        "Description": "CARDNAME enters tapped.",
-        "ReplacementResult": "Updated",
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
-  "faces": []
+  "triggers": []
 }

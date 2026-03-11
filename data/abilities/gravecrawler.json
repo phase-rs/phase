@@ -1,27 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBlock",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "CARDNAME can't block."
-      }
+      "description": "CARDNAME can't block.",
+      "mode": "CantBlock"
     },
     {
-      "mode": "Continuous",
-      "params": {
-        "EffectZone": "Graveyard",
-        "MayPlay": "True",
-        "IsPresent": "Zombie.YouCtrl",
-        "AffectedZone": "Graveyard",
-        "Description": "You may cast CARDNAME from your graveyard as long as you control a Zombie.",
-        "Affected": "Card.Self"
-      }
+      "affected": {
+        "type": "SelfRef"
+      },
+      "affected_zone": "Graveyard",
+      "condition": {
+        "filter": {
+          "card_type": "Zombie",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "You may cast CARDNAME from your graveyard as long as you control a Zombie.",
+      "effect_zone": "Graveyard",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

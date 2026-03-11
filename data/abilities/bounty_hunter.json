@@ -2,47 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "BOUNTY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.nonBlack"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Put a bounty counter on target nonblack creature.",
+      "effect": {
+        "count": 1,
+        "counter_type": "BOUNTY",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "IsCurse": "True",
-        "TgtPrompt": "Select target nonblack creature",
-        "SpellDescription": "Put a bounty counter on target nonblack creature."
-      }
+      "target_prompt": "Select target nonblack creature"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Destroy",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.counters_GE1_BOUNTY"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Destroy target creature with a bounty counter on it.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Destroy"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Destroy target creature with a bounty counter on it.",
-        "TgtPrompt": "Select target creature with a bounty counter on it"
-      }
+      "target_prompt": "Select target creature with a bounty counter on it"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

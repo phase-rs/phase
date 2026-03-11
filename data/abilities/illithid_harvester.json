@@ -1,53 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "Ceremorphosis — When CARDNAME enters, turn any number of target tapped nontoken creatures face down. They're 2/2 Horror creatures.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "Origin": "Any",
-            "ValidCard": "Card.Self",
-            "TriggerDescription": "Ceremorphosis — When CARDNAME enters, turn any number of target tapped nontoken creatures face down. They're 2/2 Horror creatures.",
-            "Destination": "Battlefield",
-            "Execute": "TrigTurnFaceDown"
+          "origin": "Battlefield",
+          "valid_card": {
+            "type": "SelfRef"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "Tap",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature"
-            }
-          },
           "cost": null,
+          "description": "Tap X target creatures.",
+          "effect": {
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Tap"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "SubAbility": "DBPump",
-            "TgtPrompt": "Select X target creatures",
-            "SpellDescription": "Tap X target creatures.",
-            "AlwaysRemember": "True",
-            "TargetMin": "X",
-            "TargetMax": "X"
-          }
+          "target_prompt": "Select X target creatures"
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

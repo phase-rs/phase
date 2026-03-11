@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted creature can't attack or block and its activated abilities can't be activated.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantBeActivated"
-      },
-      "params": {
-        "ValidCard": "Creature.EnchantedBy",
-        "Description": "Enchanted creature can't attack or block and its activated abilities can't be activated."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,29 +1,27 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Imprint — When CARDNAME enters, you may exile a card from your hand face down.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile a card from your hand face down.",
-        "ValidCard": "Card.Self",
-        "OptionalDecider": "You",
-        "Execute": "TrigExile"
+      "optional": true,
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME dies, turn the exiled card face up. If it's a creature card, put it onto the battlefield under your control.",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
-      "params": {
-        "TriggerDescription": "When CARDNAME dies, turn the exiled card face up. If it's a creature card, put it onto the battlefield under your control.",
-        "Execute": "TrigFaceUp",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "Destination": "Graveyard"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

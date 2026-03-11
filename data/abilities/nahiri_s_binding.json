@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Enchanted permanent can't attack or block, and its activated abilities can't be activated.",
       "mode": {
         "Other": "CantAttack,CantBlock,CantBeActivated"
-      },
-      "params": {
-        "Description": "Enchanted permanent can't attack or block, and its activated abilities can't be activated.",
-        "ValidCard": "Card.EnchantedBy"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

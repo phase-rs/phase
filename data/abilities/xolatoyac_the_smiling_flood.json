@@ -1,39 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME enters or attacks, put a flood counter on target land. That land is an Island in addition to its other types for as long as it has a flood counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter",
-        "Destination": "Battlefield",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a flood counter on target land. That land is an Island in addition to its other types for as long as it has a flood counter on it."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever CARDNAME enters or attacks, put a flood counter on target land. That land is an Island in addition to its other types for as long as it has a flood counter on it.",
       "mode": "Attacks",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigPutCounter",
-        "Secondary": "True",
-        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a flood counter on target land. That land is an Island in addition to its other types for as long as it has a flood counter on it."
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "At the beginning of your end step, untap each permanent you control with a counter on it.",
       "mode": "Phase",
-      "params": {
-        "Phase": "End of Turn",
-        "ValidPlayer": "You",
-        "TriggerZones": "Battlefield",
-        "Execute": "TrigUntap",
-        "TriggerDescription": "At the beginning of your end step, untap each permanent you control with a counter on it."
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

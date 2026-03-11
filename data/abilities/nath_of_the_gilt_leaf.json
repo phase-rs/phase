@@ -1,30 +1,36 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may have target opponent discard a card at random.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "OptionalDecider": "You",
-        "ValidPlayer": "You",
-        "Execute": "TrigDiscard",
-        "TriggerDescription": "At the beginning of your upkeep, you may have target opponent discard a card at random.",
-        "Phase": "Upkeep"
-      }
+      "optional": true,
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     },
     {
+      "description": "Whenever an opponent discards a card, you may create a 1/1 green Elf Warrior creature token.",
       "mode": "Discarded",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.OppOwn",
-        "TriggerDescription": "Whenever an opponent discards a card, you may create a 1/1 green Elf Warrior creature token.",
-        "Execute": "TrigToken",
-        "OptionalDecider": "You"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "OppOwn"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

@@ -2,28 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Regenerate",
-        "params": {
-          "SpellDescription": "Regenerate CARDNAME. Activate only if CARDNAME blocked or was blocked by a blue creature this turn.",
-          "IsPresent": "Card.Self+blockedValidThisTurn Creature.Blue,Card.Self+blockedByValidThisTurn Creature.Blue"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Regenerate CARDNAME. Activate only if CARDNAME blocked or was blocked by a blue creature this turn.",
-        "IsPresent": "Card.Self+blockedValidThisTurn Creature.Blue,Card.Self+blockedByValidThisTurn Creature.Blue"
-      }
+      "description": "Regenerate CARDNAME. Activate only if CARDNAME blocked or was blocked by a blue creature this turn.",
+      "effect": {
+        "description": "Regenerate CARDNAME. Activate only if CARDNAME blocked or was blocked by a blue creature this turn.",
+        "name": "Regenerate",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

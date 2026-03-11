@@ -1,30 +1,30 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When this creature enters, exile the top card of your library. Until the end of your next turn, you may play that card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When this creature enters, exile the top card of your library. Until the end of your next turn, you may play that card.",
-        "Destination": "Battlefield",
-        "Execute": "TrigExile",
-        "Origin": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Flurry — Whenever you cast your second spell each turn, this creature gains double strike until end of turn.",
       "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "TriggerDescription": "Flurry — Whenever you cast your second spell each turn, this creature gains double strike until end of turn.",
-        "Execute": "TrigPump",
-        "ActivatorThisTurnCast": "EQ2",
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.YouCtrl"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

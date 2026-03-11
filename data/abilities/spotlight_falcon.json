@@ -1,33 +1,26 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigConjure",
-        "Destination": "Battlefield",
-        "CheckSVar": "X",
-        "TriggerDescription": "When CARDNAME enters, if evidence was collected, conjure a card named Spotlight Falcon into your hand."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "As an additional cost to cast this spell, you may collect evidence 5.",
+      "effect_zone": "Battlefield",
       "mode": {
         "Other": "OptionalCost"
-      },
-      "params": {
-        "ValidSA": "Spell",
-        "Description": "As an additional cost to cast this spell, you may collect evidence 5.",
-        "ValidCard": "Card.Self",
-        "Cost": "CollectEvidence<5>",
-        "EffectZone": "All"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, if evidence was collected, conjure a card named Spotlight Falcon into your hand.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

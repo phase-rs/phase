@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted creature has swampwalk. (It can't be blocked as long as defending player controls a Swamp.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Landwalk:Swamp",
-        "Affected": "Creature.EnchantedBy",
-        "Description": "Enchanted creature has swampwalk. (It can't be blocked as long as defending player controls a Swamp.)"
-      }
+      "modifications": [
+        {
+          "keyword": "Landwalk:Swamp",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

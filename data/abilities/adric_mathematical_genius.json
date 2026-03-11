@@ -2,74 +2,59 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "CopySpellAbility",
-        "params": {
-          "MayChooseTarget": "True",
-          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-          "TgtPrompt": "Choose target activated or triggered ability you control",
-          "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-          "ValidTgts": "Card,Emblem"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "2 U"
+            "cost": "2 U",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+      "effect": {
+        "description": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+        "name": "CopySpellAbility",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "MayChooseTarget": "True",
-        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
-        "TgtPrompt": "Choose target activated or triggered ability you control",
-        "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
-        "ValidTgts": "Card,Emblem"
-      }
+      "target_prompt": "Choose target activated or triggered ability you control"
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Counter",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card,Emblem"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "1 U"
+            "cost": "1 U",
+            "type": "Mana"
           },
           {
-            "type": "Sacrifice",
             "target": {
               "type": "None"
-            }
+            },
+            "type": "Sacrifice"
           }
-        ]
+        ],
+        "type": "Composite"
       },
+      "description": "Counter target activated or triggered ability.",
+      "effect": {
+        "target": {
+          "card_type": "Card,Emblem",
+          "type": "Typed"
+        },
+        "type": "Counter"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Counter target activated or triggered ability.",
-        "TargetType": "Activated,Triggered",
-        "PrecostDesc": "Ultimate Sacrifice —",
-        "TgtPrompt": "Select target spell or ability"
-      }
+      "target_prompt": "Select target spell or ability"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

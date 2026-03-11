@@ -1,19 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
+      "description": "As CARDNAME enters, you may pay 2 life. If you don't, it enters tapped.",
       "event": "Moved",
-      "params": {
-        "Description": "As CARDNAME enters, you may pay 2 life. If you don't, it enters tapped.",
-        "Destination": "Battlefield",
-        "ReplaceWith": "DBTap",
-        "ValidCard": "Card.Self",
-        "ReplacementResult": "Updated"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

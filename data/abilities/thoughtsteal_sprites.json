@@ -1,20 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast a spell during an opponent's turn, draft a card from CARDNAME's spellbook, then discard a card. This ability triggers only once each turn.",
       "mode": "SpellCast",
-      "params": {
-        "ActivationLimit": "1",
-        "ValidActivatingPlayer": "You",
-        "OpponentTurn": "True",
-        "Execute": "TrigDraft",
-        "TriggerDescription": "Whenever you cast a spell during an opponent's turn, draft a card from CARDNAME's spellbook, then discard a card. This ability triggers only once each turn.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

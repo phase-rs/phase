@@ -2,61 +2,43 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Mana",
-        "produced": "C",
-        "params": {
-          "SpellDescription": "Add {C}."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Add {C}."
-      }
+      "description": "Add {C}.",
+      "effect": {
+        "produced": [],
+        "type": "Mana"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ManaReflected",
-        "params": {
-          "ColorOrType": "Type",
-          "SpellDescription": "Add one mana of any type that a Gate you control could produce.",
-          "ReflectProperty": "Produce",
-          "Valid": "Gate.YouCtrl"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ColorOrType": "Type",
-        "SpellDescription": "Add one mana of any type that a Gate you control could produce.",
-        "ReflectProperty": "Produce",
-        "Valid": "Gate.YouCtrl"
-      }
+      "description": "Add one mana of any type that a Gate you control could produce.",
+      "effect": {
+        "description": "Add one mana of any type that a Gate you control could produce.",
+        "name": "ManaReflected",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Gates, gain 3 life.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "IsPresent": "Gate.YouCtrl",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "PresentCompare": "GE2",
-        "Execute": "TrigGainLife",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Gates, gain 3 life."
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

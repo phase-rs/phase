@@ -2,29 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "ChooseColor",
-        "params": {
-          "SpellDescription": "Target instant or sorcery spell becomes the color of your choice.",
-          "SubAbility": "Animate",
-          "Defined": "You"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Target instant or sorcery spell becomes the color of your choice.",
-        "SubAbility": "Animate",
-        "Defined": "You"
-      }
+      "description": "Target instant or sorcery spell becomes the color of your choice.",
+      "effect": {
+        "description": "Target instant or sorcery spell becomes the color of your choice.",
+        "name": "ChooseColor",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -2,28 +2,17 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SubAbility": "DBDealDamage",
-          "SpellDescription": "Damage can't be prevented this turn. CARDNAME deals X damage to target creature and 1 damage to each other creature with the same controller.",
-          "AILogic": "Burn",
-          "StaticAbilities": "STCantPrevent"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBDealDamage",
-        "SpellDescription": "Damage can't be prevented this turn. CARDNAME deals X damage to target creature and 1 damage to each other creature with the same controller.",
-        "AILogic": "Burn",
-        "StaticAbilities": "STCantPrevent"
-      }
+      "description": "Damage can't be prevented this turn. CARDNAME deals X damage to target creature and 1 damage to each other creature with the same controller.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,18 +1,34 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Dragon"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Dragon creatures you control get +3/+3.",
       "mode": "Continuous",
-      "params": {
-        "AddToughness": "3",
-        "Description": "Dragon creatures you control get +3/+3.",
-        "AddPower": "3",
-        "Affected": "Creature.Dragon+YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 3
+        },
+        {
+          "type": "AddToughness",
+          "value": 3
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

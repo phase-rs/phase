@@ -1,27 +1,51 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Artifact",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has deathtouch as long as you control an artifact.",
       "mode": "Continuous",
-      "params": {
-        "Description": "CARDNAME has deathtouch as long as you control an artifact.",
-        "IsPresent": "Artifact.YouCtrl",
-        "AddKeyword": "Deathtouch",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "keyword": "Deathtouch",
+          "type": "AddKeyword"
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Enchantment",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "CARDNAME has menace as long as you control an enchantment. (It can't be blocked except by two or more creatures.)",
       "mode": "Continuous",
-      "params": {
-        "AddKeyword": "Menace",
-        "Affected": "Card.Self",
-        "Description": "CARDNAME has menace as long as you control an enchantment. (It can't be blocked except by two or more creatures.)",
-        "IsPresent": "Enchantment.YouCtrl"
-      }
+      "modifications": [
+        {
+          "keyword": "Menace",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

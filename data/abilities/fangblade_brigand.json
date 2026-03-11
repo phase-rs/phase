@@ -1,86 +1,74 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gets +1/+0 and gains first strike until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 1,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "SpellDescription": "CARDNAME gets +1/+0 and gains first strike until end of turn.",
-            "Defined": "Self",
-            "KW": "First Strike"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Activated",
+          "cost": {
+            "cost": "1 R",
+            "type": "Mana"
+          },
+          "description": "CARDNAME gets +1/+0 and gains first strike until end of turn.",
           "effect": {
-            "type": "Pump",
             "power": 1,
-            "toughness": 0,
             "target": {
               "type": "Any"
-            }
+            },
+            "toughness": 0,
+            "type": "Pump"
           },
-          "cost": {
-            "type": "Mana",
-            "cost": "1 R"
-          },
-          "sub_ability": null,
-          "remaining_params": {
-            "KW": "First Strike",
-            "SpellDescription": "CARDNAME gets +1/+0 and gains first strike until end of turn.",
-            "Defined": "Self"
-          }
+          "kind": "Activated",
+          "sub_ability": null
         },
         {
-          "kind": "Activated",
-          "effect": {
-            "type": "PumpAll",
-            "power": 2,
-            "toughness": 0,
-            "target": {
-              "type": "All",
-              "filter": ""
-            }
-          },
           "cost": {
-            "type": "Mana",
-            "cost": "4 R"
+            "cost": "4 R",
+            "type": "Mana"
           },
-          "sub_ability": null,
-          "remaining_params": {
-            "ValidCards": "Creature.YouCtrl",
-            "SpellDescription": "Creatures you control get +2/+0 until end of turn."
-          }
+          "description": "Creatures you control get +2/+0 until end of turn.",
+          "effect": {
+            "power": 2,
+            "target": {
+              "type": "Any"
+            },
+            "toughness": 0,
+            "type": "PumpAll"
+          },
+          "kind": "Activated",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

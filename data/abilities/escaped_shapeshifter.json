@@ -1,19 +1,50 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "description": "As long as an opponent controls a creature with flying not named Escaped Shapeshifter, CARDNAME has flying. The same is true for first strike, trample, and protection from any color.",
       "mode": "Continuous",
-      "params": {
-        "SharedRestrictions": "Creature.!namedEscaped Shapeshifter+OppCtrl",
-        "SharedKeywordsZone": "Battlefield",
-        "Affected": "Card.Self",
-        "AddKeyword": "Flying & First Strike & Trample & ProtectionColor",
-        "Description": "As long as an opponent controls a creature with flying not named Escaped Shapeshifter, CARDNAME has flying. The same is true for first strike, trample, and protection from any color."
-      }
+      "modifications": [
+        {
+          "keyword": "Flying",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "First",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Strike",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "Trample",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "&",
+          "type": "AddKeyword"
+        },
+        {
+          "keyword": "ProtectionColor",
+          "type": "AddKeyword"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

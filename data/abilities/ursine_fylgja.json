@@ -2,49 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PreventDamage",
-        "params": {
-          "Defined": "Self",
-          "Amount": "1",
-          "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "SubCounter<1/HEALING>"
+        "cost": "SubCounter<1/HEALING>",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Defined": "Self",
-        "Amount": "1",
-        "SpellDescription": "Prevent the next 1 damage that would be dealt to CARDNAME this turn."
-      }
+      "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+      "effect": {
+        "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
+        "name": "PreventDamage",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
+      "cost": {
+        "cost": "2 W",
+        "type": "Mana"
+      },
+      "description": "Put a healing counter on CARDNAME.",
       "effect": {
-        "type": "PutCounter",
-        "counter_type": "HEALING",
         "count": 1,
+        "counter_type": "HEALING",
         "target": {
           "type": "Any"
-        }
+        },
+        "type": "PutCounter"
       },
-      "cost": {
-        "type": "Mana",
-        "cost": "2 W"
-      },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Put a healing counter on CARDNAME."
-      }
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

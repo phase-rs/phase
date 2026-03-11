@@ -2,27 +2,30 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "",
-        "destination": "Hand",
-        "target": {
-          "type": "Filtered",
-          "filter": "Permanent.nonLand+inZoneBattlefield,Card.suspended"
-        }
-      },
       "cost": null,
+      "description": "Return target nonland permanent or suspended card to its owner's hand.",
+      "effect": {
+        "destination": "Hand",
+        "origin": "",
+        "target": {
+          "card_type": "Permanent",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtZone": "Battlefield,Exile",
-        "SpellDescription": "Return target nonland permanent or suspended card to its owner's hand.",
-        "TgtPrompt": "Select target permanent or suspended card."
-      }
+      "target_prompt": "Select target permanent or suspended card."
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

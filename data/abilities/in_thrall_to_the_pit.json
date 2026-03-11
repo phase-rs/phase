@@ -2,27 +2,21 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainControl",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "AddKWs": "Haste",
-        "Untap": "True",
-        "SubAbility": "DelTrig",
-        "SpellDescription": "Gain control of target creature until end of turn. Untap it. It gains haste until end of turn. If this spell was kicked, sacrifice that creature at the beginning of the next end step.",
-        "LoseControl": "EOT"
-      }
+      "description": "Gain control of target creature until end of turn. Untap it. It gains haste until end of turn. If this spell was kicked, sacrifice that creature at the beginning of the next end step.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "GainControl"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

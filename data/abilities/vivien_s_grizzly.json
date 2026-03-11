@@ -2,38 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "PeekAndReveal",
-        "params": {
-          "PeekAmount": "1",
-          "RevealValid": "Creature,Planeswalker",
-          "AILogic": "AtOppEOT",
-          "RememberRevealed": "True",
-          "SubAbility": "DBChangeZone",
-          "RevealOptional": "True",
-          "SpellDescription": "Look at the top card of your library. If it's a creature or planeswalker card, you may reveal it and put it into your hand. If you don't put the card into your hand, put it on the bottom of your library."
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "3 G"
+        "cost": "3 G",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "PeekAmount": "1",
-        "RevealValid": "Creature,Planeswalker",
-        "AILogic": "AtOppEOT",
-        "RememberRevealed": "True",
-        "SubAbility": "DBChangeZone",
-        "RevealOptional": "True",
-        "SpellDescription": "Look at the top card of your library. If it's a creature or planeswalker card, you may reveal it and put it into your hand. If you don't put the card into your hand, put it on the bottom of your library."
-      }
+      "description": "Look at the top card of your library. If it's a creature or planeswalker card, you may reveal it and put it into your hand. If you don't put the card into your hand, put it on the bottom of your library.",
+      "effect": {
+        "description": "Look at the top card of your library. If it's a creature or planeswalker card, you may reveal it and put it into your hand. If you don't put the card into your hand, put it on the bottom of your library.",
+        "name": "PeekAndReveal",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

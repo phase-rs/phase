@@ -1,17 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you crank CARDNAME, until end of turn, target creature becomes a copy of any creature on the battlefield, except it's an artifact in addition to its other types.",
       "mode": "CrankContraption",
-      "params": {
-        "Execute": "TrigCrank",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Whenever you crank CARDNAME, until end of turn, target creature becomes a copy of any creature on the battlefield, except it's an artifact in addition to its other types."
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

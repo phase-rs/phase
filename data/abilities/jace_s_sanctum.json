@@ -1,30 +1,25 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "SpellCast",
-      "params": {
-        "ValidActivatingPlayer": "You",
-        "ValidCard": "Instant,Sorcery",
-        "TriggerZones": "Battlefield",
-        "Execute": "DBScry",
-        "TriggerDescription": "Whenever you cast a instant or sorcery spell, scry 1."
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Type": "Spell",
-        "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
-        "Activator": "You",
-        "Amount": "1",
-        "ValidCard": "Instant,Sorcery"
-      }
+      "description": "Instant and sorcery spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "Whenever you cast a instant or sorcery spell, scry 1.",
+      "mode": "SpellCast",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Instant,Sorcery",
+        "type": "Typed"
+      }
+    }
+  ]
 }

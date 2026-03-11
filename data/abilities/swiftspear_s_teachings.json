@@ -2,30 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "Permanent",
-          "SubAbility": "DBDraw",
-          "SpellDescription": "You get a one-time boon with \"When you cast a creature spell, it gains your choice of prowess or haste.\"",
-          "Boon": "True",
-          "Triggers": "SpellCast"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "Permanent",
-        "SubAbility": "DBDraw",
-        "SpellDescription": "You get a one-time boon with \"When you cast a creature spell, it gains your choice of prowess or haste.\"",
-        "Boon": "True",
-        "Triggers": "SpellCast"
-      }
+      "description": "You get a one-time boon with \"When you cast a creature spell, it gains your choice of prowess or haste.\"",
+      "duration": "Permanent",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

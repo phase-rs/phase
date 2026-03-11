@@ -1,22 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you activate an ability of an artifact or creature that isn't a mana ability, if one or more permanents were sacrificed to activate it, you may copy that ability. You may choose new targets for the copy. (Sacrificing an artifact for mana to activate an ability doesn't count.)",
       "mode": "AbilityCast",
-      "params": {
-        "ValidCard": "Artifact.inZoneBattlefield,Creature.inZoneBattlefield",
-        "ValidActivatingPlayer": "You",
-        "OptionalDecider": "You",
-        "TriggerZones": "Battlefield",
-        "ValidSA": "SpellAbility.!ManaAbility",
-        "Condition": "Sacrificed",
-        "Execute": "TrigCopy",
-        "TriggerDescription": "Whenever you activate an ability of an artifact or creature that isn't a mana ability, if one or more permanents were sacrificed to activate it, you may copy that ability. You may choose new targets for the copy. (Sacrificing an artifact for mana to activate an ability doesn't count.)"
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Artifact",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

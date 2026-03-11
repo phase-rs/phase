@@ -1,27 +1,39 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During your turn, creatures you control get +2/+0.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "PlayerTurn",
-        "Affected": "Creature.YouCtrl",
-        "AddPower": "2",
-        "Description": "During your turn, creatures you control get +2/+0."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        }
+      ]
     },
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "During turns other than yours, creatures you control get -0/-2.",
       "mode": "Continuous",
-      "params": {
-        "Condition": "NotPlayerTurn",
-        "Description": "During turns other than yours, creatures you control get -0/-2.",
-        "AddToughness": "-2",
-        "Affected": "Creature.YouCtrl"
-      }
+      "modifications": [
+        {
+          "type": "AddToughness",
+          "value": -2
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

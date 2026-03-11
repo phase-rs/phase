@@ -1,28 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigConjure",
-        "TriggerDescription": "When CARDNAME enters, conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random.",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "Destination": "Battlefield"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "Whenever a player plays a Desert, that player draws a card and you gain 3 life.",
       "mode": "LandPlayed",
-      "params": {
-        "ValidCard": "Desert",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever a player plays a Desert, that player draws a card and you gain 3 life.",
-        "Execute": "TrigDraw"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Desert",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

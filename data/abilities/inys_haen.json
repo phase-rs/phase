@@ -1,45 +1,49 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
       "mode": "PlaneswalkedTo",
-      "params": {
-        "Execute": "TrigMill",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
-        "TriggerZones": "Command"
+      "trigger_zones": [
+        "Command"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "Execute": "TrigMill",
-        "Secondary": "True",
-        "TriggerZones": "Command",
-        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
-        "ValidPlayer": "You"
-      }
+      "phase": "Upkeep",
+      "secondary": true,
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "When you planeswalk away from CARDNAME, each player returns all land cards from their graveyard to the battlefield tapped.",
       "mode": "PlaneswalkedFrom",
-      "params": {
-        "ValidCard": "Plane.Self",
-        "Execute": "TrigChangeZoneAll",
-        "TriggerDescription": "When you planeswalk away from CARDNAME, each player returns all land cards from their graveyard to the battlefield tapped."
+      "valid_card": {
+        "card_type": "Plane",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever chaos ensues, return target nonland card from your graveyard to your hand.",
       "mode": "ChaosEnsues",
-      "params": {
-        "TriggerDescription": "Whenever chaos ensues, return target nonland card from your graveyard to your hand.",
-        "TriggerZones": "Command",
-        "Execute": "RolledChaos"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

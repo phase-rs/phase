@@ -1,38 +1,46 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "ValidTarget": "Player.Chosen",
-        "ActiveZones": "Battlefield",
-        "Execute": "TrigLoseLifeRemembered",
-        "TriggerDescription": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life."
+      "valid_target": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Chosen"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life.",
       "mode": "DamageDoneOnce",
-      "params": {
-        "Secondary": "True",
-        "ActiveZones": "Battlefield",
-        "ValidTarget": "Player.IsRemembered",
-        "Execute": "TrigLoseLifeChosen",
-        "TriggerDescription": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life."
+      "secondary": true,
+      "valid_target": {
+        "card_type": "Player",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Battlefield",
-        "Execute": "DBCleanup",
-        "Static": "True",
-        "ValidCard": "Card.Self",
-        "Destination": "Any"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

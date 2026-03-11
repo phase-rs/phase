@@ -1,20 +1,21 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever a -1/-1 counter is put on a creature, you may create a 1/1 green Elf Warrior creature token.",
       "mode": "CounterAdded",
-      "params": {
-        "OptionalDecider": "You",
-        "ValidCard": "Creature",
-        "TriggerZones": "Battlefield",
-        "CounterType": "M1M1",
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever a -1/-1 counter is put on a creature, you may create a 1/1 green Elf Warrior creature token."
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Creature",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

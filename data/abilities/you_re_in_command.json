@@ -2,33 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AlterAttribute",
-        "params": {
-          "SpellDescription": "Choose target creature you own and control. That creature becomes your commander. Any other commanders you have are no longer your commander. (That creature starts with a commander tax of {0}.)",
-          "Attributes": "Commander",
-          "SubAbility": "DBDemote",
-          "ValidTgts": "Creature.YouOwn+YouCtrl",
-          "RememberTargets": "True",
-          "IncludeAllComponentCards": "True"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Choose target creature you own and control. That creature becomes your commander. Any other commanders you have are no longer your commander. (That creature starts with a commander tax of {0}.)",
-        "Attributes": "Commander",
-        "SubAbility": "DBDemote",
-        "ValidTgts": "Creature.YouOwn+YouCtrl",
-        "RememberTargets": "True",
-        "IncludeAllComponentCards": "True"
-      }
+      "description": "Choose target creature you own and control. That creature becomes your commander. Any other commanders you have are no longer your commander. (That creature starts with a commander tax of {0}.)",
+      "effect": {
+        "description": "Choose target creature you own and control. That creature becomes your commander. Any other commanders you have are no longer your commander. (That creature starts with a commander tax of {0}.)",
+        "name": "AlterAttribute",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

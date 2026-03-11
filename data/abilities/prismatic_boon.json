@@ -2,37 +2,20 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "Protection",
-        "params": {
-          "TargetMin": "X",
-          "TgtPrompt": "Select X target creatures",
-          "StackDescription": "Choose a color. X target creatures [{c:Targeted}] gain protection from the chosen color until end of turn.",
-          "TargetMax": "X",
-          "ValidTgts": "Creature",
-          "SpellDescription": "Choose a color. X target creatures gain protection from the chosen color until end of turn.",
-          "Gains": "Choice",
-          "Choices": "AnyColor"
-        }
-      },
       "cost": null,
+      "description": "Choose a color. X target creatures gain protection from the chosen color until end of turn.",
+      "effect": {
+        "description": "Choose a color. X target creatures gain protection from the chosen color until end of turn.",
+        "name": "Protection",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMin": "X",
-        "TgtPrompt": "Select X target creatures",
-        "StackDescription": "Choose a color. X target creatures [{c:Targeted}] gain protection from the chosen color until end of turn.",
-        "TargetMax": "X",
-        "ValidTgts": "Creature",
-        "SpellDescription": "Choose a color. X target creatures gain protection from the chosen color until end of turn.",
-        "Gains": "Choice",
-        "Choices": "AnyColor"
-      }
+      "target_prompt": "Select X target creatures"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

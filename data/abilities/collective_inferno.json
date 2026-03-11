@@ -1,19 +1,13 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [
     {
-      "event": "DamageDone",
-      "params": {
-        "ReplaceWith": "DmgTwice",
-        "ActiveZones": "Battlefield",
-        "ValidSource": "Card.ChosenType+YouCtrl",
-        "ValidTarget": "Permanent,Player",
-        "Description": "Double all damage that sources you control of the chosen type would deal."
-      }
+      "description": "Double all damage that sources you control of the chosen type would deal.",
+      "event": "DamageDone"
     }
   ],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

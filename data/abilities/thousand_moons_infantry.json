@@ -1,18 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "Untap CARDNAME during each other player's untap step.",
       "mode": {
         "Other": "UntapOtherPlayer"
-      },
-      "params": {
-        "ValidCard": "Card.Self",
-        "Description": "Untap CARDNAME during each other player's untap step."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,35 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, if you control two or more Plains, you may create a 1/1 white Kithkin Soldier creature token.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "IsPresent": "Plains.YouCtrl",
-        "PresentCompare": "GE2",
-        "Destination": "Battlefield",
-        "Execute": "TrigToken",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Plains, you may create a 1/1 white Kithkin Soldier creature token.",
-        "OptionalDecider": "You"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "description": "When CARDNAME enters, if you control two or more Swamps, you may put a -1/-1 counter on target creature.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Card.Self",
-        "PresentCompare": "GE2",
-        "OptionalDecider": "You",
-        "Destination": "Battlefield",
-        "Origin": "Any",
-        "Execute": "TrigPutCounter",
-        "TriggerDescription": "When CARDNAME enters, if you control two or more Swamps, you may put a -1/-1 counter on target creature.",
-        "IsPresent": "Swamp.YouCtrl"
+      "optional": true,
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

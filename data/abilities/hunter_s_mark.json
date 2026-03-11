@@ -2,51 +2,39 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Pump",
-        "power": 1,
-        "toughness": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.YouCtrl"
-        }
-      },
       "cost": null,
+      "description": "Target creature you control gets +1/+1 until end of turn. It deals damage equal to its power to target creature you don't control.",
+      "effect": {
+        "power": 1,
+        "target": {
+          "card_type": "Creature",
+          "controller": "You",
+          "type": "Typed"
+        },
+        "toughness": 1,
+        "type": "Pump"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "StackDescription": "{c:ThisTargetedCard} gets +1/+1 until end of turn.",
-        "SubAbility": "SoulsDamage",
-        "TgtPrompt": "Select target creature you control",
-        "AILogic": "PowerDmg",
-        "SpellDescription": "Target creature you control gets +1/+1 until end of turn. It deals damage equal to its power to target creature you don't control."
-      }
+      "target_prompt": "Select target creature you control"
     }
   ],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "ReduceCost",
-      "params": {
-        "Description": "This spell costs {3} less to cast if it targets a blue permanent you don't control.",
-        "ValidCard": "Card.Self",
-        "ValidTarget": "Card.Blue+YouDontCtrl",
-        "Type": "Spell",
-        "Amount": "3",
-        "EffectZone": "All"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "This spell can't be countered.",
       "event": "Counter",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Layer": "CantHappen",
-        "Description": "This spell can't be countered.",
-        "ValidSA": "Spell"
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "This spell costs {3} less to cast if it targets a blue permanent you don't control.",
+      "effect_zone": "Battlefield",
+      "mode": "ReduceCost"
+    }
+  ],
+  "triggers": []
 }

@@ -1,50 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [],
+      "replacements": [],
+      "statics": [],
       "triggers": [
         {
+          "description": "When CARDNAME enters, if you cast it, for each player, choose a creature with power 2 or less that player controls. Then destroy all creatures except creatures chosen this way.",
+          "destination": "Battlefield",
           "mode": "ChangesZone",
-          "params": {
-            "ValidCard": "Card.Self+wasCastByYou",
-            "TriggerDescription": "When CARDNAME enters, if you cast it, for each player, choose a creature with power 2 or less that player controls. Then destroy all creatures except creatures chosen this way.",
-            "Destination": "Battlefield",
-            "Execute": "TrigRepeat"
+          "valid_card": {
+            "card_type": "Card",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Self"
+              }
+            ],
+            "type": "Typed"
           }
         }
-      ],
-      "statics": [],
-      "replacements": []
+      ]
     },
     {
       "abilities": [],
-      "triggers": [
-        {
-          "mode": "SpellCast",
-          "params": {
-            "Execute": "TrigEffect",
-            "TriggerDescription": "Whenever an opponent casts a spell during their turn, they can't attack you or planeswalkers you control this turn.",
-            "TriggerZones": "Battlefield",
-            "ValidCard": "Card",
-            "ValidActivatingPlayer": "Player.Opponent+Active"
-          }
-        }
-      ],
+      "replacements": [],
       "statics": [
         {
-          "mode": "CantBeCast",
-          "params": {
-            "Description": "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
-            "Caster": "Player.Opponent+attackedYouTheirCurrentTurn,Player.Opponent+attackedYouCtrlTheirCurrentTurn_Planeswalker"
-          }
+          "description": "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
+          "mode": "CantBeCast"
         }
       ],
-      "replacements": []
+      "triggers": [
+        {
+          "description": "Whenever an opponent casts a spell during their turn, they can't attack you or planeswalkers you control this turn.",
+          "mode": "SpellCast",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "valid_card": {
+            "card_type": "Card",
+            "type": "Typed"
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

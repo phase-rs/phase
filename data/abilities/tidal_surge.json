@@ -2,26 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Tap",
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature.withoutFlying"
-        }
-      },
       "cost": null,
+      "description": "Tap up to three target creatures without flying.",
+      "effect": {
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Tap"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "TargetMax": "3",
-        "TargetMin": "0",
-        "TgtPrompt": "Choose target creature without flying",
-        "SpellDescription": "Tap up to three target creatures without flying."
-      }
+      "target_prompt": "Choose target creature without flying"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,27 +1,24 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
       "mode": "Phase",
-      "params": {
-        "TriggerZones": "Command",
-        "TriggerDescription": "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
-        "Execute": "TrigAnimate",
-        "Phase": "BeginCombat",
-        "ValidPlayer": "You"
-      }
+      "phase": "BeginCombat",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
+      "description": "Whenever chaos ensues, create a Treasure token and a 2/2 white Alien creature token.",
       "mode": "ChaosEnsues",
-      "params": {
-        "Execute": "TrigToken",
-        "TriggerDescription": "Whenever chaos ensues, create a Treasure token and a 2/2 white Alien creature token.",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

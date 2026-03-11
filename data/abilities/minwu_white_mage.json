@@ -1,18 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you gain life, put a +1/+1 counter on each Cleric you control.",
       "mode": "LifeGained",
-      "params": {
-        "Execute": "TrigPutCounterAll",
-        "ValidPlayer": "You",
-        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on each Cleric you control.",
-        "TriggerZones": "Battlefield"
-      }
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

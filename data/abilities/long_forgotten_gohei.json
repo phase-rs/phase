@@ -1,28 +1,38 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Creature",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Spirit"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Spirit creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Creature.Spirit+YouCtrl",
-        "AddPower": "1",
-        "AddToughness": "1",
-        "Description": "Spirit creatures you control get +1/+1."
-      }
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ]
     },
     {
-      "mode": "ReduceCost",
-      "params": {
-        "Activator": "You",
-        "Type": "Spell",
-        "ValidCard": "Arcane",
-        "Amount": "1",
-        "Description": "Arcane spells you cast cost {1} less to cast."
-      }
+      "description": "Arcane spells you cast cost {1} less to cast.",
+      "mode": "ReduceCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

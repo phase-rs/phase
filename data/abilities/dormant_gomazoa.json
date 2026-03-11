@@ -1,42 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "BecomesTarget",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidSource": "Spell",
-        "ValidTarget": "You",
-        "Execute": "TrigUntap",
-        "OptionalDecider": "You",
-        "TriggerDescription": "Whenever you become the target of a spell, you may untap this creature."
+      "description": "This creature enters tapped.",
+      "event": "Moved",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "description": "This creature doesn't untap during your untap step.",
+      "event": {
+        "Other": "Untap"
+      },
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Moved",
-      "params": {
-        "ValidCard": "Card.Self",
-        "Destination": "Battlefield",
-        "Description": "This creature enters tapped.",
-        "ReplaceWith": "ETBTapped",
-        "ReplacementResult": "Updated"
-      }
-    },
-    {
-      "event": {
-        "Other": "Untap"
+      "description": "Whenever you become the target of a spell, you may untap this creature.",
+      "mode": "BecomesTarget",
+      "optional": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_source": {
+        "card_type": "Spell",
+        "type": "Typed"
       },
-      "params": {
-        "Layer": "CantHappen",
-        "ValidCard": "Card.Self",
-        "Description": "This creature doesn't untap during your untap step.",
-        "ValidStepTurnToController": "You"
+      "valid_target": {
+        "card_type": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

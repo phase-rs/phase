@@ -1,17 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ],
+        "type": "Typed"
+      },
+      "description": "Enchanted land has \"{T}: Target creature gains flying until end of turn. Activate only as a sorcery.\"",
       "mode": "Continuous",
-      "params": {
-        "Description": "Enchanted land has \"{T}: Target creature gains flying until end of turn. Activate only as a sorcery.\"",
-        "Affected": "Card.EnchantedBy",
-        "AddAbility": "DPTapCreature"
-      }
+      "modifications": [
+        {
+          "ability": "DPTapCreature",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

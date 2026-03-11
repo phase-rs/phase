@@ -1,24 +1,16 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card",
-        "Caster": "Player.NonActive",
-        "Description": "Players can cast spells and activate abilities only during their own turns."
-      }
+      "description": "Players can cast spells and activate abilities only during their own turns.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "ValidCard": "Card",
-        "Activator": "Player.NonActive"
-      }
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

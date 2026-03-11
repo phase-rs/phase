@@ -2,54 +2,42 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "Duration": "UntilYourNextUpkeep",
-          "SpellDescription": "Until your next upkeep, CARDNAME can't phase out.",
-          "StaticAbilities": "CantPhaseOut",
-          "RememberObjects": "Self",
-          "ForgetOnMoved": "Battlefield"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "U"
+        "cost": "U",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "Duration": "UntilYourNextUpkeep",
-        "SpellDescription": "Until your next upkeep, CARDNAME can't phase out.",
-        "StaticAbilities": "CantPhaseOut",
-        "RememberObjects": "Self",
-        "ForgetOnMoved": "Battlefield"
-      }
+      "description": "Until your next upkeep, CARDNAME can't phase out.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME phases out or leaves the battlefield, mill three cards.",
       "mode": "PhaseOut",
-      "params": {
-        "Execute": "TrigMill",
-        "ValidCard": "Card.phasedOutSelf",
-        "TriggerDescription": "When CARDNAME phases out or leaves the battlefield, mill three cards."
+      "valid_card": {
+        "card_type": "Card",
+        "type": "Typed"
       }
     },
     {
+      "description": "When CARDNAME phases out or leaves the battlefield, mill three cards.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Secondary": "True",
-        "ValidCard": "Card.Self",
-        "Origin": "Battlefield",
-        "TriggerDescription": "When CARDNAME phases out or leaves the battlefield, mill three cards.",
-        "TriggerZones": "Battlefield",
-        "Destination": "Any",
-        "Execute": "TrigMill"
+      "origin": "Battlefield",
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

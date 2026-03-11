@@ -2,24 +2,18 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "GainLife",
-        "amount": 6
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ConditionLifeTotal": "You",
-        "ConditionLifeAmount": "LTX",
-        "SubAbility": "DBToken",
-        "AILogic": "PlayForSub",
-        "SpellDescription": "If you have less life than an opponent, you gain 6 life. If you control fewer creatures than an opponent, create three 1/1 white Soldier creature tokens."
-      }
+      "description": "If you have less life than an opponent, you gain 6 life. If you control fewer creatures than an opponent, create three 1/1 white Soldier creature tokens.",
+      "effect": {
+        "amount": 6,
+        "type": "GainLife"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

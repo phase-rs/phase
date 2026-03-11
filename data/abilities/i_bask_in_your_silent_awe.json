@@ -1,51 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "description": "Each opponent can't cast more than one spell each turn.",
+      "effect_zone": "Command",
+      "mode": "CantBeCast"
+    }
+  ],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, if no opponent cast a spell since your last turn ended, abandon this scheme.",
       "mode": "Phase",
-      "params": {
-        "Phase": "Upkeep",
-        "TriggerZones": "Command",
-        "SVarCompare": "EQ0",
-        "Execute": "Abandon",
-        "ValidPlayer": "You",
-        "CheckSVar": "X",
-        "TriggerDescription": "At the beginning of your upkeep, if no opponent cast a spell since your last turn ended, abandon this scheme."
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
       "mode": "SpellCast",
-      "params": {
-        "Static": "True",
-        "Execute": "DBCount",
-        "ValidActivatingPlayer": "Player.Opponent",
-        "TriggerZones": "Command"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     },
     {
       "mode": "Phase",
-      "params": {
-        "Static": "True",
-        "Execute": "DBReset",
-        "ValidPlayer": "You",
-        "TriggerZones": "Command",
-        "Phase": "End of Turn"
-      }
+      "trigger_zones": [
+        "Command"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "CantBeCast",
-      "params": {
-        "ValidCard": "Card",
-        "Description": "Each opponent can't cast more than one spell each turn.",
-        "Caster": "Opponent",
-        "EffectZone": "Command",
-        "NumLimitEachTurn": "1"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

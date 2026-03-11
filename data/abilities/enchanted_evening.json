@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Permanent",
+        "type": "Typed"
+      },
+      "description": "All permanents are enchantments in addition to their other types.",
       "mode": "Continuous",
-      "params": {
-        "Affected": "Permanent",
-        "AddType": "Enchantment",
-        "Description": "All permanents are enchantments in addition to their other types."
-      }
+      "modifications": [
+        {
+          "core_type": "Enchantment",
+          "type": "AddType"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

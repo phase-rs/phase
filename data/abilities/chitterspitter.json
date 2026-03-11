@@ -2,57 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Token",
-        "name": "g_1_1_squirrel",
-        "power": 0,
-        "toughness": 0,
-        "types": [],
-        "colors": [],
-        "keywords": []
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G"
+            "cost": "G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "Create a 1/1 green Squirrel creature token."
-      }
+      "description": "Create a 1/1 green Squirrel creature token.",
+      "effect": {
+        "colors": [],
+        "keywords": [],
+        "name": "g_1_1_squirrel",
+        "power": 0,
+        "toughness": 0,
+        "type": "Token",
+        "types": []
+      },
+      "kind": "Activated",
+      "sub_ability": null
+    }
+  ],
+  "faces": [],
+  "replacements": [],
+  "statics": [
+    {
+      "affected": {
+        "card_type": "Squirrel",
+        "controller": "You",
+        "type": "Typed"
+      },
+      "description": "Squirrels you control get +1/+1 for each acorn counter on CARDNAME.",
+      "mode": "Continuous"
     }
   ],
   "triggers": [
     {
+      "description": "At the beginning of your upkeep, you may sacrifice a token. If you do, put an acorn counter on CARDNAME.",
       "mode": "Phase",
-      "params": {
-        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice a token. If you do, put an acorn counter on CARDNAME.",
-        "Phase": "Upkeep",
-        "TriggerZones": "Battlefield",
-        "ValidPlayer": "You",
-        "Execute": "TrigPutCounter"
-      }
+      "phase": "Upkeep",
+      "trigger_zones": [
+        "Battlefield"
+      ]
     }
-  ],
-  "statics": [
-    {
-      "mode": "Continuous",
-      "params": {
-        "AddPower": "X",
-        "Description": "Squirrels you control get +1/+1 for each acorn counter on CARDNAME.",
-        "Affected": "Squirrel.YouCtrl",
-        "AddToughness": "X"
-      }
-    }
-  ],
-  "replacements": [],
-  "faces": []
+  ]
 }

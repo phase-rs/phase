@@ -1,28 +1,35 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
+  "faces": [],
+  "replacements": [
     {
-      "mode": "Drawn",
-      "params": {
-        "TriggerZones": "Battlefield",
-        "ValidCard": "Card.NamedCard+OwnedBy Player.Chosen",
-        "Execute": "TrapTriggered",
-        "TriggerDescription": "When the chosen player draws a card with the chosen name, sacrifice CARDNAME. If you do, CARDNAME deals 10 damage to that player."
-      }
+      "description": "The chosen player reveals each card they draw.",
+      "event": "Draw"
     }
   ],
   "statics": [],
-  "replacements": [
+  "triggers": [
     {
-      "event": "Draw",
-      "params": {
-        "ReplaceWith": "RevealedDraw",
-        "ValidPlayer": "Player.Chosen",
-        "Description": "The chosen player reveals each card they draw.",
-        "ActiveZones": "Battlefield"
+      "description": "When the chosen player draws a card with the chosen name, sacrifice CARDNAME. If you do, CARDNAME deals 10 damage to that player.",
+      "mode": "Drawn",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "NamedCard"
+          },
+          {
+            "type": "Other",
+            "value": "OwnedBy Player.Chosen"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "faces": []
+  ]
 }

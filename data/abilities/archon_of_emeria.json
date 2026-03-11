@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [
-    {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Each player can't cast more than one spell each turn.",
-        "Caster": "Player",
-        "NumLimitEachTurn": "1",
-        "ValidCard": "Card"
-      }
-    }
-  ],
+  "faces": [],
   "replacements": [
     {
+      "description": "Nonbasic lands your opponents control enter tapped.",
       "event": "Moved",
-      "params": {
-        "Destination": "Battlefield",
-        "ReplaceWith": "ETBTapped",
-        "ReplacementResult": "Updated",
-        "ActiveZones": "Battlefield",
-        "ValidCard": "Land.OppCtrl+nonBasic",
-        "Description": "Nonbasic lands your opponents control enter tapped."
+      "valid_card": {
+        "card_type": "Land",
+        "controller": "Opponent",
+        "type": "Typed"
       }
     }
   ],
-  "faces": []
+  "statics": [
+    {
+      "description": "Each player can't cast more than one spell each turn.",
+      "mode": "CantBeCast"
+    }
+  ],
+  "triggers": []
 }

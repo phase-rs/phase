@@ -2,31 +2,24 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "ChangeZone",
-        "origin": "Stack",
-        "destination": "Exile",
-        "target": {
-          "type": "Filtered",
-          "filter": "Card"
-        }
-      },
       "cost": null,
+      "description": "Exile target spell.",
+      "effect": {
+        "destination": "Exile",
+        "origin": "Stack",
+        "target": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "ChangeZone"
+      },
+      "kind": "Spell",
       "sub_ability": null,
-      "remaining_params": {
-        "RememberChanged": "True",
-        "TargetType": "Spell",
-        "TgtPrompt": "Choose target spell to exile",
-        "SubAbility": "DBRoll",
-        "AITgts": "Card.cmcGE3",
-        "TgtZone": "Stack",
-        "SpellDescription": "Exile target spell."
-      }
+      "target_prompt": "Choose target spell to exile"
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

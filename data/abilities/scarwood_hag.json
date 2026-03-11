@@ -2,58 +2,47 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Pump",
-        "power": 0,
-        "toughness": 0,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Composite",
         "costs": [
           {
-            "type": "Mana",
-            "cost": "G G G G"
+            "cost": "G G G G",
+            "type": "Mana"
           },
           {
             "type": "Tap"
           }
-        ]
+        ],
+        "type": "Composite"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "KW": "Landwalk:Forest",
-        "SpellDescription": "Target creature gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)"
-      }
+      "description": "Target creature gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)",
+      "effect": {
+        "power": 0,
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "toughness": 0,
+        "type": "Pump"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     },
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "Debuff",
-        "params": {
-          "ValidTgts": "Creature",
-          "Keywords": "Landwalk:Forest",
-          "SpellDescription": "Target creature loses forestwalk until end of turn."
-        }
-      },
       "cost": {
         "type": "Tap"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidTgts": "Creature",
-        "Keywords": "Landwalk:Forest",
-        "SpellDescription": "Target creature loses forestwalk until end of turn."
-      }
+      "description": "Target creature loses forestwalk until end of turn.",
+      "effect": {
+        "description": "Target creature loses forestwalk until end of turn.",
+        "name": "Debuff",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

@@ -1,35 +1,29 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigRepeatEach",
-        "TriggerDescription": "When CARDNAME enters, it deals damage to each player equal to the number of nonbasic lands that player controls.",
-        "Destination": "Battlefield"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantGainLife",
-      "params": {
-        "ValidPlayer": "Player",
-        "Description": "Players can't gain life."
-      }
+      "description": "Players can't gain life.",
+      "mode": "CantGainLife"
     },
     {
+      "description": "Damage can't be prevented.",
       "mode": {
         "Other": "CantPreventDamage"
-      },
-      "params": {
-        "Description": "Damage can't be prevented."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, it deals damage to each player equal to the number of nonbasic lands that player controls.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

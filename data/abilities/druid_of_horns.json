@@ -1,20 +1,20 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever you cast an Aura spell that targets CARDNAME, create a 3/3 green Beast creature token.",
       "mode": "SpellCast",
-      "params": {
-        "TargetsValid": "Card.Self",
-        "ValidActivatingPlayer": "You",
-        "Execute": "TrigToken",
-        "TriggerZones": "Battlefield",
-        "TriggerDescription": "Whenever you cast an Aura spell that targets CARDNAME, create a 3/3 green Beast creature token.",
-        "ValidCard": "Aura"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Aura",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

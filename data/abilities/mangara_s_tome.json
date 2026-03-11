@@ -2,64 +2,53 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "GenericEffect",
-        "params": {
-          "SpellDescription": "The next time you would draw a card this turn, instead put the top card of the exiled pile into its owner's hand.",
-          "Triggers": "TrigLeavePlay",
-          "ImprintCards": "Self",
-          "ReplacementEffects": "DrawReplace",
-          "RememberObjects": "RememberedFirst"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2"
+        "cost": "2",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SpellDescription": "The next time you would draw a card this turn, instead put the top card of the exiled pile into its owner's hand.",
-        "Triggers": "TrigLeavePlay",
-        "ImprintCards": "Self",
-        "ReplacementEffects": "DrawReplace",
-        "RememberObjects": "RememberedFirst"
-      }
+      "description": "The next time you would draw a card this turn, instead put the top card of the exiled pile into its owner's hand.",
+      "effect": {
+        "type": "GenericEffect"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, search your library for five cards, exile them in a face-down pile, and shuffle that pile. Then shuffle your library.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigSearch",
-        "TriggerDescription": "When CARDNAME enters, search your library for five cards, exile them in a face-down pile, and shuffle that pile. Then shuffle your library.",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Any",
-        "Static": "True",
-        "ValidCard": "Card.IsRemembered",
-        "Origin": "Exile",
-        "Execute": "TrigForget"
+      "origin": "Exile",
+      "valid_card": {
+        "card_type": "Card",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "TrigReset",
-        "Static": "True",
-        "Origin": "Battlefield",
-        "Destination": "Any",
-        "ValidCard": "Card.Self"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

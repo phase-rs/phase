@@ -2,38 +2,22 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "DigUntil",
-        "params": {
-          "SubAbility": "DBPump",
-          "Valid": "Card.nonLand",
-          "ValidDescription": "nonland",
-          "RevealedLibraryPosition": "-1",
-          "RememberFound": "True",
-          "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.",
-          "RevealedDestination": "Library"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "2 R"
+        "cost": "2 R",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "SubAbility": "DBPump",
-        "Valid": "Card.nonLand",
-        "ValidDescription": "nonland",
-        "RevealedLibraryPosition": "-1",
-        "RememberFound": "True",
-        "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland card. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.",
-        "RevealedDestination": "Library"
-      }
+      "description": "Reveal cards from the top of your library until you reveal a nonland card. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.",
+      "effect": {
+        "description": "Reveal cards from the top of your library until you reveal a nonland card. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.",
+        "name": "DigUntil",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

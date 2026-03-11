@@ -1,60 +1,54 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
-  "statics": [],
-  "replacements": [],
   "faces": [
     {
       "abilities": [
         {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Battlefield",
-            "destination": "Library",
-            "target": {
-              "type": "Filtered",
-              "filter": "Creature.attacking,Creature.blocking"
-            }
-          },
           "cost": null,
+          "description": "Put target attacking or blocking creature on top of its owner's library.",
+          "effect": {
+            "destination": "Library",
+            "origin": "Battlefield",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ChangeZone"
+          },
+          "kind": "Spell",
           "sub_ability": null,
-          "remaining_params": {
-            "LibraryPosition": "0",
-            "SpellDescription": "Put target attacking or blocking creature on top of its owner's library.",
-            "TgtPrompt": "Select target attacking or blocking creature."
-          }
+          "target_prompt": "Select target attacking or blocking creature."
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     },
     {
       "abilities": [
         {
-          "kind": "Spell",
+          "cost": null,
+          "description": "Create a 4/4 white and blue Sphinx creature token with flying and vigilance.",
           "effect": {
-            "type": "Token",
+            "colors": [],
+            "keywords": [],
             "name": "wu_4_4_sphinx_flying_vigilance",
             "power": 0,
             "toughness": 0,
-            "types": [],
-            "colors": [],
-            "keywords": []
+            "type": "Token",
+            "types": []
           },
-          "cost": null,
-          "sub_ability": null,
-          "remaining_params": {
-            "TokenOwner": "You",
-            "SpellDescription": "Create a 4/4 white and blue Sphinx creature token with flying and vigilance."
-          }
+          "kind": "Spell",
+          "sub_ability": null
         }
       ],
-      "triggers": [],
+      "replacements": [],
       "statics": [],
-      "replacements": []
+      "triggers": []
     }
-  ]
+  ],
+  "replacements": [],
+  "statics": [],
+  "triggers": []
 }

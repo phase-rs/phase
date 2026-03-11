@@ -1,21 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may pay {X} rather than pay the mana cost for Samurai spells you cast, where X is that spell's mana value.",
       "mode": {
         "Other": "AlternativeCost"
-      },
-      "params": {
-        "XAlternative": "Count$CardManaCost",
-        "Cost": "X",
-        "ValidSA": "Spell.Samurai",
-        "ValidPlayer": "You",
-        "Description": "You may pay {X} rather than pay the mana cost for Samurai spells you cast, where X is that spell's mana value."
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,17 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "card_type": "Sliver",
+        "type": "Typed"
+      },
+      "description": "All Slivers have \"{2}, {T}: Regenerate target Sliver.\" (The next time that Sliver would be destroyed, instead tap it, remove it from combat, and heal all damage on it.)",
       "mode": "Continuous",
-      "params": {
-        "Description": "All Slivers have \"{2}, {T}: Regenerate target Sliver.\" (The next time that Sliver would be destroyed, instead tap it, remove it from combat, and heal all damage on it.)",
-        "Affected": "Sliver",
-        "AddAbility": "Regen"
-      }
+      "modifications": [
+        {
+          "ability": "Regen",
+          "type": "AddAbility"
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

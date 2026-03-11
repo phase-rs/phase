@@ -2,29 +2,19 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Spell",
-      "effect": {
-        "type": "Other",
-        "api_type": "AnimateAll",
-        "params": {
-          "ValidCards": "Creature.YouCtrl",
-          "Toughness": "X",
-          "SpellDescription": "Creatures you control have base power and toughness X/X until end of turn.",
-          "Power": "X"
-        }
-      },
       "cost": null,
-      "sub_ability": null,
-      "remaining_params": {
-        "ValidCards": "Creature.YouCtrl",
-        "Toughness": "X",
-        "SpellDescription": "Creatures you control have base power and toughness X/X until end of turn.",
-        "Power": "X"
-      }
+      "description": "Creatures you control have base power and toughness X/X until end of turn.",
+      "effect": {
+        "description": "Creatures you control have base power and toughness X/X until end of turn.",
+        "name": "AnimateAll",
+        "type": "Unimplemented"
+      },
+      "kind": "Spell",
+      "sub_ability": null
     }
   ],
-  "triggers": [],
-  "statics": [],
+  "faces": [],
   "replacements": [],
-  "faces": []
+  "statics": [],
+  "triggers": []
 }

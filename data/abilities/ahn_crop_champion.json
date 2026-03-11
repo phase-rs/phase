@@ -1,20 +1,15 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "description": "You may exert CARDNAME as it attacks. When you do, untap all other creatures you control.",
       "mode": {
         "Other": "OptionalAttackCost"
-      },
-      "params": {
-        "Cost": "Exert<1/CARDNAME>",
-        "Trigger": "TrigUntapAll",
-        "Description": "You may exert CARDNAME as it attacks. When you do, untap all other creatures you control.",
-        "ValidCard": "Card.Self"
       }
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

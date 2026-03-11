@@ -1,18 +1,19 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Wild Magic Surge — Whenever CARDNAME attacks, ABILITY",
       "mode": "Attacks",
-      "params": {
-        "Execute": "TrigRollDice",
-        "ValidCard": "Card.Self",
-        "TriggerDescription": "Wild Magic Surge — Whenever CARDNAME attacks, ABILITY",
-        "TriggerZones": "Battlefield"
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

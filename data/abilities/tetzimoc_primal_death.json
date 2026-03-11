@@ -2,44 +2,36 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "PutCounter",
-        "counter_type": "PREY",
-        "count": 1,
-        "target": {
-          "type": "Filtered",
-          "filter": "Creature"
-        }
-      },
       "cost": {
-        "type": "Mana",
-        "cost": "B"
+        "cost": "B",
+        "type": "Mana"
       },
-      "sub_ability": null,
-      "remaining_params": {
-        "CostDesc": "{B}, Reveal CARDNAME from your hand:",
-        "SpellDescription": "Put a prey counter on target creature. Activate only during your turn.",
-        "AILogic": "MarkOppCreature",
-        "PlayerTurn": "True",
-        "IsCurse": "True",
-        "ActivationZone": "Hand"
-      }
+      "description": "Put a prey counter on target creature. Activate only during your turn.",
+      "effect": {
+        "count": 1,
+        "counter_type": "PREY",
+        "target": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "PutCounter"
+      },
+      "kind": "Activated",
+      "sub_ability": null
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "When CARDNAME enters, destroy each creature your opponents control with a prey counter on it.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "TriggerDescription": "When CARDNAME enters, destroy each creature your opponents control with a prey counter on it.",
-        "Origin": "Any",
-        "ValidCard": "Card.Self",
-        "Execute": "TrigDestroyAll"
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

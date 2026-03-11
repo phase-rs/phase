@@ -1,30 +1,23 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self",
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, tap target creature an opponent controls. That creature doesn't untap for as long as you control CARDNAME.",
-        "Execute": "TrigTap"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "RaiseCost",
-      "params": {
-        "Type": "Spell",
-        "ValidTarget": "Card.Self",
-        "Activator": "Opponent",
-        "Description": "Spells your opponents cast that target CARDNAME cost {2} more to cast.",
-        "Amount": "2"
-      }
+      "description": "Spells your opponents cast that target CARDNAME cost {2} more to cast.",
+      "mode": "RaiseCost"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, tap target creature an opponent controls. That creature doesn't untap for as long as you control CARDNAME.",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }

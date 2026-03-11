@@ -1,30 +1,42 @@
 {
   "$schema": "schema.json",
   "abilities": [],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "description": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "ValidCard": "Detective.YouCtrl+Other,Card.Self",
-        "TriggerDescription": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
-        "TriggerZones": "Battlefield",
-        "Origin": "Any",
-        "Destination": "Battlefield",
-        "Execute": "TrigDraw"
+      "origin": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Detective",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "Other,Card.Self"
+          }
+        ],
+        "type": "Typed"
       }
     },
     {
+      "description": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
       "mode": "TurnFaceUp",
-      "params": {
-        "ValidCard": "Detective.YouCtrl",
-        "Secondary": "True",
-        "Execute": "TrigDraw",
-        "TriggerDescription": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
-        "TriggerZones": "Battlefield"
+      "secondary": true,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "valid_card": {
+        "card_type": "Detective",
+        "controller": "You",
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

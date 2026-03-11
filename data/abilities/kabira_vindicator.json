@@ -1,31 +1,69 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 2-4 3/6 Other creatures you control get +1/+1.",
       "mode": "Continuous",
-      "params": {
-        "SetToughness": "6",
-        "AddStaticAbility": "SPump1",
-        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE4_LEVEL",
-        "Description": "LEVEL 2-4 3/6 Other creatures you control get +1/+1.",
-        "SetPower": "3",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 3
+        },
+        {
+          "type": "SetToughness",
+          "value": 6
+        }
+      ]
     },
     {
+      "affected": {
+        "type": "SelfRef"
+      },
+      "condition": {
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Self"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "IsPresent"
+      },
+      "description": "LEVEL 5+ 4/8 Other creatures you control get +2/+2.",
       "mode": "Continuous",
-      "params": {
-        "IsPresent": "Card.Self+counters_GE5_LEVEL",
-        "Description": "LEVEL 5+ 4/8 Other creatures you control get +2/+2.",
-        "SetPower": "4",
-        "SetToughness": "8",
-        "AddStaticAbility": "SPump2",
-        "Affected": "Card.Self"
-      }
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 8
+        }
+      ]
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

@@ -1,23 +1,17 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "CantBeCast",
-      "params": {
-        "Description": "Spells with the chosen name can't be cast.",
-        "ValidCard": "Card.NamedCard"
-      }
+      "description": "Spells with the chosen name can't be cast.",
+      "mode": "CantBeCast"
     },
     {
-      "mode": "CantBeActivated",
-      "params": {
-        "Description": "Activated abilities of sources with the chosen name can't be activated.",
-        "ValidCard": "Card.NamedCard"
-      }
+      "description": "Activated abilities of sources with the chosen name can't be activated.",
+      "mode": "CantBeActivated"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": []
 }

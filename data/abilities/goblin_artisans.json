@@ -2,67 +2,77 @@
   "$schema": "schema.json",
   "abilities": [
     {
-      "kind": "Activated",
-      "effect": {
-        "type": "Other",
-        "api_type": "FlipACoin",
-        "params": {
-          "TgtPrompt": "Select target artifact spell you control",
-          "ValidTgts": "Artifact.YouCtrl+IsRemembered",
-          "WinSubAbility": "DBDraw",
-          "LoseSubAbility": "DBCounter",
-          "SpellDescription": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
-          "TgtZone": "Stack",
-          "TargetType": "Spell"
-        }
-      },
       "cost": {
         "type": "Tap"
       },
+      "description": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
+      "effect": {
+        "description": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
+        "name": "FlipACoin",
+        "type": "Unimplemented"
+      },
+      "kind": "Activated",
       "sub_ability": null,
-      "remaining_params": {
-        "TgtPrompt": "Select target artifact spell you control",
-        "ValidTgts": "Artifact.YouCtrl+IsRemembered",
-        "WinSubAbility": "DBDraw",
-        "LoseSubAbility": "DBCounter",
-        "SpellDescription": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
-        "TgtZone": "Stack",
-        "TargetType": "Spell"
-      }
+      "target_prompt": "Select target artifact spell you control"
     }
   ],
+  "faces": [],
+  "replacements": [],
+  "statics": [],
   "triggers": [
     {
+      "destination": "Stack",
       "mode": "ChangesZone",
-      "params": {
-        "Destination": "Stack",
-        "Static": "True",
-        "ValidCard": "Artifact.YouCtrl",
-        "Origin": "Any",
-        "Execute": "DBRemember"
+      "origin": "Battlefield",
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "type": "Typed"
       }
     },
     {
       "mode": "BecomesTarget",
-      "params": {
-        "Execute": "DBForget",
-        "ValidSource": "Activated.Creature+Other+namedGoblin Artisans",
-        "Static": "True",
-        "ValidTarget": "Spell"
+      "valid_source": {
+        "filters": [
+          {
+            "card_type": "Activated",
+            "properties": [
+              {
+                "type": "Other",
+                "value": "Creature"
+              }
+            ],
+            "type": "Typed"
+          },
+          {
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Not"
+          }
+        ],
+        "type": "And"
+      },
+      "valid_target": {
+        "card_type": "Spell",
+        "type": "Typed"
       }
     },
     {
+      "destination": "Battlefield",
       "mode": "ChangesZone",
-      "params": {
-        "Execute": "DBCleanup",
-        "ValidCard": "Artifact.YouCtrl+IsRemembered",
-        "Static": "True",
-        "Origin": "Stack",
-        "Destination": "Any"
+      "origin": "Stack",
+      "valid_card": {
+        "card_type": "Artifact",
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Other",
+            "value": "IsRemembered"
+          }
+        ],
+        "type": "Typed"
       }
     }
-  ],
-  "statics": [],
-  "replacements": [],
-  "faces": []
+  ]
 }

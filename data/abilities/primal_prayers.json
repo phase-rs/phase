@@ -1,32 +1,28 @@
 {
   "$schema": "schema.json",
   "abilities": [],
-  "triggers": [
-    {
-      "mode": "ChangesZone",
-      "params": {
-        "Origin": "Any",
-        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters).",
-        "Execute": "TrigEnergy",
-        "Destination": "Battlefield",
-        "ValidCard": "Card.Self"
-      }
-    }
-  ],
+  "faces": [],
+  "replacements": [],
   "statics": [
     {
-      "mode": "Continuous",
-      "params": {
-        "MayPlayAltManaCost": "PayEnergy<1>",
-        "AffectedZone": "Hand,Graveyard,Exile,Library,Command",
-        "MayPlay": "True",
-        "Affected": "Creature.cmcLE3",
-        "MayPlayWithFlash": "True",
-        "MayPlayDontGrantZonePermissions": "True",
-        "Description": "You may cast creature spells with mana value 3 or less by paying {E} rather than paying their mana costs. If you cast a spell this way, you may cast it as though it had flash."
-      }
+      "affected": {
+        "card_type": "Creature",
+        "type": "Typed"
+      },
+      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "description": "You may cast creature spells with mana value 3 or less by paying {E} rather than paying their mana costs. If you cast a spell this way, you may cast it as though it had flash.",
+      "mode": "Continuous"
     }
   ],
-  "replacements": [],
-  "faces": []
+  "triggers": [
+    {
+      "description": "When CARDNAME enters, you get {E}{E} (two energy counters).",
+      "destination": "Battlefield",
+      "mode": "ChangesZone",
+      "origin": "Battlefield",
+      "valid_card": {
+        "type": "SelfRef"
+      }
+    }
+  ]
 }
