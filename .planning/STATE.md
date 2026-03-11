@@ -10,8 +10,8 @@ progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 46
-  completed_plans: 36
-  percent: 78
+  completed_plans: 37
+  percent: 80
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 29 — Plan 05 of 16 complete
+Phase: 29 — Plan 06 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
+Last activity: 2026-03-11 — Phase 29 Plan 06 complete (Transport and AI N-Player Migration)
 
-Progress: [████████████████░░░░] 36/46 plans (78%)
+Progress: [████████████████░░░░] 37/46 plans (80%)
 
 ## Performance Metrics
 
@@ -191,6 +191,10 @@ Recent decisions affecting current work:
 - [29-04]: commander_cast_count as HashMap<ObjectId, u32> on GameState for per-commander tax tracking (partner support)
 - [29-04]: Zone redirection in move_to_zone() at lowest level -- catches all zone changes including SBA-driven ones
 - [29-04]: Commander tax adds to generic mana cost rather than separate payment step
+- [29-06]: eval.rs uses average opponent life to avoid inflating score in multiplayer
+- [29-06]: combat_ai.rs uses min opponent life for aggression heuristic (attack weakest)
+- [29-06]: Session uses Vec-based player tracking with ai_seats HashSet for N-player
+- [29-06]: Protocol player_count defaults to 2 via serde default for backward compat
 - [29-05]: engine.rs DeclareBlockers uses WaitingFor player field instead of recomputing defending player
 - [29-05]: opponent() removed from priority.rs (zero external callers in engine crate)
 
@@ -210,6 +214,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:23:00Z
-Stopped at: Completed 29-05-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-06-PLAN.md
+Last session: 2026-03-11T18:29:00Z
+Stopped at: Completed 29-06-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-07-PLAN.md
