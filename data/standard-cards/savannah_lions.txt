@@ -1,5 +1,0 @@
-Name:Savannah Lions
-ManaCost:W
-Types:Creature Cat
-PT:2/1
-Oracle:

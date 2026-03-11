@@ -1,5 +1,0 @@
-Name:Eager Cadet
-ManaCost:W
-Types:Creature Human Soldier
-PT:1/1
-Oracle:

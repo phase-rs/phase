@@ -1,4 +1,0 @@
-Name:Plains
-ManaCost:no cost
-Types:Basic Land Plains
-Oracle:({T}: Add {W}.)
