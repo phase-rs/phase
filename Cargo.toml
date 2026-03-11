@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["crates/*", "client/src-tauri"]
 
+[workspace.package]
+license = "MIT OR Apache-2.0"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 rpds = { version = "1.2" }

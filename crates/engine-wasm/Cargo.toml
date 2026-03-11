@@ -2,6 +2,7 @@
 name = "engine-wasm"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

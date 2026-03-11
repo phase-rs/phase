@@ -1,0 +1,9 @@
+phase.rs
+Copyright 2024-2026 phase.rs contributors
+
+This project uses card data from the following sources:
+
+MTGJSON (https://mtgjson.com/)
+Licensed under the MIT License
+Card metadata including names, mana costs, types, oracle text, and other
+game-relevant fields is sourced from MTGJSON's open data sets.
