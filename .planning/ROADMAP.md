@@ -153,14 +153,14 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
 | 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
-| 25. Forge Removal & Relicensing | 1/3 | In Progress|  | - |
+| 25. Forge Removal & Relicensing | 2/3 | In Progress|  | - |
 
 ### Phase 26: Polish and fix multi-player with lobby and embedded server
 
 **Goal:** [To be planned]
 **Requirements**: TBD
 **Depends on:** Phase 25
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 
 Plans:
 - [ ] TBD (run /gsd:plan-phase 26 to break down)

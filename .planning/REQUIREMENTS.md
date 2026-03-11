@@ -33,7 +33,7 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 
 - [ ] **LICN-01**: Project relicensed as MIT/Apache-2.0 dual license after all GPL-coupled data is removed
 - [ ] **LICN-02**: PROJECT.md constraints and key decisions updated to reflect MTGJSON + own ability format (removing Forge format dependency)
-- [ ] **LICN-03**: Coverage report (coverage.rs) reads JSON format and CI gate (100% Standard coverage) is preserved
+- [x] **LICN-03**: Coverage report (coverage.rs) reads JSON format and CI gate (100% Standard coverage) is preserved
 
 ## Future Requirements
 
@@ -78,7 +78,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-04 | Phase 24 | Complete |
 | LICN-01 | Phase 25 | Pending |
 | LICN-02 | Phase 25 | Pending |
-| LICN-03 | Phase 25 | Pending |
+| LICN-03 | Phase 25 | Complete |
 
 **Coverage:**
 - v1.2 requirements: 16 total
