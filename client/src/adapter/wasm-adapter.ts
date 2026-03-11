@@ -9,7 +9,7 @@ import init, {
   restore_game_state,
   load_card_database,
 } from "../wasm/engine_wasm";
-import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
+import type { EngineAdapter, FormatConfig, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
 /**
@@ -125,10 +125,15 @@ export class WasmAdapter implements EngineAdapter {
   }
 
   /** Initialize a new game and return the initial events. */
-  initializeGame(deckData?: unknown): GameEvent[] {
+  initializeGame(deckData?: unknown, formatConfig?: FormatConfig, playerCount?: number): GameEvent[] {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    const result = initialize_game(deckData ?? null, seed);
+    const result = initialize_game(
+      deckData ?? null,
+      seed,
+      formatConfig ?? null,
+      playerCount ?? undefined,
+    );
     return result.events ?? [];
   }
 

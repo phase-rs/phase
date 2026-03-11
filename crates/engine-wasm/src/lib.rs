@@ -12,6 +12,7 @@ use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList
 use engine::types::{
     GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone,
 };
+use engine::types::format::FormatConfig;
 
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
@@ -48,14 +49,30 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
-/// Initialize a new game with two players.
+/// Initialize a new game.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
+/// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
+/// player_count: number of players — defaults to 2 if not provided.
 /// Names are resolved against the card database loaded via load_card_database().
 /// Returns the initial ActionResult (events + waiting_for).
 #[wasm_bindgen]
-pub fn initialize_game(deck_data: JsValue, seed: Option<f64>) -> JsValue {
+pub fn initialize_game(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    player_count: Option<u8>,
+) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
-    let mut state = GameState::new_two_player(seed);
+
+    let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
+        serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
+            .unwrap_or_else(|_| FormatConfig::standard())
+    } else {
+        FormatConfig::standard()
+    };
+    let count = player_count.unwrap_or(2);
+
+    let mut state = GameState::new(format_config, count, seed);
 
     // Load deck data if provided — resolve names via the loaded card database
     if !deck_data.is_null() && !deck_data.is_undefined() {

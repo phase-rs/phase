@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { EngineAdapter, GameAction, GameEvent, GameState, WaitingFor } from "../adapter/types";
+import type { EngineAdapter, FormatConfig, GameAction, GameEvent, GameState, WaitingFor } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { ACTIVE_GAME_KEY, GAME_KEY_PREFIX } from "../constants/storage";
 
@@ -22,7 +22,7 @@ interface GameStoreState {
 }
 
 interface GameStoreActions {
-  initGame: (gameId: string, adapter: EngineAdapter, deckData?: unknown) => Promise<void>;
+  initGame: (gameId: string, adapter: EngineAdapter, deckData?: unknown, formatConfig?: FormatConfig, playerCount?: number) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
@@ -99,9 +99,9 @@ export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
 
-    initGame: async (gameId, adapter, deckData) => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount) => {
       await adapter.initialize();
-      await adapter.initializeGame(deckData);
+      await adapter.initializeGame(deckData, formatConfig, playerCount);
       const state = await adapter.getState();
       const legalActions = await adapter.getLegalActions();
       set({

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
+import type { GameFormat } from "../adapter/types";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -43,7 +44,7 @@ import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
-import { useMultiplayerStore } from "../stores/multiplayerStore.ts";
+import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
 
@@ -54,6 +55,10 @@ export function GamePage() {
   const rawMode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
+  const formatParam = searchParams.get("format") as GameFormat | null;
+  const playersParam = searchParams.get("players");
+  const playerCount = playersParam ? Number(playersParam) : undefined;
+  const formatConfig = formatParam ? FORMAT_DEFAULTS[formatParam] : undefined;
 
   // Map URL modes to GameProvider modes
   const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
@@ -169,6 +174,8 @@ export function GamePage() {
       mode={mode}
       difficulty={difficulty}
       joinCode={joinCode || undefined}
+      formatConfig={formatConfig}
+      playerCount={playerCount}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined}
       onReady={mode === "online" || mode === "p2p-host" || mode === "p2p-join" ? handleReady : undefined}

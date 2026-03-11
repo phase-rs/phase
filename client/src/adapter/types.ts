@@ -374,7 +374,7 @@ export const AdapterErrorCode = {
  */
 export interface EngineAdapter {
   initialize(): Promise<void>;
-  initializeGame(deckData?: unknown): Promise<GameEvent[]> | GameEvent[];
+  initializeGame(deckData?: unknown, formatConfig?: FormatConfig, playerCount?: number): Promise<GameEvent[]> | GameEvent[];
   submitAction(action: GameAction): Promise<GameEvent[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<GameAction[]>;

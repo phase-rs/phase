@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 
-import type { GameAction } from "../adapter/types";
+import type { FormatConfig, GameAction } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter } from "../adapter/wasm-adapter";
@@ -82,6 +82,8 @@ export interface GameProviderProps {
   mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join";
   difficulty?: string;
   joinCode?: string;
+  formatConfig?: FormatConfig;
+  playerCount?: number;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -95,6 +97,8 @@ export function GameProvider({
   mode,
   difficulty,
   joinCode,
+  formatConfig,
+  playerCount,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -344,7 +348,7 @@ export function GameProvider({
 
     const deckList = buildDeckList(parsedDeck);
 
-    initGame(gameId, adapter, deckList).then(() => {
+    initGame(gameId, adapter, deckList, formatConfig, playerCount).then(() => {
       if (cancelled) return;
 
       if (!adapter.cardDbLoaded) {
@@ -364,7 +368,7 @@ export function GameProvider({
       audioManager.stopMusic(0);
       reset();
     };
-  }, [gameId, mode, difficulty, joinCode]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>
