@@ -253,28 +253,32 @@ Plans:
   10. Lobby supports format-aware game creation, ready-up, and spectators
   11. Deck builder supports Commander format with color identity enforcement
   12. Format-first game setup flow with presets and pre-built Commander decks
-**Plans**: 13 plans
+**Plans**: 15 plans
 
 **Execution Order:**
 Wave 1: Plan 01 (foundation types — FormatConfig, player iteration, GameState extensions)
-Wave 2: Plans 02 + 03 + 04 (parallel — priority/turns/elimination, combat targeting, commander rules)
-Wave 3: Plans 05 + 06 (parallel — opponent() migration across 66 files, WASM/server/AI crate migration)
-Wave 4: Plans 07 + 08 (parallel — board UI refactor, combat UI)
-Wave 5: Plans 09 + 10 (parallel — AI N-player adaptation, lobby/networking format-awareness)
-Wave 6: Plans 11 + 12 (parallel — deck builder commander support, game setup flow)
-Wave 7: Plan 13 (integration verification + gameplay checkpoint)
+Wave 2: Plans 02 + 03 + 04 (parallel — priority/turns/elimination + 2HG team turns, combat targeting, commander rules)
+Wave 3: Plans 05 + 06 (parallel — core engine PlayerId(1-x) migration, WASM/server/AI crate migration)
+Wave 4: Plans 09 + 14 + 15 (parallel — AI adaptation, effects migration, remaining game module migration)
+Wave 5: Plan 07 (board UI refactor with PlayerArea/CompactStrip)
+Wave 6: Plans 08 + 10 (parallel — combat UI, lobby/networking format-awareness + P2P enforcement)
+Wave 7: Plan 11 (deck builder commander support)
+Wave 8: Plan 12 (game setup flow + precons)
+Wave 9: Plan 13 (integration verification + precon validation + gameplay checkpoint)
 
 Plans:
 - [ ] 29-01-PLAN.md — FormatConfig types, player iteration functions, GameState/Player extensions
-- [ ] 29-02-PLAN.md — N-player priority, turn rotation, elimination system, SBA updates
+- [ ] 29-02-PLAN.md — N-player priority, turn rotation, 2HG team turns, elimination system, SBA updates
 - [ ] 29-03-PLAN.md — Per-creature attack target selection, AttackTarget enum, combat damage with commander tracking
 - [ ] 29-04-PLAN.md — Commander rules: command zone, tax, zone redirection, color identity enforcement
-- [ ] 29-05-PLAN.md — Systematic PlayerId(1-x) migration across all engine files (66 files)
+- [ ] 29-05-PLAN.md — PlayerId(1-x) migration in core engine modules (~9 files)
 - [ ] 29-06-PLAN.md — WASM bridge, server session, protocol, state filtering, AI crate migration for N players
 - [ ] 29-07-PLAN.md — Board UI: PlayerArea (full/focused/compact), CompactStrip, GameBoard N-player layout, Commander display
 - [ ] 29-08-PLAN.md — Combat UI: AttackTargetPicker, "Attack all" button, multi-defender blocking
 - [ ] 29-09-PLAN.md — AI: threat-aware evaluation, paranoid search, scaled budgets, multi-opponent combat
-- [ ] 29-10-PLAN.md — Lobby: format-aware host setup, ready room, spectator support, disconnect handling
+- [ ] 29-10-PLAN.md — Lobby: format-aware host setup, ready room, spectator support, disconnect handling, P2P enforcement
 - [ ] 29-11-PLAN.md — Deck builder: Commander support, format legality badges, color identity validation
 - [ ] 29-12-PLAN.md — Game setup: format-first flow, FormatPicker, game presets, pre-built Commander decks
-- [ ] 29-13-PLAN.md — Integration verification: WASM rebuild, full test suite, 2-player parity + multiplayer gameplay checkpoint
+- [ ] 29-13-PLAN.md — Integration verification: WASM rebuild, precon validation, full test suite, gameplay checkpoint
+- [ ] 29-14-PLAN.md — PlayerId(1-x) migration in effects modules (~28 files)
+- [ ] 29-15-PLAN.md — PlayerId(1-x) migration in remaining game modules + tests (~13 files)
