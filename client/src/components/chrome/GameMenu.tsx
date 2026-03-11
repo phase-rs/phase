@@ -6,17 +6,21 @@ import { clearGame } from "../../stores/gameStore.ts";
 interface GameMenuProps {
   gameId: string;
   isAiMode: boolean;
+  isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
   onSettingsClick: () => void;
+  onConcede?: () => void;
 }
 
 export function GameMenu({
   gameId,
   isAiMode,
+  isOnlineMode,
   showAiHand,
   onToggleAiHand,
   onSettingsClick,
+  onConcede,
 }: GameMenuProps) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -78,8 +82,13 @@ export function GameMenu({
             label="Concede"
             variant="danger"
             onClick={() => {
-              clearGame(gameId);
-              navigate("/");
+              setOpen(false);
+              if (isOnlineMode && onConcede) {
+                onConcede();
+              } else {
+                clearGame(gameId);
+                navigate("/");
+              }
             }}
           />
           <MenuButton

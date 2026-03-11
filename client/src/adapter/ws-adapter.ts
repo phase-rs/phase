@@ -25,7 +25,10 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[] };
+  | { type: "stateChanged"; state: GameState; events: GameEvent[] }
+  | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
+  | { type: "conceded"; player: PlayerId }
+  | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -182,6 +185,14 @@ export class WebSocketAdapter implements EngineAdapter {
     );
   }
 
+  sendConcede(): void {
+    this.send({ type: "Concede" });
+  }
+
+  sendEmote(emote: string): void {
+    this.send({ type: "Emote", data: { emote } });
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.reconnectTimer) {
@@ -335,6 +346,32 @@ export class WebSocketAdapter implements EngineAdapter {
           type: "gameOver",
           winner: data.winner,
           reason: data.reason,
+        });
+        break;
+      }
+
+      case "Conceded": {
+        const data = msg.data as { player: PlayerId };
+        this.emit({ type: "conceded", player: data.player });
+        break;
+      }
+
+      case "Emote": {
+        const data = msg.data as { from_player: PlayerId; emote: string };
+        this.emit({
+          type: "emoteReceived",
+          fromPlayer: data.from_player,
+          emote: data.emote,
+        });
+        break;
+      }
+
+      case "TimerUpdate": {
+        const data = msg.data as { player: PlayerId; remaining_seconds: number };
+        this.emit({
+          type: "timerUpdate",
+          player: data.player,
+          remainingSeconds: data.remaining_seconds,
         });
         break;
       }
