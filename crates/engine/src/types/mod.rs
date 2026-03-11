@@ -3,6 +3,7 @@ pub mod actions;
 pub mod card;
 pub mod card_type;
 pub mod events;
+pub mod format;
 pub mod game_state;
 pub mod identifiers;
 pub mod keywords;
@@ -26,8 +27,10 @@ pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};
 pub use card_type::{CardType, CoreType, Supertype};
 pub use events::GameEvent;
+pub use format::{FormatConfig, GameFormat};
 pub use game_state::{
-    ActionResult, GameState, PendingReplacement, StackEntry, StackEntryKind, WaitingFor,
+    ActionResult, CommanderDamageEntry, GameState, PendingReplacement, StackEntry, StackEntryKind,
+    WaitingFor,
 };
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};

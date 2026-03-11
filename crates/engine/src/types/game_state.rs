@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{ResolvedAbility, TargetRef};
 use super::events::GameEvent;
+use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaCost;
 use super::phase::Phase;
@@ -31,6 +32,14 @@ pub enum DayNight {
 pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
+}
+
+/// Tracks commander damage dealt to a specific player by a specific commander.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommanderDamageEntry {
+    pub player: PlayerId,
+    pub commander: ObjectId,
+    pub damage: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +195,18 @@ pub struct GameState {
     // Exile tracking for "until leaves" effects
     #[serde(default)]
     pub exile_links: Vec<ExileLink>,
+
+    // N-player support
+    #[serde(default)]
+    pub seat_order: Vec<PlayerId>,
+    #[serde(default = "FormatConfig::standard")]
+    pub format_config: FormatConfig,
+    #[serde(default)]
+    pub eliminated_players: Vec<PlayerId>,
+    #[serde(default)]
+    pub commander_damage: Vec<CommanderDamageEntry>,
+    #[serde(default)]
+    pub priority_passes: BTreeSet<PlayerId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,23 +217,22 @@ pub struct PendingReplacement {
 }
 
 impl GameState {
-    pub fn new_two_player(seed: u64) -> Self {
+    /// Create a new game with the given format configuration and player count.
+    pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
+        let players: Vec<Player> = (0..player_count)
+            .map(|i| Player {
+                id: PlayerId(i),
+                life: config.starting_life,
+                ..Player::default()
+            })
+            .collect();
+        let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
+
         GameState {
             turn_number: 0,
             active_player: PlayerId(0),
             phase: Phase::Untap,
-            players: vec![
-                Player {
-                    id: PlayerId(0),
-                    life: 20,
-                    ..Player::default()
-                },
-                Player {
-                    id: PlayerId(1),
-                    life: 20,
-                    ..Player::default()
-                },
-            ],
+            players,
             priority_player: PlayerId(0),
             objects: HashMap::new(),
             next_object_id: 1,
@@ -235,7 +255,17 @@ impl GameState {
             spells_cast_this_turn: 0,
             pending_trigger: None,
             exile_links: Vec::new(),
+            seat_order,
+            format_config: config,
+            eliminated_players: Vec::new(),
+            commander_damage: Vec::new(),
+            priority_passes: BTreeSet::new(),
         }
+    }
+
+    /// Create a standard 2-player game (backward-compatible).
+    pub fn new_two_player(seed: u64) -> Self {
+        Self::new(FormatConfig::standard(), 2, seed)
     }
 
     /// Returns the current timestamp and increments for next use.
@@ -278,6 +308,11 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.pending_trigger == other.pending_trigger
             && self.exile_links == other.exile_links
+            && self.seat_order == other.seat_order
+            && self.format_config == other.format_config
+            && self.eliminated_players == other.eliminated_players
+            && self.commander_damage == other.commander_damage
+            && self.priority_passes == other.priority_passes
     }
 }
 
@@ -622,5 +657,106 @@ mod tests {
         let state = GameState::new_two_player(0);
         assert!(state.pending_trigger.is_none());
         assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn new_with_standard_config_matches_new_two_player() {
+        let from_new = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            42,
+        );
+        let from_legacy = GameState::new_two_player(42);
+        assert_eq!(from_new.players.len(), from_legacy.players.len());
+        assert_eq!(from_new.players[0].life, from_legacy.players[0].life);
+        assert_eq!(from_new.players[1].life, from_legacy.players[1].life);
+        assert_eq!(from_new.rng_seed, from_legacy.rng_seed);
+        assert_eq!(from_new, from_legacy);
+    }
+
+    #[test]
+    fn new_with_commander_config_creates_four_players_with_40_life() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::commander(),
+            4,
+            0,
+        );
+        assert_eq!(state.players.len(), 4);
+        for player in &state.players {
+            assert_eq!(player.life, 40);
+        }
+        assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]);
+    }
+
+    #[test]
+    fn new_initializes_seat_order() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            0,
+        );
+        assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1)]);
+    }
+
+    #[test]
+    fn new_initializes_eliminated_players_empty() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            0,
+        );
+        assert!(state.eliminated_players.is_empty());
+    }
+
+    #[test]
+    fn new_initializes_commander_damage_empty() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::commander(),
+            4,
+            0,
+        );
+        assert!(state.commander_damage.is_empty());
+    }
+
+    #[test]
+    fn new_initializes_priority_passes_empty() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            0,
+        );
+        assert!(state.priority_passes.is_empty());
+    }
+
+    #[test]
+    fn player_is_eliminated_defaults_to_false() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            0,
+        );
+        for player in &state.players {
+            assert!(!player.is_eliminated);
+        }
+    }
+
+    #[test]
+    fn new_two_player_has_seat_order_and_format_config() {
+        let state = GameState::new_two_player(0);
+        assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1)]);
+        assert_eq!(state.format_config, crate::types::format::FormatConfig::standard());
+    }
+
+    #[test]
+    fn game_state_with_new_fields_serializes_and_roundtrips() {
+        let state = GameState::new(
+            crate::types::format::FormatConfig::commander(),
+            4,
+            42,
+        );
+        let serialized = serde_json::to_string(&state).unwrap();
+        let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
+        deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
+        assert_eq!(state, deserialized);
     }
 }

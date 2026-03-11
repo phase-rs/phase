@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    JsonSchema,
+)]
 #[serde(transparent)]
 pub struct PlayerId(pub u8);
 
@@ -24,6 +27,10 @@ pub struct Player {
     pub lands_played_this_turn: u8,
     pub poison_counters: u32,
 
+    // Elimination tracking (N-player support)
+    #[serde(default)]
+    pub is_eliminated: bool,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -41,6 +48,7 @@ impl Default for Player {
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,
+            is_eliminated: false,
             can_look_at_top_of_library: false,
         }
     }
