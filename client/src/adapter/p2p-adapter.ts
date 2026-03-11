@@ -46,12 +46,20 @@ export class P2PHostAdapter implements EngineAdapter {
   private listeners: P2PAdapterEventListener[] = [];
   private messageUnsub: (() => void) | null = null;
   private disconnectUnsub: (() => void) | null = null;
-  private guestDeckResolve: ((deckData: unknown) => void) | null = null;
+
+  // Promise + resolver created eagerly so guest_deck messages arriving
+  // before initializeGame() are captured instead of silently dropped.
+  private guestDeckPromise: Promise<unknown>;
+  private guestDeckResolve!: (deckData: unknown) => void;
 
   constructor(
     private readonly deckData: unknown,
     private readonly session: PeerSession,
-  ) {}
+  ) {
+    this.guestDeckPromise = new Promise<unknown>((resolve) => {
+      this.guestDeckResolve = resolve;
+    });
+  }
 
   onEvent(listener: P2PAdapterEventListener): () => void {
     this.listeners.push(listener);
@@ -80,10 +88,9 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   async initializeGame(_deckData?: unknown): Promise<GameEvent[]> {
-    // Wait for guest's deck data
-    const guestDeckData = await new Promise<unknown>((resolve) => {
-      this.guestDeckResolve = resolve;
-    });
+    // Await the eagerly-created promise — resolves immediately if
+    // guest_deck arrived during initialize(), otherwise waits.
+    const guestDeckData = await this.guestDeckPromise;
 
     // Build combined deck payload for WASM
     const deckPayload = {
@@ -151,10 +158,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private async handleGuestMessage(msg: P2PMessage): Promise<void> {
     switch (msg.type) {
       case "guest_deck": {
-        if (this.guestDeckResolve) {
-          this.guestDeckResolve(msg.deckData);
-          this.guestDeckResolve = null;
-        }
+        this.guestDeckResolve(msg.deckData);
         break;
       }
 
@@ -199,14 +203,22 @@ export class P2PGuestAdapter implements EngineAdapter {
   private listeners: P2PAdapterEventListener[] = [];
   private pendingResolve: ((events: GameEvent[]) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
-  private initResolve: ((events: GameEvent[]) => void) | null = null;
   private messageUnsub: (() => void) | null = null;
   private disconnectUnsub: (() => void) | null = null;
+
+  // Promise + resolver created eagerly so game_setup messages arriving
+  // before initializeGame() are captured instead of silently dropped.
+  private gameSetupPromise: Promise<GameEvent[]>;
+  private gameSetupResolve!: (events: GameEvent[]) => void;
 
   constructor(
     private readonly deckData: unknown,
     private readonly session: PeerSession,
-  ) {}
+  ) {
+    this.gameSetupPromise = new Promise<GameEvent[]>((resolve) => {
+      this.gameSetupResolve = resolve;
+    });
+  }
 
   onEvent(listener: P2PAdapterEventListener): () => void {
     this.listeners.push(listener);
@@ -239,15 +251,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     // Guest is player 1
     useMultiplayerStore.getState().setActivePlayerId(1);
 
-    // Wait for game_setup from host
-    return new Promise<GameEvent[]>((resolve) => {
-      if (this.gameState) {
-        // Already received setup (buffered message)
-        resolve([]);
-      } else {
-        this.initResolve = resolve;
-      }
-    });
+    // Await the eagerly-created promise — resolves immediately if
+    // game_setup arrived during initialize(), otherwise waits.
+    return this.gameSetupPromise;
   }
 
   async submitAction(action: GameAction): Promise<GameEvent[]> {
@@ -285,7 +291,6 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.gameState = null;
     this.pendingResolve = null;
     this.pendingReject = null;
-    this.initResolve = null;
     this.listeners = [];
   }
 
@@ -293,10 +298,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     switch (msg.type) {
       case "game_setup": {
         this.gameState = msg.state;
-        if (this.initResolve) {
-          this.initResolve(msg.events);
-          this.initResolve = null;
-        }
+        this.gameSetupResolve(msg.events);
         break;
       }
 

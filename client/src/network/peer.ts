@@ -68,6 +68,7 @@ export function createPeerSession(conn: DataConnection, destroyPeer: () => void)
     if (closed) return;
     closed = true;
     disconnectReason = reason;
+    console.warn("[PeerSession] disconnected:", reason);
     clearKeepAlive();
     window.removeEventListener("beforeunload", beforeUnloadHandler);
     for (const handler of disconnectHandlers) {

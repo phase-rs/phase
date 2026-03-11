@@ -70,7 +70,10 @@ export function hostRoom(): HostResult {
 
   // Track when the host is registered on the signaling server
   const peerReady = new Promise<void>((resolve, reject) => {
-    peer.on("open", () => resolve());
+    peer.on("open", () => {
+      console.log("[P2P Host] registered on signaling server, code:", roomCode);
+      resolve();
+    });
     peer.on("error", (err) => reject(new Error(`Failed to create room: ${err.message}`)));
   });
 
@@ -121,6 +124,7 @@ export function joinRoom(code: string): Promise<{ conn: DataConnection; destroyP
     const peerId = PEER_ID_PREFIX + code;
 
     peer.on("open", () => {
+      console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
       const conn = peer.connect(peerId, { serialization: "json" });
 
       const timeout = setTimeout(() => {
