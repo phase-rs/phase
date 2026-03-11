@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-phase.rs is a Magic: The Gathering game engine written in Rust (compiling to native + WASM) with a React/TypeScript frontend. Originally derived from the open-source MTG Forge project's card definitions, it implements MTG game rules using functional architecture (discriminated unions, pure reducers, immutable state) with an Arena-quality browser UI.
+phase.rs is a Magic: The Gathering game engine written in Rust (compiling to native + WASM) with a React/TypeScript frontend. It implements MTG game rules using functional architecture (discriminated unions, pure reducers, immutable state) with an Arena-quality browser UI. Card data is sourced from MTGJSON (MIT-licensed) with custom typed JSON ability definitions.
 
 ## Build & Development Commands
 
@@ -59,8 +59,8 @@ phase-server    — Axum WebSocket server for multiplayer
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
 - **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`.
 - **`game/effects/`** — Effect handlers: `draw`, `deal_damage`, `destroy`, `pump`, `token`, `counter`, `counters`, `sacrifice`, `discard`, `change_zone`, `life`, `tap_untap`.
-- **`parser/`** — Parses Forge's `.txt` card definition format into typed Rust structures.
-- **`database/`** — Card database (loads parsed cards).
+- **`parser/`** — Ability text parser for SVar/SubAbility chain resolution (card file parser behind `forge-compat` feature gate).
+- **`database/`** — Card database (loads card data from MTGJSON JSON + typed ability definitions).
 
 ### WASM Bridge (`crates/engine-wasm/`)
 
