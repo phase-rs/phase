@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 29-01-PLAN.md
-last_updated: "2026-03-11T17:55:00Z"
-last_activity: 2026-03-11 — Phase 29 Plan 01 complete (N-Player Foundation Types)
+stopped_at: Completed 29-02-PLAN.md
+last_updated: "2026-03-11T18:09:00Z"
+last_activity: 2026-03-11 — Phase 29 Plan 02 complete (N-Player Priority, Turns, Elimination)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 46
-  completed_plans: 31
-  percent: 67
+  completed_plans: 32
+  percent: 70
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 29 Support N Players — Plan 01 complete (Foundation Types)
+**Current focus:** Phase 29 Support N Players — Plan 02 complete (Priority, Turns, Elimination)
 
 ## Current Position
 
-Phase: 29 — Plan 01 of 16 complete
+Phase: 29 — Plan 02 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 01 complete (N-Player Foundation Types)
+Last activity: 2026-03-11 — Phase 29 Plan 02 complete (N-Player Priority, Turns, Elimination)
 
-Progress: [█████████████░░░░░░░] 31/46 plans (67%)
+Progress: [█████████████░░░░░░░] 32/46 plans (70%)
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [█████████████░░░░░░░] 31/46 p
 | Phase 27 P03 | 13min | 2 tasks | 3 files |
 | Phase 27 P04 | 2min | 2 tasks | 3 files |
 | Phase 29 P01 | 7min | 2 tasks | 6 files |
+| Phase 29 P02 | 11min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,10 @@ Recent decisions affecting current work:
 - [29-01]: CommanderDamageEntry struct instead of HashMap<(PlayerId, ObjectId), u32> for serde_json compat (tuple keys don't serialize)
 - [29-01]: PartialOrd + Ord derived on PlayerId for BTreeSet<PlayerId> support
 - [29-01]: priority_pass_count kept alongside new priority_passes BTreeSet (migration deferred to Plan 02)
+- [29-02]: priority_passes BTreeSet tracks consecutive passes; stack resolves when set size >= living player count
+- [29-02]: opponent() kept as deprecated wrapper calling players::next_player() (removed in Plan 05)
+- [29-02]: SBAs collect all losers before eliminating (handles simultaneous life loss in multiplayer)
+- [29-02]: 2HG team elimination cascades through teammates() — one teammate dies, both eliminated
 
 ### Roadmap Evolution
 
@@ -197,6 +202,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T17:55:00Z
-Stopped at: Completed 29-01-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-02-PLAN.md
+Last session: 2026-03-11T18:09:00Z
+Stopped at: Completed 29-02-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-03-PLAN.md
