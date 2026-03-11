@@ -38,11 +38,16 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "9374".to_string());
     let data_root = std::env::var("PHASE_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let data_path = Path::new(&data_root);
-    let card_db = CardDatabase::load_json(
-        &data_path.join("mtgjson/test_fixture.json"),
-        &data_path.join("abilities"),
-    )
-    .expect("Failed to load card database");
+    let export_path = data_path.join("card-data.json");
+    let card_db = if export_path.exists() {
+        CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
+    } else {
+        CardDatabase::load_json(
+            &data_path.join("mtgjson/test_fixture.json"),
+            &data_path.join("abilities"),
+        )
+        .expect("Failed to load card database")
+    };
     println!("Loaded {} cards", card_db.card_count());
     let db: SharedDb = Arc::new(card_db);
 

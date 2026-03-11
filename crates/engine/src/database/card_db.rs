@@ -10,6 +10,8 @@ use crate::parser::{parse_card_file, ParseError};
 use crate::types::card::CardLayout;
 use crate::types::card::{CardFace, CardRules};
 
+use std::io::BufReader;
+
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
@@ -22,6 +24,24 @@ impl CardDatabase {
         abilities_dir: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         super::json_loader::load_json(mtgjson_path, abilities_dir)
+    }
+
+    /// Load from a pre-processed card-data export (HashMap<String, CardFace> as JSON).
+    pub fn from_export(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = std::fs::File::open(path)?;
+        let reader = BufReader::new(file);
+        let faces: HashMap<String, CardFace> = serde_json::from_reader(reader)?;
+
+        let mut face_index = HashMap::with_capacity(faces.len());
+        for (name, face) in faces {
+            face_index.insert(name.to_lowercase(), face);
+        }
+
+        Ok(Self {
+            cards: HashMap::new(),
+            face_index,
+            errors: Vec::new(),
+        })
     }
 
     #[cfg(feature = "forge-compat")]
@@ -82,7 +102,7 @@ impl CardDatabase {
     }
 
     pub fn card_count(&self) -> usize {
-        self.cards.len()
+        self.cards.len().max(self.face_index.len())
     }
 
     pub fn errors(&self) -> &[(PathBuf, String)] {
