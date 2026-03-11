@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, PtValue, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
+use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,19 +12,18 @@ pub struct CardFace {
     pub name: String,
     pub mana_cost: ManaCost,
     pub card_type: CardType,
-    pub power: Option<String>,
-    pub toughness: Option<String>,
+    pub power: Option<PtValue>,
+    pub toughness: Option<PtValue>,
     pub loyalty: Option<String>,
     pub defense: Option<String>,
     pub oracle_text: Option<String>,
     pub non_ability_text: Option<String>,
     pub flavor_name: Option<String>,
-    pub keywords: Vec<String>,
+    pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
     pub triggers: Vec<TriggerDefinition>,
     pub static_abilities: Vec<StaticDefinition>,
     pub replacements: Vec<ReplacementDefinition>,
-    pub svars: HashMap<String, String>,
     pub color_override: Option<Vec<ManaColor>>,
     #[serde(default)]
     pub scryfall_oracle_id: Option<String>,

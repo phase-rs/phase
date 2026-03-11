@@ -3,7 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::mana::ManaColor;
+use super::ability::TargetFilter;
+use super::mana::{ManaColor, ManaCost};
 
 /// What a Protection keyword protects from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +16,7 @@ pub enum ProtectionTarget {
 
 /// All MTG keywords as typed enum variants.
 /// Simple (unit) variants for keywords with no parameters.
-/// Parameterized variants carry associated data (cost strings, amounts, etc.).
+/// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
 /// Unknown captures any unrecognized keyword string for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Keyword {
@@ -66,7 +67,7 @@ pub enum Keyword {
     Bushido(u32),
     Tribute(u32),
     Soulbond,
-    Unearth(String),
+    Unearth(ManaCost),
 
     // Cost reduction / alternative costs
     Convoke,
@@ -87,68 +88,68 @@ pub enum Keyword {
     Afterlife(u32),
 
     // Enchantment
-    Enchant(String),
+    Enchant(TargetFilter),
 
-    // ETB counter (e.g., etbCounter:P1P1:1)
-    EtbCounter(String),
+    // ETB counter (e.g., P1P1:1)
+    EtbCounter { counter_type: String, count: u32 },
 
     // Equipment / attachment
-    Reconfigure(String),
+    Reconfigure(ManaCost),
     LivingWeapon,
     TotemArmor,
-    Bestow(String),
+    Bestow(ManaCost),
 
     // Graveyard
-    Embalm(String),
-    Eternalize(String),
+    Embalm(ManaCost),
+    Eternalize(ManaCost),
 
     // Token / counter
     Fading(u32),
     Vanishing(u32),
 
-    // Parameterized keywords
+    // Parameterized keywords with ManaCost
     Protection(ProtectionTarget),
-    Kicker(String),
-    Cycling(String),
-    Flashback(String),
-    Ward(String),
-    Equip(String),
+    Kicker(ManaCost),
+    Cycling(ManaCost),
+    Flashback(ManaCost),
+    Ward(ManaCost),
+    Equip(ManaCost),
     Landwalk(String),
     Rampage(u32),
     Absorb(u32),
     Crew(u32),
     Partner(Option<String>),
     Companion(String),
-    Ninjutsu(String),
+    Ninjutsu(ManaCost),
 
-    // Additional common keywords
-    Prowl(String),
-    Morph(String),
-    Megamorph(String),
-    Madness(String),
-    Dash(String),
-    Emerge(String),
-    Escape(String),
-    Evoke(String),
-    Foretell(String),
-    Mutate(String),
-    Disturb(String),
-    Disguise(String),
-    Blitz(String),
-    Overload(String),
-    Spectacle(String),
-    Surge(String),
-    Encore(String),
-    Buyback(String),
-    Echo(String),
-    Outlast(String),
-    Scavenge(String),
-    Fortify(String),
-    Prototype(String),
-    Plot(String),
-    Craft(String),
-    Offspring(String),
-    Impending(String),
+    // Additional common keywords with ManaCost
+    Prowl(ManaCost),
+    Morph(ManaCost),
+    Megamorph(ManaCost),
+    Madness(ManaCost),
+    Dash(ManaCost),
+    Emerge(ManaCost),
+    Escape(ManaCost),
+    Evoke(ManaCost),
+    Foretell(ManaCost),
+    Mutate(ManaCost),
+    Disturb(ManaCost),
+    Disguise(ManaCost),
+    Blitz(ManaCost),
+    Overload(ManaCost),
+    Spectacle(ManaCost),
+    Surge(ManaCost),
+    Encore(ManaCost),
+    Buyback(ManaCost),
+    Echo(ManaCost),
+    Outlast(ManaCost),
+    Scavenge(ManaCost),
+    Fortify(ManaCost),
+    Prototype(ManaCost),
+    Plot(ManaCost),
+    Craft(ManaCost),
+    Offspring(ManaCost),
+    Impending(ManaCost),
 
     // Simple keywords (no params)
     Banding,
@@ -194,6 +195,96 @@ pub enum Keyword {
     Unknown(String),
 }
 
+/// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
+/// and simple format (1W, 2, W, etc.) for keyword parameters.
+fn parse_keyword_mana_cost(s: &str) -> ManaCost {
+    // If it contains braces, delegate to the MTGJSON parser
+    if s.contains('{') {
+        return crate::database::mtgjson::parse_mtgjson_mana_cost(s);
+    }
+
+    // Simple format: try to parse as pure generic (e.g. "3"), or as mana symbols
+    let s = s.trim();
+    if s.is_empty() {
+        return ManaCost::zero();
+    }
+
+    let mut generic: u32 = 0;
+    let mut shards = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            'W' => shards.push(crate::types::mana::ManaCostShard::White),
+            'U' => shards.push(crate::types::mana::ManaCostShard::Blue),
+            'B' => shards.push(crate::types::mana::ManaCostShard::Black),
+            'R' => shards.push(crate::types::mana::ManaCostShard::Red),
+            'G' => shards.push(crate::types::mana::ManaCostShard::Green),
+            'C' => shards.push(crate::types::mana::ManaCostShard::Colorless),
+            'X' => shards.push(crate::types::mana::ManaCostShard::X),
+            '0'..='9' => {
+                // Collect consecutive digits
+                let mut num_str = String::new();
+                num_str.push(c);
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_digit() {
+                        num_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                generic += num_str.parse::<u32>().unwrap_or(0);
+            }
+            _ => {} // Ignore unrecognized characters
+        }
+    }
+
+    ManaCost::Cost { shards, generic }
+}
+
+/// Parse an enchant target string into a simple TargetFilter.
+fn parse_enchant_target(s: &str) -> TargetFilter {
+    use super::ability::TypeFilter;
+
+    let lower = s.to_ascii_lowercase();
+    let type_filter = match lower.as_str() {
+        "creature" => Some(TypeFilter::Creature),
+        "land" => Some(TypeFilter::Land),
+        "artifact" => Some(TypeFilter::Artifact),
+        "enchantment" => Some(TypeFilter::Enchantment),
+        "planeswalker" => Some(TypeFilter::Planeswalker),
+        "permanent" => Some(TypeFilter::Permanent),
+        _ => None,
+    };
+
+    match type_filter {
+        Some(tf) => TargetFilter::Typed {
+            card_type: Some(tf),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        },
+        // If not a recognized type, use a typed filter with the string as subtype
+        None => TargetFilter::Typed {
+            card_type: None,
+            subtype: Some(s.to_string()),
+            controller: None,
+            properties: vec![],
+        },
+    }
+}
+
+/// Parse an EtbCounter parameter string (e.g., "P1P1:1") into counter_type and count.
+fn parse_etb_counter(s: &str) -> (String, u32) {
+    if let Some(idx) = s.rfind(':') {
+        let counter_type = s[..idx].to_string();
+        let count = s[idx + 1..].parse::<u32>().unwrap_or(1);
+        (counter_type, count)
+    } else {
+        (s.to_string(), 1)
+    }
+}
+
 impl FromStr for Keyword {
     type Err = Infallible;
 
@@ -210,11 +301,11 @@ impl FromStr for Keyword {
         if let Some(ref p) = param {
             match name_lower.as_str() {
                 "protection" => return Ok(Keyword::Protection(parse_protection_target(p))),
-                "kicker" => return Ok(Keyword::Kicker(p.clone())),
-                "cycling" => return Ok(Keyword::Cycling(p.clone())),
-                "flashback" => return Ok(Keyword::Flashback(p.clone())),
-                "ward" => return Ok(Keyword::Ward(p.clone())),
-                "equip" => return Ok(Keyword::Equip(p.clone())),
+                "kicker" => return Ok(Keyword::Kicker(parse_keyword_mana_cost(p))),
+                "cycling" => return Ok(Keyword::Cycling(parse_keyword_mana_cost(p))),
+                "flashback" => return Ok(Keyword::Flashback(parse_keyword_mana_cost(p))),
+                "ward" => return Ok(Keyword::Ward(parse_keyword_mana_cost(p))),
+                "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
                 "bushido" => return Ok(Keyword::Bushido(p.parse().unwrap_or(1))),
@@ -224,7 +315,7 @@ impl FromStr for Keyword {
                 "crew" => return Ok(Keyword::Crew(p.parse().unwrap_or(1))),
                 "partner" => return Ok(Keyword::Partner(Some(p.clone()))),
                 "companion" => return Ok(Keyword::Companion(p.clone())),
-                "ninjutsu" => return Ok(Keyword::Ninjutsu(p.clone())),
+                "ninjutsu" => return Ok(Keyword::Ninjutsu(parse_keyword_mana_cost(p))),
                 "dredge" => return Ok(Keyword::Dredge(p.parse().unwrap_or(1))),
                 "modular" => return Ok(Keyword::Modular(p.parse().unwrap_or(1))),
                 "renown" => return Ok(Keyword::Renown(p.parse().unwrap_or(1))),
@@ -232,46 +323,52 @@ impl FromStr for Keyword {
                 "annihilator" => return Ok(Keyword::Annihilator(p.parse().unwrap_or(1))),
                 "tribute" => return Ok(Keyword::Tribute(p.parse().unwrap_or(1))),
                 "afterlife" => return Ok(Keyword::Afterlife(p.parse().unwrap_or(1))),
-                "reconfigure" => return Ok(Keyword::Reconfigure(p.clone())),
-                "bestow" => return Ok(Keyword::Bestow(p.clone())),
-                "embalm" => return Ok(Keyword::Embalm(p.clone())),
-                "eternalize" => return Ok(Keyword::Eternalize(p.clone())),
-                "unearth" => return Ok(Keyword::Unearth(p.clone())),
-                "prowl" => return Ok(Keyword::Prowl(p.clone())),
-                "morph" => return Ok(Keyword::Morph(p.clone())),
-                "megamorph" => return Ok(Keyword::Megamorph(p.clone())),
-                "madness" => return Ok(Keyword::Madness(p.clone())),
-                "dash" => return Ok(Keyword::Dash(p.clone())),
-                "emerge" => return Ok(Keyword::Emerge(p.clone())),
-                "escape" => return Ok(Keyword::Escape(p.clone())),
-                "evoke" => return Ok(Keyword::Evoke(p.clone())),
-                "foretell" => return Ok(Keyword::Foretell(p.clone())),
-                "mutate" => return Ok(Keyword::Mutate(p.clone())),
-                "disturb" => return Ok(Keyword::Disturb(p.clone())),
-                "disguise" => return Ok(Keyword::Disguise(p.clone())),
-                "blitz" => return Ok(Keyword::Blitz(p.clone())),
-                "overload" => return Ok(Keyword::Overload(p.clone())),
-                "spectacle" => return Ok(Keyword::Spectacle(p.clone())),
-                "surge" => return Ok(Keyword::Surge(p.clone())),
-                "encore" => return Ok(Keyword::Encore(p.clone())),
-                "buyback" => return Ok(Keyword::Buyback(p.clone())),
-                "echo" => return Ok(Keyword::Echo(p.clone())),
-                "outlast" => return Ok(Keyword::Outlast(p.clone())),
-                "scavenge" => return Ok(Keyword::Scavenge(p.clone())),
-                "fortify" => return Ok(Keyword::Fortify(p.clone())),
-                "prototype" => return Ok(Keyword::Prototype(p.clone())),
-                "plot" => return Ok(Keyword::Plot(p.clone())),
-                "craft" => return Ok(Keyword::Craft(p.clone())),
-                "offspring" => return Ok(Keyword::Offspring(p.clone())),
-                "impending" => return Ok(Keyword::Impending(p.clone())),
+                "reconfigure" => return Ok(Keyword::Reconfigure(parse_keyword_mana_cost(p))),
+                "bestow" => return Ok(Keyword::Bestow(parse_keyword_mana_cost(p))),
+                "embalm" => return Ok(Keyword::Embalm(parse_keyword_mana_cost(p))),
+                "eternalize" => return Ok(Keyword::Eternalize(parse_keyword_mana_cost(p))),
+                "unearth" => return Ok(Keyword::Unearth(parse_keyword_mana_cost(p))),
+                "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
+                "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
+                "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
+                "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
+                "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
+                "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
+                "escape" => return Ok(Keyword::Escape(parse_keyword_mana_cost(p))),
+                "evoke" => return Ok(Keyword::Evoke(parse_keyword_mana_cost(p))),
+                "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
+                "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
+                "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
+                "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p))),
+                "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
+                "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
+                "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
+                "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
+                "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
+                "buyback" => return Ok(Keyword::Buyback(parse_keyword_mana_cost(p))),
+                "echo" => return Ok(Keyword::Echo(parse_keyword_mana_cost(p))),
+                "outlast" => return Ok(Keyword::Outlast(parse_keyword_mana_cost(p))),
+                "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
+                "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
+                "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
+                "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
+                "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
+                "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
+                "impending" => return Ok(Keyword::Impending(parse_keyword_mana_cost(p))),
                 "poisonous" => return Ok(Keyword::Poisonous(p.parse().unwrap_or(1))),
                 "bloodthirst" => return Ok(Keyword::Bloodthirst(p.parse().unwrap_or(1))),
                 "amplify" => return Ok(Keyword::Amplify(p.parse().unwrap_or(1))),
                 "graft" => return Ok(Keyword::Graft(p.parse().unwrap_or(1))),
                 "devour" => return Ok(Keyword::Devour(p.parse().unwrap_or(1))),
                 "afflict" => return Ok(Keyword::Afflict),
-                "enchant" => return Ok(Keyword::Enchant(p.clone())),
-                "etbcounter" => return Ok(Keyword::EtbCounter(s[name.len() + 1..].to_string())),
+                "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
+                "etbcounter" => {
+                    let (counter_type, count) = parse_etb_counter(&s[name.len() + 1..]);
+                    return Ok(Keyword::EtbCounter {
+                        counter_type,
+                        count,
+                    });
+                }
                 _ => return Ok(Keyword::Unknown(s.to_string())),
             }
         }
@@ -371,6 +468,15 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
+/// Check if a game object has a specific keyword, using discriminant-based matching.
+/// For parameterized keywords, checks the base keyword only (ignoring the parameter value).
+pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword) -> bool {
+    use std::mem::discriminant;
+    obj.keywords
+        .iter()
+        .any(|k| discriminant(k) == discriminant(keyword))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,27 +530,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_parameterized_keywords() {
-        assert_eq!(
-            Keyword::from_str("Kicker:1G").unwrap(),
-            Keyword::Kicker("1G".to_string())
-        );
-        assert_eq!(
-            Keyword::from_str("Cycling:2").unwrap(),
-            Keyword::Cycling("2".to_string())
-        );
-        assert_eq!(
-            Keyword::from_str("Flashback:3BB").unwrap(),
-            Keyword::Flashback("3BB".to_string())
-        );
-        assert_eq!(
-            Keyword::from_str("Ward:2").unwrap(),
-            Keyword::Ward("2".to_string())
-        );
-        assert_eq!(
-            Keyword::from_str("Equip:3").unwrap(),
-            Keyword::Equip("3".to_string())
-        );
+    fn parse_parameterized_keywords_as_mana_cost() {
+        // Cost-bearing keywords now parse to ManaCost
+        let kicker = Keyword::from_str("Kicker:1G").unwrap();
+        assert!(matches!(kicker, Keyword::Kicker(ManaCost::Cost { .. })));
+        if let Keyword::Kicker(ManaCost::Cost { generic, shards }) = &kicker {
+            assert_eq!(*generic, 1);
+            assert_eq!(shards.len(), 1); // G
+        }
+
+        let cycling = Keyword::from_str("Cycling:2").unwrap();
+        assert!(matches!(cycling, Keyword::Cycling(ManaCost::Cost { .. })));
+        if let Keyword::Cycling(ManaCost::Cost { generic, .. }) = &cycling {
+            assert_eq!(*generic, 2);
+        }
+
+        let flashback = Keyword::from_str("Flashback:3BB").unwrap();
+        assert!(matches!(
+            flashback,
+            Keyword::Flashback(ManaCost::Cost { .. })
+        ));
+        if let Keyword::Flashback(ManaCost::Cost { generic, shards }) = &flashback {
+            assert_eq!(*generic, 3);
+            assert_eq!(shards.len(), 2); // BB
+        }
+
+        let ward = Keyword::from_str("Ward:2").unwrap();
+        assert!(matches!(ward, Keyword::Ward(ManaCost::Cost { .. })));
+
+        let equip = Keyword::from_str("Equip:3").unwrap();
+        assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_numeric_keywords_unchanged() {
         assert_eq!(Keyword::from_str("Crew:3").unwrap(), Keyword::Crew(3));
         assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));
     }
@@ -478,6 +597,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_enchant_as_target_filter() {
+        let enchant = Keyword::from_str("Enchant:creature").unwrap();
+        assert!(matches!(
+            enchant,
+            Keyword::Enchant(TargetFilter::Typed { .. })
+        ));
+        if let Keyword::Enchant(TargetFilter::Typed { card_type, .. }) = &enchant {
+            assert!(matches!(
+                card_type,
+                Some(super::super::ability::TypeFilter::Creature)
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_etb_counter_typed() {
+        let kw = Keyword::from_str("EtbCounter:P1P1:1").unwrap();
+        assert!(matches!(kw, Keyword::EtbCounter { .. }));
+        if let Keyword::EtbCounter {
+            counter_type,
+            count,
+        } = &kw
+        {
+            assert_eq!(counter_type, "P1P1");
+            assert_eq!(*count, 1);
+        }
+
+        let kw2 = Keyword::from_str("EtbCounter:P1P1:3").unwrap();
+        if let Keyword::EtbCounter {
+            counter_type,
+            count,
+        } = &kw2
+        {
+            assert_eq!(counter_type, "P1P1");
+            assert_eq!(*count, 3);
+        }
+    }
+
+    #[test]
     fn parse_unknown_keyword() {
         assert_eq!(
             Keyword::from_str("NotARealKeyword").unwrap(),
@@ -496,9 +654,16 @@ mod tests {
     fn keyword_serialization_roundtrip() {
         let keywords = vec![
             Keyword::Flying,
-            Keyword::Kicker("1G".to_string()),
+            Keyword::Kicker(ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Green],
+                generic: 1,
+            }),
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue)),
             Keyword::Unknown("CustomKeyword".to_string()),
+            Keyword::EtbCounter {
+                counter_type: "P1P1".to_string(),
+                count: 2,
+            },
         ];
         let json = serde_json::to_string(&keywords).unwrap();
         let deserialized: Vec<Keyword> = serde_json::from_str(&json).unwrap();

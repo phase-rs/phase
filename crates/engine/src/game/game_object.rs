@@ -12,6 +12,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+// Note: HashMap still used for counters field
+
 /// Stored back-face data for double-faced cards (DFCs).
 /// Populated when a Transform-layout card enters the game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +72,6 @@ pub struct GameObject {
     pub trigger_definitions: Vec<TriggerDefinition>,
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
-    pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
 
     // Back face data for double-faced cards (DFCs)
@@ -135,7 +136,6 @@ impl GameObject {
             trigger_definitions: Vec::new(),
             replacement_definitions: Vec::new(),
             static_definitions: Vec::new(),
-            svars: HashMap::new(),
             color: Vec::new(),
             back_face: None,
             base_power: None,
