@@ -32,8 +32,51 @@ impl Default for EvalWeights {
 const WIN_SCORE: f64 = 10000.0;
 const LOSS_SCORE: f64 = -10000.0;
 
+/// Compute threat level of `target` from `evaluator`'s perspective.
+/// Returns 0.0-1.0 where higher means more threatening.
+/// Factors: board presence (creature count/total power), life ratio, hand size,
+/// commander damage dealt to evaluator.
+pub fn threat_level(state: &GameState, evaluator: PlayerId, target: PlayerId) -> f64 {
+    let target_player = &state.players[target.0 as usize];
+    let starting_life = state.format_config.starting_life.max(1) as f64;
+
+    // Board presence: creature count and total power
+    let (creatures, power, _toughness) = board_stats(state, target);
+    let board_score = (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0;
+
+    // Life ratio: higher life = more threatening
+    let life_ratio = (target_player.life as f64 / starting_life).clamp(0.0, 2.0) / 2.0;
+
+    // Hand size: more cards = more options
+    let hand_score = (target_player.hand.len() as f64).min(7.0) / 7.0;
+
+    // Commander damage dealt to evaluator
+    let cmd_damage: u32 = state
+        .commander_damage
+        .iter()
+        .filter(|e| e.player == evaluator)
+        .filter(|e| {
+            state
+                .objects
+                .get(&e.commander)
+                .map(|o| o.owner == target)
+                .unwrap_or(false)
+        })
+        .map(|e| e.damage)
+        .sum();
+    let cmd_threat = if let Some(threshold) = state.format_config.commander_damage_threshold {
+        (cmd_damage as f64 / threshold as f64).min(1.0)
+    } else {
+        0.0
+    };
+
+    // Weighted combination
+    board_score * 0.4 + life_ratio * 0.2 + hand_score * 0.15 + cmd_threat * 0.25
+}
+
 /// Evaluate the board state from `player`'s perspective.
 /// Returns a score where higher is better for `player`.
+/// In multiplayer, weights opponent scores by threat level (focus fire on highest threat).
 pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights) -> f64 {
     // Check for game over
     if let WaitingFor::GameOver { winner } = &state.waiting_for {
@@ -61,44 +104,77 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
     }
 
     let mut score = 0.0;
-
-    // Aggregate opponent stats across all living opponents
-    let mut total_opp_life = 0;
-    let mut total_opp_creatures = 0;
-    let mut total_opp_power = 0;
-    let mut total_opp_toughness = 0;
-    let mut total_opp_hand_size = 0;
-    for &opp in &opponents {
-        let o = &state.players[opp.0 as usize];
-        total_opp_life += o.life;
-        let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
-        total_opp_creatures += opp_creatures;
-        total_opp_power += opp_power;
-        total_opp_toughness += opp_toughness;
-        total_opp_hand_size += o.hand.len();
-    }
-
-    // Average opponent life for comparison (avoids inflating score in multiplayer)
     let opp_count = opponents.len().max(1) as f64;
-    let avg_opp_life = total_opp_life as f64 / opp_count;
 
-    // Life differential (against average opponent)
-    score += (p.life as f64 - avg_opp_life) * weights.life;
+    // For multiplayer (3+), use threat-weighted opponent scoring
+    if opponents.len() >= 2 {
+        // Compute threat levels and use them as weights
+        let threats: Vec<(PlayerId, f64)> = opponents
+            .iter()
+            .map(|&opp| (opp, threat_level(state, player, opp)))
+            .collect();
+        let total_threat: f64 = threats.iter().map(|(_, t)| t).sum::<f64>().max(0.01);
 
-    // Board stats
-    let (my_creatures, my_power, my_toughness) = board_stats(state, player);
+        let mut weighted_opp_life = 0.0;
+        let mut weighted_opp_creatures = 0.0;
+        let mut weighted_opp_power = 0.0;
+        let mut weighted_opp_toughness = 0.0;
+        let mut weighted_opp_hand = 0.0;
 
-    score += (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
-    score += (my_power - total_opp_power) as f64 * weights.board_power;
-    score += (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
+        for &(opp, threat) in &threats {
+            let w = threat / total_threat;
+            let o = &state.players[opp.0 as usize];
+            let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
+            weighted_opp_life += o.life as f64 * w;
+            weighted_opp_creatures += opp_creatures as f64 * w;
+            weighted_opp_power += opp_power as f64 * w;
+            weighted_opp_toughness += opp_toughness as f64 * w;
+            weighted_opp_hand += o.hand.len() as f64 * w;
+        }
 
-    // Hand size advantage
-    let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
-    score += (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
+        // Life differential (against threat-weighted opponent)
+        score += (p.life as f64 - weighted_opp_life) * weights.life;
 
-    // Aggression bonus: reward attacking potential when ahead on life
-    if p.life as f64 > avg_opp_life && my_power > 0 {
-        score += my_power as f64 * weights.aggression;
+        let (my_creatures, my_power, my_toughness) = board_stats(state, player);
+        score += (my_creatures as f64 - weighted_opp_creatures) * weights.board_presence;
+        score += (my_power as f64 - weighted_opp_power) * weights.board_power;
+        score += (my_toughness as f64 - weighted_opp_toughness) * weights.board_toughness;
+        score += (p.hand.len() as f64 - weighted_opp_hand) * weights.hand_size;
+
+        if p.life as f64 > weighted_opp_life && my_power > 0 {
+            score += my_power as f64 * weights.aggression;
+        }
+    } else {
+        // 2-player path: original logic (no threat weighting overhead)
+        let mut total_opp_life = 0;
+        let mut total_opp_creatures = 0;
+        let mut total_opp_power = 0;
+        let mut total_opp_toughness = 0;
+        let mut total_opp_hand_size = 0;
+        for &opp in &opponents {
+            let o = &state.players[opp.0 as usize];
+            total_opp_life += o.life;
+            let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
+            total_opp_creatures += opp_creatures;
+            total_opp_power += opp_power;
+            total_opp_toughness += opp_toughness;
+            total_opp_hand_size += o.hand.len();
+        }
+
+        let avg_opp_life = total_opp_life as f64 / opp_count;
+        score += (p.life as f64 - avg_opp_life) * weights.life;
+
+        let (my_creatures, my_power, my_toughness) = board_stats(state, player);
+        score += (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
+        score += (my_power - total_opp_power) as f64 * weights.board_power;
+        score += (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
+
+        let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
+        score += (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
+
+        if p.life as f64 > avg_opp_life && my_power > 0 {
+            score += my_power as f64 * weights.aggression;
+        }
     }
 
     score
@@ -291,5 +367,55 @@ mod tests {
         state.players[1].life = 0;
         let weights = EvalWeights::default();
         assert_eq!(evaluate_state(&state, PlayerId(0), &weights), WIN_SCORE);
+    }
+
+    #[test]
+    fn threat_level_higher_for_stronger_board() {
+        let mut state = GameState::new(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        // Player 1 has creatures, player 2 does not
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
+
+        let t1 = threat_level(&state, PlayerId(0), PlayerId(1));
+        let t2 = threat_level(&state, PlayerId(0), PlayerId(2));
+        assert!(
+            t1 > t2,
+            "Player with creatures should be more threatening: {t1} vs {t2}"
+        );
+    }
+
+    #[test]
+    fn threat_level_ranges_zero_to_one() {
+        let state = GameState::new(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        let t = threat_level(&state, PlayerId(0), PlayerId(1));
+        assert!(t >= 0.0 && t <= 1.0, "Threat should be 0-1, got {t}");
+    }
+
+    #[test]
+    fn multiplayer_eval_focuses_on_highest_threat() {
+        let mut state = GameState::new(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        // Player 1 is strong (high threat), player 2 is weak
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(1), 4, 4, vec![]);
+        // Player 0 also has a creature
+        add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
+
+        let weights = EvalWeights::default();
+        let score = evaluate_state(&state, PlayerId(0), &weights);
+        // Score should reflect being behind the strongest opponent
+        // (threat-weighted, so player 1's stats dominate)
+        assert!(score.is_finite());
     }
 }

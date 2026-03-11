@@ -1,7 +1,7 @@
 use crate::eval::EvalWeights;
 
 /// AI difficulty level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiDifficulty {
     VeryEasy,
     Easy,
@@ -46,6 +46,8 @@ pub struct AiConfig {
     pub combat_lookahead: bool,
     pub search: SearchConfig,
     pub weights: EvalWeights,
+    /// Number of players in the game (used for search budget scaling).
+    pub player_count: u8,
 }
 
 impl Default for AiConfig {
@@ -124,12 +126,49 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         combat_lookahead,
         search,
         weights: EvalWeights::default(),
+        player_count: 2,
     };
 
     // WASM platform constraints
     if platform == Platform::Wasm {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
+    }
+
+    config
+}
+
+/// Create an AI configuration scaled for the given player count.
+/// Reduces search depth and budget as player count grows:
+/// - 2 players: unchanged
+/// - 3-4 players: max depth 2, reduced node budget (paranoid search)
+/// - 5-6 players: max depth 1, heuristic-heavy (or search disabled)
+pub fn create_config_for_players(
+    difficulty: AiDifficulty,
+    platform: Platform,
+    player_count: u8,
+) -> AiConfig {
+    let mut config = create_config(difficulty, platform);
+    config.player_count = player_count;
+
+    match player_count {
+        0..=2 => {} // No scaling needed
+        3..=4 => {
+            // Paranoid search: cap depth at 2, reduce budget
+            config.search.max_depth = config.search.max_depth.min(2);
+            config.search.max_nodes = config.search.max_nodes * 2 / 3;
+            config.search.max_branching = config.search.max_branching.min(4);
+        }
+        _ => {
+            // 5-6+ players: heuristic-only or minimal search
+            if config.difficulty <= AiDifficulty::Medium {
+                config.search.enabled = false;
+            } else {
+                config.search.max_depth = 1;
+                config.search.max_nodes /= 3;
+                config.search.max_branching = config.search.max_branching.min(3);
+            }
+        }
     }
 
     config
@@ -216,5 +255,56 @@ mod tests {
     fn default_config_is_medium_native() {
         let config = AiConfig::default();
         assert_eq!(config.difficulty, AiDifficulty::Medium);
+    }
+
+    #[test]
+    fn four_player_caps_depth_at_two() {
+        let config = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
+        assert!(config.search.max_depth <= 2);
+        assert!(config.search.enabled);
+    }
+
+    #[test]
+    fn four_player_reduces_budget() {
+        let base = create_config(AiDifficulty::Hard, Platform::Native);
+        let scaled = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
+        assert!(scaled.search.max_nodes < base.search.max_nodes);
+    }
+
+    #[test]
+    fn six_player_medium_disables_search() {
+        let config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 6);
+        assert!(!config.search.enabled);
+    }
+
+    #[test]
+    fn six_player_hard_uses_depth_one() {
+        let config = create_config_for_players(AiDifficulty::Hard, Platform::Native, 6);
+        assert!(config.search.enabled);
+        assert_eq!(config.search.max_depth, 1);
+    }
+
+    #[test]
+    fn two_player_unchanged() {
+        let base = create_config(AiDifficulty::Medium, Platform::Native);
+        let scaled = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2);
+        assert_eq!(base.search.max_depth, scaled.search.max_depth);
+        assert_eq!(base.search.max_nodes, scaled.search.max_nodes);
+    }
+
+    #[test]
+    fn wasm_and_player_scaling_compound() {
+        let config = create_config_for_players(AiDifficulty::Hard, Platform::Wasm, 4);
+        // WASM caps at depth 2, then 4-player also caps at 2
+        assert!(config.search.max_depth <= 2);
+        // Both WASM and 4-player reduce nodes
+        let native_2p = create_config(AiDifficulty::Hard, Platform::Native);
+        assert!(config.search.max_nodes < native_2p.search.max_nodes);
+    }
+
+    #[test]
+    fn player_count_stored_in_config() {
+        let config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 4);
+        assert_eq!(config.player_count, 4);
     }
 }
