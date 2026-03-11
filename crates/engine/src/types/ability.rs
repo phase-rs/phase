@@ -187,6 +187,7 @@ pub enum AbilityCost {
         cost: ManaCost,
     },
     Tap,
+    Untap,
     Loyalty {
         amount: i32,
     },
@@ -830,6 +831,15 @@ mod tests {
             EffectError::Unregistered("Foo".to_string()).to_string(),
             "unregistered effect type: Foo"
         );
+    }
+
+    #[test]
+    fn untap_cost_serialization_roundtrip() {
+        let cost = AbilityCost::Untap;
+        let json = serde_json::to_string(&cost).unwrap();
+        assert!(json.contains("\"type\":\"Untap\""));
+        let deser: AbilityCost = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, AbilityCost::Untap);
     }
 
     // --- Serde roundtrip tests for new typed definitions ---
