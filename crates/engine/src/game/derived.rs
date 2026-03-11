@@ -30,7 +30,8 @@ pub fn derive_display_state(state: &mut GameState) {
             let has_devotion_static = obj.static_definitions.iter().any(|def| {
                 matches!(
                     &def.condition,
-                    Some(StaticCondition::CheckSVar { .. }) | Some(StaticCondition::DevotionGE { .. })
+                    Some(StaticCondition::CheckSVar { .. })
+                        | Some(StaticCondition::DevotionGE { .. })
                 )
             });
             if has_devotion_static && !obj.base_color.is_empty() {
@@ -68,7 +69,7 @@ pub fn derive_display_state(state: &mut GameState) {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 

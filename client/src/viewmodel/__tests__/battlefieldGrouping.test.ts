@@ -80,78 +80,31 @@ describe("partitionByType", () => {
 });
 
 describe("groupByName", () => {
-  it("groups same-name permanents with same state", () => {
-    const objects = [
-      makeGameObject({ id: 1, name: "Forest", tapped: false }),
-      makeGameObject({ id: 2, name: "Forest", tapped: false }),
-      makeGameObject({ id: 3, name: "Forest", tapped: false }),
-    ];
-
-    const groups = groupByName(objects);
-
-    expect(groups).toHaveLength(1);
-    expect(groups[0].name).toBe("Forest");
-    expect(groups[0].count).toBe(3);
-    expect(groups[0].ids).toEqual([1, 2, 3]);
-  });
-
-  it("does not group permanents with different tapped state", () => {
-    const objects = [
-      makeGameObject({ id: 1, name: "Forest", tapped: false }),
-      makeGameObject({ id: 2, name: "Forest", tapped: true }),
-    ];
-
-    const groups = groupByName(objects);
-
-    expect(groups).toHaveLength(2);
-  });
-
-  it("does not group permanents with attachments", () => {
-    const objects = [
-      makeGameObject({ id: 1, name: "Forest" }),
-      makeGameObject({ id: 2, name: "Forest", attachments: [10] }),
-    ];
-
-    const groups = groupByName(objects);
-
-    expect(groups).toHaveLength(2);
-  });
-
-  it("does not group permanents with counters", () => {
-    const objects = [
-      makeGameObject({ id: 1, name: "Forest" }),
-      makeGameObject({ id: 2, name: "Forest", counters: { Plus1Plus1: 1 } }),
-    ];
-
-    const groups = groupByName(objects);
-
-    expect(groups).toHaveLength(2);
-  });
-
-  it("groups different names separately", () => {
-    const objects = [
-      makeGameObject({ id: 1, name: "Forest" }),
-      makeGameObject({ id: 2, name: "Mountain" }),
-      makeGameObject({ id: 3, name: "Forest" }),
-    ];
-
-    const groups = groupByName(objects);
-
-    expect(groups).toHaveLength(2);
-    const forest = groups.find((g) => g.name === "Forest")!;
-    const mountain = groups.find((g) => g.name === "Mountain")!;
-    expect(forest.count).toBe(2);
-    expect(mountain.count).toBe(1);
-  });
-
-  it("returns representative as first object props", () => {
+  it("produces one group per permanent (no stacking)", () => {
     const objects = [
       makeGameObject({ id: 1, name: "Forest" }),
       makeGameObject({ id: 2, name: "Forest" }),
+      makeGameObject({ id: 3, name: "Mountain" }),
     ];
 
     const groups = groupByName(objects);
 
-    expect(groups[0].representative.id).toBe(1);
+    expect(groups).toHaveLength(3);
+    expect(groups.every((g) => g.count === 1)).toBe(true);
+    expect(groups.map((g) => g.ids[0])).toEqual([1, 2, 3]);
+  });
+
+  it("preserves name and representative for each permanent", () => {
+    const objects = [
+      makeGameObject({ id: 5, name: "Forest" }),
+      makeGameObject({ id: 9, name: "Mountain" }),
+    ];
+
+    const groups = groupByName(objects);
+
+    expect(groups[0].name).toBe("Forest");
+    expect(groups[0].representative.id).toBe(5);
+    expect(groups[1].name).toBe("Mountain");
+    expect(groups[1].representative.id).toBe(9);
   });
 });

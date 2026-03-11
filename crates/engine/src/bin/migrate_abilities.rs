@@ -240,7 +240,7 @@ fn fix_colors_deep(value: &mut Value) -> bool {
             if let Some(colors_val) = map.get_mut("colors") {
                 if let Some(colors) = colors_val.as_array_mut() {
                     let original_len = colors.len();
-                    colors.retain(|c| c.as_str().is_none_or(|s| is_valid_mana_color(s)));
+                    colors.retain(|c| c.as_str().is_none_or(is_valid_mana_color));
                     if colors.len() != original_len {
                         changed = true;
                     }
@@ -284,6 +284,7 @@ fn migrate_ability_file(root: &mut Value, path: &Path, stats: &mut Stats) -> boo
     changed |= fix_zones_in_value(root);
     changed |= fix_target_filters_deep(root);
     changed |= fix_colors_deep(root);
+    changed |= fix_split_keywords_deep(root);
 
     if let Some(abilities) = root.get_mut("abilities").and_then(|v| v.as_array_mut()) {
         for ability in abilities.iter_mut() {
@@ -525,6 +526,7 @@ fn migrate_effect(effect: &mut Value, path: &Path, stats: &mut Stats) -> bool {
 }
 
 /// Migrate a cost value: convert Forge SVar cost strings to typed AbilityCost variants.
+#[allow(clippy::only_used_in_recursion)]
 fn migrate_cost(cost: &mut Value, path: &Path, stats: &mut Stats) -> bool {
     if cost.is_null() {
         return false;
@@ -631,7 +633,8 @@ fn reclassify_forge_cost(s: &str) -> Option<Value> {
             return Some(json!({"type": "Loyalty", "amount": -(count as i64)}));
         }
 
-        let mut obj = json!({"type": "RemoveCounter", "count": count, "counter_type": counter_type});
+        let mut obj =
+            json!({"type": "RemoveCounter", "count": count, "counter_type": counter_type});
         // If there's a filter (3rd part), parse it as target
         if let Some(filter_str) = parts.get(2) {
             if !filter_str.is_empty() {
@@ -1019,7 +1022,9 @@ fn migrate_static_definition(static_def: &mut Value, _path: &Path, _stats: &mut 
                 changed |= migrate_target_filter(affected);
             }
             // Fix AddType/RemoveType with non-CoreType values → AddSubtype/RemoveSubtype
-            if let Some(mods) = static_def.get_mut("modifications").and_then(|v| v.as_array_mut())
+            if let Some(mods) = static_def
+                .get_mut("modifications")
+                .and_then(|v| v.as_array_mut())
             {
                 changed |= fix_type_modifications(mods);
             }
@@ -1085,21 +1090,15 @@ fn migrate_static_definition(static_def: &mut Value, _path: &Path, _stats: &mut 
     }
     if let Some(kw) = params.get("AddKeyword") {
         if let Some(s) = kw.as_str() {
-            for k in s.split(' ') {
-                let k = k.trim();
-                if !k.is_empty() {
-                    modifications.push(json!({"type": "AddKeyword", "keyword": k}));
-                }
+            for k in split_keyword_list(s) {
+                modifications.push(json!({"type": "AddKeyword", "keyword": k}));
             }
         }
     }
     if let Some(kw) = params.get("RemoveKeyword") {
         if let Some(s) = kw.as_str() {
-            for k in s.split(' ') {
-                let k = k.trim();
-                if !k.is_empty() {
-                    modifications.push(json!({"type": "RemoveKeyword", "keyword": k}));
-                }
+            for k in split_keyword_list(s) {
+                modifications.push(json!({"type": "RemoveKeyword", "keyword": k}));
             }
         }
     }
@@ -1278,8 +1277,16 @@ fn migrate_target_filter(filter: &mut Value) -> bool {
                     let ct_clean = ct.split('/').next().unwrap_or(ct);
 
                     let valid_type_filters = [
-                        "Creature", "Land", "Artifact", "Enchantment", "Instant",
-                        "Sorcery", "Planeswalker", "Permanent", "Card", "Any",
+                        "Creature",
+                        "Land",
+                        "Artifact",
+                        "Enchantment",
+                        "Instant",
+                        "Sorcery",
+                        "Planeswalker",
+                        "Permanent",
+                        "Card",
+                        "Any",
                     ];
 
                     // Handle semicolon-separated types: "Artifact;Creature;Land"
@@ -1686,7 +1693,7 @@ fn fix_type_modifications(mods: &mut Vec<Value>) -> bool {
                         // Keep only valid colors
                         let valid: Vec<Value> = colors
                             .iter()
-                            .filter(|c| c.as_str().is_some_and(|s| is_valid_mana_color(s)))
+                            .filter(|c| c.as_str().is_some_and(is_valid_mana_color))
                             .cloned()
                             .collect();
                         if !valid.is_empty() {
@@ -1716,4 +1723,136 @@ fn fix_type_modifications(mods: &mut Vec<Value>) -> bool {
         *mods = new_mods;
     }
     changed
+}
+
+/// Split a Forge keyword list like "Flying & First Strike & Ward:4" into
+/// individual keyword strings, preserving multi-word names.
+fn split_keyword_list(s: &str) -> Vec<String> {
+    s.split(" & ")
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// Fix incorrectly split keyword modifications in all `modifications` arrays.
+///
+/// A previous migration bug split `AddKeyword$ Flying & First Strike` on single
+/// spaces instead of ` & `, producing fragment entries like `"First"`, `"Strike"`,
+/// `"&"`, `"from"`, etc. This pass reconstructs the original string by joining
+/// consecutive same-type keyword entries with spaces, then re-splits correctly
+/// using `split_keyword_list` (which splits on ` & `).
+fn fix_split_keywords_deep(value: &mut Value) -> bool {
+    match value {
+        Value::Array(arr) => {
+            let mut changed = false;
+            for item in arr.iter_mut() {
+                changed |= fix_split_keywords_deep(item);
+            }
+            changed
+        }
+        Value::Object(map) => {
+            let mut changed = false;
+            if let Some(mods) = map.get_mut("modifications") {
+                if let Some(arr) = mods.as_array_mut() {
+                    changed |= fix_keyword_modifications(arr);
+                }
+            }
+            for (_, v) in map.iter_mut() {
+                changed |= fix_split_keywords_deep(v);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+fn fix_keyword_modifications(mods: &mut Vec<Value>) -> bool {
+    // Detect the bug signature: any keyword entry that is a bare lowercase word,
+    // a single character, or "&" — these can only come from incorrect space-splitting.
+    let has_fragments = mods.iter().any(|m| {
+        let mod_type = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if mod_type != "AddKeyword" && mod_type != "RemoveKeyword" {
+            return false;
+        }
+        m.get("keyword")
+            .and_then(|v| v.as_str())
+            .is_some_and(is_keyword_fragment)
+    });
+
+    if !has_fragments {
+        return false;
+    }
+
+    // Reconstruct: collect runs of consecutive same-type keyword mods,
+    // rejoin with spaces to reconstruct the original Forge value,
+    // then re-split correctly using split_keyword_list.
+    let mut new_mods = Vec::new();
+    let entries: Vec<Value> = std::mem::take(mods);
+    let mut i = 0;
+
+    while i < entries.len() {
+        let mod_type = entries[i]
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_kw_mod = mod_type == "AddKeyword" || mod_type == "RemoveKeyword";
+
+        if !is_kw_mod {
+            new_mods.push(entries[i].clone());
+            i += 1;
+            continue;
+        }
+
+        // Collect all consecutive keyword mods of the same type
+        let mut kw_parts = Vec::new();
+        let mut j = i;
+        while j < entries.len() {
+            let jtype = entries[j]
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if jtype != mod_type {
+                break;
+            }
+            if let Some(kw) = entries[j].get("keyword").and_then(|v| v.as_str()) {
+                kw_parts.push(kw.to_string());
+            } else {
+                break;
+            }
+            j += 1;
+        }
+
+        // Rejoin with spaces to reconstruct the original Forge value,
+        // then re-split on " & " to get correct keyword boundaries
+        let reconstructed = kw_parts.join(" ");
+        for kw in split_keyword_list(&reconstructed) {
+            new_mods.push(json!({"type": mod_type, "keyword": kw}));
+        }
+        i = j;
+    }
+
+    *mods = new_mods;
+    true
+}
+
+/// Returns true if a keyword value is a fragment from incorrect space-splitting.
+/// These can never be valid standalone keyword values.
+fn is_keyword_fragment(kw: &str) -> bool {
+    // "&" separator treated as keyword
+    if kw == "&" {
+        return true;
+    }
+    // Single character (e.g., "B", "R") — not a valid keyword
+    if kw.len() == 1 {
+        return true;
+    }
+    // All-lowercase words are fragments (valid keywords are PascalCase)
+    if kw.chars().all(|c| c.is_ascii_lowercase()) {
+        return true;
+    }
+    // Sentence-ending punctuation
+    if kw.ends_with('.') {
+        return true;
+    }
+    false
 }

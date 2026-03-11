@@ -50,7 +50,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           pending = false;
           return;
         }
-        const action = await adapter.getAiAction(config.difficulty);
+        const action = await adapter.getAiAction(config.difficulty, AI_PLAYER_ID);
         if (action == null) {
           pending = false;
           return;

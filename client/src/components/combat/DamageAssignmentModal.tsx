@@ -10,7 +10,7 @@ export function DamageAssignmentModal() {
   const phase = useGameStore((s) => s.gameState?.phase ?? null);
   const [open, setOpen] = useState(false);
 
-  const isCombatDamage = phase === "CombatDamage" || phase === "FirstStrikeDamage";
+  const isCombatDamage = phase === "CombatDamage";
   const hasDamage =
     combat !== null &&
     Object.keys(combat.damage_assignments).length > 0;

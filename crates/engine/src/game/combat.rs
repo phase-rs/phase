@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::game_object::GameObject;
+use super::players;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -10,7 +11,6 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use super::players;
 use crate::types::statics::StaticMode;
 
 /// Represents who a creature is attacking: a player or a planeswalker.

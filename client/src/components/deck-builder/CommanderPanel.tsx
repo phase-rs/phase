@@ -127,7 +127,6 @@ export function CommanderPanel({
           </div>
         )}
         {commanders.map((name) => {
-          const card = cardDataCache.get(name);
           return (
             <div
               key={name}

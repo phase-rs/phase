@@ -245,7 +245,7 @@ export function ActionButton() {
       return;
     }
 
-    if (!waitingFor || waitingFor.data.player !== playerId) return;
+    if (!waitingFor || waitingFor.type === "GameOver" || !("player" in waitingFor.data) || waitingFor.data.player !== playerId) return;
 
     if (waitingFor.type === "Priority") {
       dispatchAction({ type: "PassPriority" });

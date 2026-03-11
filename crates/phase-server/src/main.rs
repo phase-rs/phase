@@ -405,10 +405,8 @@ async fn handle_client_message(
                         // Send GameStarted to all other connected players
                         for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
                             if pid != joiner {
-                                let p_state = server_core::filter_state_for_player(
-                                    &session.state,
-                                    pid,
-                                );
+                                let p_state =
+                                    server_core::filter_state_for_player(&session.state, pid);
                                 let p_legals = if actor == Some(pid) {
                                     legal_actions.clone()
                                 } else {
@@ -517,7 +515,11 @@ async fn handle_client_message(
                         .first()
                         .and_then(|&opp| {
                             let name = &session.display_names[opp.0 as usize];
-                            if name.is_empty() { None } else { Some(name.clone()) }
+                            if name.is_empty() {
+                                None
+                            } else {
+                                Some(name.clone())
+                            }
                         });
 
                     let legal_actions_all = get_legal_actions(&session.state);
@@ -551,7 +553,9 @@ async fn handle_client_message(
                     }
 
                     // Notify all other players about the reconnection
-                    let reconnect_msg = ServerMessage::OpponentReconnected { player: Some(player) };
+                    let reconnect_msg = ServerMessage::OpponentReconnected {
+                        player: Some(player),
+                    };
                     if let Some(game_conns) = conns.get(&game_code) {
                         for (&pid, sender) in game_conns.iter() {
                             if pid != player {
@@ -624,7 +628,7 @@ async fn handle_client_message(
             };
 
             let mut mgr = state.lock().await;
-            let pc = requested_player_count.max(2).min(6);
+            let pc = requested_player_count.clamp(2, 6);
             let (game_code, player_token) =
                 mgr.create_game_n_players(resolved, display_name.clone(), timer_seconds, pc);
             info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
@@ -733,12 +737,17 @@ async fn handle_client_message(
                         let actor = server_core::acting_player(&session.state.waiting_for);
 
                         // Find first opponent name for backward compat
-                        let joiner_opp_name = engine::game::players::opponents(&session.state, joiner)
-                            .first()
-                            .and_then(|&opp| {
-                                let name = &session.display_names[opp.0 as usize];
-                                if name.is_empty() { None } else { Some(name.clone()) }
-                            });
+                        let joiner_opp_name =
+                            engine::game::players::opponents(&session.state, joiner)
+                                .first()
+                                .and_then(|&opp| {
+                                    let name = &session.display_names[opp.0 as usize];
+                                    if name.is_empty() {
+                                        None
+                                    } else {
+                                        Some(name.clone())
+                                    }
+                                });
 
                         let joiner_legals = if actor == Some(joiner) {
                             legal_actions.clone()
@@ -759,16 +768,19 @@ async fn handle_client_message(
                         // Send GameStarted to all other connected players
                         for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
                             if pid != joiner {
-                                let p_state = server_core::filter_state_for_player(
-                                    &session.state,
-                                    pid,
-                                );
-                                let opp_name = engine::game::players::opponents(&session.state, pid)
-                                    .first()
-                                    .and_then(|&opp| {
-                                        let name = &session.display_names[opp.0 as usize];
-                                        if name.is_empty() { None } else { Some(name.clone()) }
-                                    });
+                                let p_state =
+                                    server_core::filter_state_for_player(&session.state, pid);
+                                let opp_name =
+                                    engine::game::players::opponents(&session.state, pid)
+                                        .first()
+                                        .and_then(|&opp| {
+                                            let name = &session.display_names[opp.0 as usize];
+                                            if name.is_empty() {
+                                                None
+                                            } else {
+                                                Some(name.clone())
+                                            }
+                                        });
                                 let p_legals = if actor == Some(pid) {
                                     legal_actions.clone()
                                 } else {

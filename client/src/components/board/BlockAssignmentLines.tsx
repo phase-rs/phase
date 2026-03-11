@@ -5,7 +5,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import type { ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 import { isAttackerTargetingPlayer } from "../../viewmodel/battlefieldProps.ts";
 
 interface LinePosition {

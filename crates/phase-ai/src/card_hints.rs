@@ -74,8 +74,7 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
                         {
                             let creature_val = evaluate_creature(state, id);
                             // Weight by controller's threat level for multi-opponent focus
-                            let threat_weight =
-                                threat_level(state, player, o.controller) + 0.5;
+                            let threat_weight = threat_level(state, player, o.controller) + 0.5;
                             Some(creature_val * threat_weight)
                         } else {
                             None

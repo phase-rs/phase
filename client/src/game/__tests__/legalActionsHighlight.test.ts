@@ -170,6 +170,7 @@ function createMockAdapter(state: GameState, legalActions: GameAction[]) {
     getState: vi.fn().mockResolvedValue(state),
     getLegalActions: vi.fn().mockResolvedValue(legalActions),
     restoreState: vi.fn(),
+    getAiAction: vi.fn().mockReturnValue(null),
     dispose: vi.fn(),
   };
 }

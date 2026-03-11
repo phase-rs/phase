@@ -18,7 +18,6 @@ class AudioManager {
   private sfxGain: GainNode | null = null;
   private musicGain: GainNode | null = null;
   private currentAudio: HTMLAudioElement | null = null;
-  private currentSource: MediaElementAudioSourceNode | null = null;
   private trackOrder: string[] = [];
   private trackIndex = 0;
   private isWarmedUp = false;
@@ -125,7 +124,6 @@ class AudioManager {
     }, fadeOut * 1000);
 
     this.currentAudio = null;
-    this.currentSource = null;
   }
 
   /**
@@ -175,8 +173,7 @@ class AudioManager {
     if (this.currentAudio) {
       this.currentAudio.pause();
       this.currentAudio = null;
-      this.currentSource = null;
-    }
+      }
     if (this.ctx) {
       this.ctx.close();
       this.ctx = null;
@@ -208,7 +205,6 @@ class AudioManager {
     source.connect(this.musicGain);
 
     this.currentAudio = audio;
-    this.currentSource = source;
 
     audio.addEventListener("ended", () => {
       this.crossfadeTo(this.nextTrackIndex());

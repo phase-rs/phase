@@ -371,11 +371,7 @@ mod tests {
 
     #[test]
     fn threat_level_higher_for_stronger_board() {
-        let mut state = GameState::new(
-            engine::types::format::FormatConfig::free_for_all(),
-            3,
-            42,
-        );
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
         // Player 1 has creatures, player 2 does not
         add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
         add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
@@ -390,22 +386,14 @@ mod tests {
 
     #[test]
     fn threat_level_ranges_zero_to_one() {
-        let state = GameState::new(
-            engine::types::format::FormatConfig::free_for_all(),
-            3,
-            42,
-        );
+        let state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
         let t = threat_level(&state, PlayerId(0), PlayerId(1));
-        assert!(t >= 0.0 && t <= 1.0, "Threat should be 0-1, got {t}");
+        assert!((0.0..=1.0).contains(&t), "Threat should be 0-1, got {t}");
     }
 
     #[test]
     fn multiplayer_eval_focuses_on_highest_threat() {
-        let mut state = GameState::new(
-            engine::types::format::FormatConfig::free_for_all(),
-            3,
-            42,
-        );
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
         // Player 1 is strong (high threat), player 2 is weak
         add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
         add_creature(&mut state, PlayerId(1), 4, 4, vec![]);

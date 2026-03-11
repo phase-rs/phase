@@ -298,14 +298,16 @@ fn filename_to_card_name(stem: &str) -> String {
         .join(" ")
 }
 
+type AtomicCardIndex<'a> = HashMap<String, &'a Vec<crate::database::mtgjson::AtomicCard>>;
+
 /// Build fast lookup indexes from MTGJSON data for O(1) card name resolution.
 /// Returns (lowercase_map, normalized_map, normalized_prefix_map).
 fn build_mtgjson_indexes(
     atomic: &crate::database::mtgjson::AtomicCardsFile,
 ) -> (
-    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
-    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
-    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
+    AtomicCardIndex<'_>,
+    AtomicCardIndex<'_>,
+    AtomicCardIndex<'_>,
 ) {
     let mut lowercase_map = HashMap::with_capacity(atomic.data.len());
     let mut normalized_map = HashMap::with_capacity(atomic.data.len());

@@ -158,12 +158,7 @@ fn assign_attack_targets(
             // Sort attackers by power (ascending) — send smallest first to just-kill threshold
             let mut sorted_attackers: Vec<(ObjectId, i32)> = attacking_ids
                 .iter()
-                .filter_map(|&id| {
-                    state
-                        .objects
-                        .get(&id)
-                        .map(|o| (id, o.power.unwrap_or(0)))
-                })
+                .filter_map(|&id| state.objects.get(&id).map(|o| (id, o.power.unwrap_or(0))))
                 .collect();
             sorted_attackers.sort_by_key(|&(_, p)| p);
 

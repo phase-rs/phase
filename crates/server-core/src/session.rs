@@ -13,6 +13,9 @@ use rand::Rng;
 use crate::filter::filter_state_for_player;
 use crate::reconnect::ReconnectManager;
 
+/// Result of handling a game action: per-player filtered states, events, and legal actions.
+type ActionResult = (Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>);
+
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
 pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
     match waiting_for {
@@ -209,7 +212,7 @@ impl SessionManager {
         game_code: &str,
         player_token: &str,
         action: GameAction,
-    ) -> Result<(Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>), String> {
+    ) -> Result<ActionResult, String> {
         let session = self
             .sessions
             .get_mut(game_code)

@@ -586,10 +586,7 @@ Oracle:Tarmogoyf's power is equal to the number of card types among cards in all
         match &rules.layout {
             CardLayout::Single(face) => {
                 assert_eq!(face.power, Some(PtValue::Variable("*".to_string())));
-                assert_eq!(
-                    face.toughness,
-                    Some(PtValue::Variable("*+1".to_string()))
-                );
+                assert_eq!(face.toughness, Some(PtValue::Variable("*+1".to_string())));
             }
             _ => panic!("Expected Single layout"),
         }

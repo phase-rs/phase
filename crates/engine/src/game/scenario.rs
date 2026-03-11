@@ -58,11 +58,7 @@ impl GameScenario {
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
         GameScenario {
-            state: GameState::new(
-                crate::types::format::FormatConfig::standard(),
-                count,
-                seed,
-            ),
+            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
         }
     }
 

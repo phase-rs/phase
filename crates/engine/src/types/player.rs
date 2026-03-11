@@ -5,7 +5,17 @@ use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
     JsonSchema,
 )]
 #[serde(transparent)]

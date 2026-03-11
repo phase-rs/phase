@@ -577,7 +577,9 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .remove("DigNum")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
-            let destination = params.remove("DestinationZone").and_then(|v| parse_zone(&v));
+            let destination = params
+                .remove("DestinationZone")
+                .and_then(|v| parse_zone(&v));
             Effect::Dig { count, destination }
         }
         "GainControl" => {

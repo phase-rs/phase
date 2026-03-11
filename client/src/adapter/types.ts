@@ -24,8 +24,8 @@ export interface FormatConfig {
 // ── Attack Target ───────────────────────────────────────────────────────
 
 export type AttackTarget =
-  | { Player: PlayerId }
-  | { Planeswalker: ObjectId };
+  | { type: "Player"; data: PlayerId }
+  | { type: "Planeswalker"; data: ObjectId };
 
 // ── Commander Damage ────────────────────────────────────────────────────
 
@@ -378,7 +378,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction): Promise<GameEvent[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<GameAction[]>;
-  getAiAction(difficulty: string): Promise<GameAction | null> | GameAction | null;
+  getAiAction(difficulty: string, playerId?: number): Promise<GameAction | null> | GameAction | null;
   restoreState(state: GameState): void;
   dispose(): void;
 }
