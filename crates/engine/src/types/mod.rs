@@ -17,9 +17,10 @@ pub mod triggers;
 pub mod zones;
 
 pub use ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, EffectError,
-    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetRef, TargetSpec,
-    TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
+    DamageAmount, Duration, Effect, EffectError, FilterProp, PtValue, ReplacementDefinition,
+    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    TypeFilter,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};
@@ -30,7 +31,7 @@ pub use game_state::{
 };
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};
-pub use layers::{ActiveContinuousEffect, ContinuousEffectApplication, Layer};
+pub use layers::{ActiveContinuousEffect, Layer};
 pub use mana::{ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit};
 pub use phase::Phase;
 pub use player::{Player, PlayerId};

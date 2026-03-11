@@ -1,14 +1,17 @@
-use std::collections::HashMap;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::card_type::CoreType;
 use super::identifiers::ObjectId;
+use super::keywords::Keyword;
+use super::mana::{ManaCost, ManaColor};
+use super::phase::Phase;
 use super::player::PlayerId;
 use super::replacements::ReplacementEvent;
 use super::statics::StaticMode;
 use super::triggers::TriggerMode;
+use super::zones::Zone;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -22,42 +25,156 @@ pub enum DamageAmount {
     Variable(String),
 }
 
-/// Targeting specification for an effect.
+/// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum PtValue {
+    Fixed(i32),
+    Variable(String),
+}
+
+/// Duration for temporary effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Duration {
+    UntilEndOfTurn,
+    UntilYourNextTurn,
+    UntilHostLeavesPlay,
+    Permanent,
+}
+
+// ---------------------------------------------------------------------------
+// TargetFilter -- replaces TargetSpec entirely
+// ---------------------------------------------------------------------------
+
+/// Type filter for card type matching in filters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TypeFilter {
+    Creature,
+    Land,
+    Artifact,
+    Enchantment,
+    Instant,
+    Sorcery,
+    Planeswalker,
+    Permanent,
+    Card,
+    Any,
+}
+
+/// Controller reference for filter matching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ControllerRef {
+    You,
+    Opponent,
+}
+
+/// Individual filter properties that can be combined in a Typed filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
-pub enum TargetSpec {
+pub enum FilterProp {
+    Token,
+    Attacking,
+    Tapped,
+    NonType { value: String },
+    WithKeyword { value: String },
+    CountersGE { counter_type: String, count: u32 },
+    CmcGE { value: u32 },
+    InZone { zone: Zone },
+    Owned { controller: ControllerRef },
+    EnchantedBy,
+    EquippedBy,
+    Other { value: String },
+}
+
+/// Typed target filter replacing all Forge filter strings and TargetSpec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum TargetFilter {
     None,
     Any,
-    Filtered { filter: String },
     Player,
     Controller,
-    All { filter: String },
+    SelfRef,
+    Typed {
+        #[serde(default)]
+        card_type: Option<TypeFilter>,
+        #[serde(default)]
+        subtype: Option<String>,
+        #[serde(default)]
+        controller: Option<ControllerRef>,
+        #[serde(default)]
+        properties: Vec<FilterProp>,
+    },
+    Not {
+        filter: Box<TargetFilter>,
+    },
+    Or {
+        filters: Vec<TargetFilter>,
+    },
+    And {
+        filters: Vec<TargetFilter>,
+    },
 }
+
+/// Condition for static ability applicability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum StaticCondition {
+    DevotionGE {
+        colors: Vec<ManaColor>,
+        threshold: u32,
+    },
+    IsPresent {
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    CheckSVar {
+        var: String,
+        compare: String,
+    },
+    None,
+}
+
+// ---------------------------------------------------------------------------
+// AbilityCost -- expanded typed variants
+// ---------------------------------------------------------------------------
 
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum AbilityCost {
-    Mana { cost: String },
+    Mana { cost: ManaCost },
     Tap,
     Loyalty { amount: i32 },
-    Sacrifice { target: TargetSpec },
+    Sacrifice { target: TargetFilter },
+    PayLife { amount: u32 },
+    Discard {
+        count: u32,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    Exile {
+        count: u32,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    TapCreatures { count: u32, filter: TargetFilter },
     Composite { costs: Vec<AbilityCost> },
 }
 
 // ---------------------------------------------------------------------------
-// Effect enum -- 38 typed variants + Other fallback
+// Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 
-/// The typed effect enum replacing `api_type: String` + `params: HashMap`.
-/// Each variant corresponds to an entry in the effect handler registry.
+/// The typed effect enum. Each variant corresponds to an effect handler.
+/// Zero HashMap<String, String> fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum Effect {
     DealDamage {
         amount: DamageAmount,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Draw {
         #[serde(default = "default_one")]
@@ -68,16 +185,16 @@ pub enum Effect {
         power: i32,
         #[serde(default)]
         toughness: i32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Destroy {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Counter {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Token {
         name: String,
@@ -88,9 +205,9 @@ pub enum Effect {
         #[serde(default)]
         types: Vec<String>,
         #[serde(default)]
-        colors: Vec<String>,
+        colors: Vec<ManaColor>,
         #[serde(default)]
-        keywords: Vec<String>,
+        keywords: Vec<Keyword>,
     },
     GainLife {
         amount: i32,
@@ -99,42 +216,42 @@ pub enum Effect {
         amount: i32,
     },
     Tap {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Untap {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     AddCounter {
         counter_type: String,
         #[serde(default = "default_one_i32")]
         count: i32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     RemoveCounter {
         counter_type: String,
         #[serde(default = "default_one_i32")]
         count: i32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Sacrifice {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     DiscardCard {
         #[serde(default = "default_one")]
         count: u32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Mill {
         #[serde(default = "default_one")]
         count: u32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Scry {
         #[serde(default = "default_one")]
@@ -145,85 +262,85 @@ pub enum Effect {
         power: i32,
         #[serde(default)]
         toughness: i32,
-        #[serde(default = "default_target_spec_all_empty")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
     },
     DamageAll {
         amount: DamageAmount,
-        #[serde(default = "default_target_spec_all_empty")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
     },
     DestroyAll {
-        #[serde(default = "default_target_spec_all_empty")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
     },
     ChangeZone {
         #[serde(default)]
-        origin: String,
-        destination: String,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        origin: Option<Zone>,
+        destination: Zone,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     ChangeZoneAll {
         #[serde(default)]
-        origin: String,
-        destination: String,
-        #[serde(default = "default_target_spec_all_empty")]
-        target: TargetSpec,
+        origin: Option<Zone>,
+        destination: Zone,
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
     },
     Dig {
         #[serde(default = "default_one")]
         count: u32,
         #[serde(default)]
-        destination: String,
+        destination: Option<Zone>,
     },
     GainControl {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Attach {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Surveil {
         #[serde(default = "default_one")]
         count: u32,
     },
     Fight {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Bounce {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
         #[serde(default)]
-        destination: String,
+        destination: Option<Zone>,
     },
     Explore,
     Proliferate,
     CopySpell {
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     ChooseCard {
         #[serde(default)]
         choices: Vec<String>,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     PutCounter {
         counter_type: String,
         #[serde(default = "default_one_i32")]
         count: i32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     MultiplyCounter {
         counter_type: String,
         #[serde(default = "default_two_i32")]
         multiplier: i32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Animate {
         #[serde(default)]
@@ -232,35 +349,50 @@ pub enum Effect {
         toughness: Option<i32>,
         #[serde(default)]
         types: Vec<String>,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
-    /// Generic "Effect" handler (creates continuous effects at resolution).
+    /// Generic continuous effect application at resolution.
     GenericEffect {
         #[serde(default)]
-        params: HashMap<String, String>,
+        static_abilities: Vec<StaticDefinition>,
+        #[serde(default)]
+        duration: Option<Duration>,
     },
     Cleanup {
         #[serde(default)]
-        params: HashMap<String, String>,
+        clear_remembered: bool,
+        #[serde(default)]
+        clear_chosen_player: bool,
+        #[serde(default)]
+        clear_chosen_color: bool,
+        #[serde(default)]
+        clear_chosen_type: bool,
+        #[serde(default)]
+        clear_chosen_card: bool,
+        #[serde(default)]
+        clear_imprinted: bool,
+        #[serde(default)]
+        clear_triggers: bool,
+        #[serde(default)]
+        clear_coin_flips: bool,
     },
     Mana {
         #[serde(default)]
-        produced: String,
-        #[serde(default)]
-        params: HashMap<String, String>,
+        produced: Vec<ManaColor>,
     },
     Discard {
         #[serde(default = "default_one")]
         count: u32,
-        #[serde(default = "default_target_spec_any")]
-        target: TargetSpec,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
-    /// Fallback for unrecognized effect types during parsing.
-    Other {
-        api_type: String,
+    /// Semantic marker for effects the engine has not yet implemented a handler for.
+    /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
+    Unimplemented {
+        name: String,
         #[serde(default)]
-        params: HashMap<String, String>,
+        description: Option<String>,
     },
 }
 
@@ -276,312 +408,12 @@ fn default_two_i32() -> i32 {
     2
 }
 
-fn default_target_spec_any() -> TargetSpec {
-    TargetSpec::Any
+fn default_target_filter_any() -> TargetFilter {
+    TargetFilter::Any
 }
 
-fn default_target_spec_all_empty() -> TargetSpec {
-    TargetSpec::All {
-        filter: String::new(),
-    }
-}
-
-impl Effect {
-    /// Returns the Forge api_type string for this effect.
-    /// Used as a compatibility bridge during the transition period.
-    #[cfg(feature = "forge-compat")]
-    pub fn api_type(&self) -> &str {
-        match self {
-            Effect::DealDamage { .. } => "DealDamage",
-            Effect::Draw { .. } => "Draw",
-            Effect::Pump { .. } => "Pump",
-            Effect::Destroy { .. } => "Destroy",
-            Effect::Counter { .. } => "Counter",
-            Effect::Token { .. } => "Token",
-            Effect::GainLife { .. } => "GainLife",
-            Effect::LoseLife { .. } => "LoseLife",
-            Effect::Tap { .. } => "Tap",
-            Effect::Untap { .. } => "Untap",
-            Effect::AddCounter { .. } => "AddCounter",
-            Effect::RemoveCounter { .. } => "RemoveCounter",
-            Effect::Sacrifice { .. } => "Sacrifice",
-            Effect::DiscardCard { .. } => "DiscardCard",
-            Effect::Mill { .. } => "Mill",
-            Effect::Scry { .. } => "Scry",
-            Effect::PumpAll { .. } => "PumpAll",
-            Effect::DamageAll { .. } => "DamageAll",
-            Effect::DestroyAll { .. } => "DestroyAll",
-            Effect::ChangeZone { .. } => "ChangeZone",
-            Effect::ChangeZoneAll { .. } => "ChangeZoneAll",
-            Effect::Dig { .. } => "Dig",
-            Effect::GainControl { .. } => "GainControl",
-            Effect::Attach { .. } => "Attach",
-            Effect::Surveil { .. } => "Surveil",
-            Effect::Fight { .. } => "Fight",
-            Effect::Bounce { .. } => "Bounce",
-            Effect::Explore => "Explore",
-            Effect::Proliferate => "Proliferate",
-            Effect::CopySpell { .. } => "CopySpell",
-            Effect::ChooseCard { .. } => "ChooseCard",
-            Effect::PutCounter { .. } => "PutCounter",
-            Effect::MultiplyCounter { .. } => "MultiplyCounter",
-            Effect::Animate { .. } => "Animate",
-            Effect::GenericEffect { .. } => "Effect",
-            Effect::Cleanup { .. } => "Cleanup",
-            Effect::Mana { .. } => "Mana",
-            Effect::Discard { .. } => "Discard",
-            Effect::Other { api_type, .. } => api_type,
-        }
-    }
-
-    /// Reconstructs a Forge-compatible HashMap from the typed effect fields.
-    /// Used as a compatibility bridge during the transition period.
-    pub fn to_params(&self) -> HashMap<String, String> {
-        let mut params = HashMap::new();
-        match self {
-            Effect::DealDamage { amount, target } => {
-                match amount {
-                    DamageAmount::Fixed(n) => {
-                        params.insert("NumDmg".to_string(), n.to_string());
-                    }
-                    DamageAmount::Variable(v) => {
-                        params.insert("NumDmg".to_string(), v.clone());
-                    }
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Draw { count } => {
-                params.insert("NumCards".to_string(), count.to_string());
-            }
-            Effect::Pump {
-                power,
-                toughness,
-                target,
-            } => {
-                if *power >= 0 {
-                    params.insert("NumAtt".to_string(), format!("+{power}"));
-                } else {
-                    params.insert("NumAtt".to_string(), power.to_string());
-                }
-                if *toughness >= 0 {
-                    params.insert("NumDef".to_string(), format!("+{toughness}"));
-                } else {
-                    params.insert("NumDef".to_string(), toughness.to_string());
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Destroy { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Counter { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Token {
-                name,
-                power,
-                toughness,
-                types,
-                colors,
-                keywords,
-            } => {
-                params.insert("TokenScript".to_string(), name.clone());
-                params.insert("TokenPower".to_string(), power.to_string());
-                params.insert("TokenToughness".to_string(), toughness.to_string());
-                if !types.is_empty() {
-                    params.insert("TokenTypes".to_string(), types.join(","));
-                }
-                if !colors.is_empty() {
-                    params.insert("TokenColors".to_string(), colors.join(","));
-                }
-                if !keywords.is_empty() {
-                    params.insert("TokenKeywords".to_string(), keywords.join(","));
-                }
-            }
-            Effect::GainLife { amount } => {
-                params.insert("LifeAmount".to_string(), amount.to_string());
-            }
-            Effect::LoseLife { amount } => {
-                params.insert("LifeAmount".to_string(), amount.to_string());
-            }
-            Effect::Tap { target } | Effect::Untap { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::AddCounter {
-                counter_type,
-                count,
-                target,
-            }
-            | Effect::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }
-            | Effect::PutCounter {
-                counter_type,
-                count,
-                target,
-            } => {
-                params.insert("CounterType".to_string(), counter_type.clone());
-                params.insert("CounterNum".to_string(), count.to_string());
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Sacrifice { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::DiscardCard { count, target } | Effect::Discard { count, target } => {
-                params.insert("NumCards".to_string(), count.to_string());
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Mill { count, target } => {
-                params.insert("NumCards".to_string(), count.to_string());
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Scry { count } | Effect::Surveil { count } => {
-                params.insert("ScryNum".to_string(), count.to_string());
-            }
-            Effect::PumpAll {
-                power,
-                toughness,
-                target,
-            } => {
-                if *power >= 0 {
-                    params.insert("NumAtt".to_string(), format!("+{power}"));
-                } else {
-                    params.insert("NumAtt".to_string(), power.to_string());
-                }
-                if *toughness >= 0 {
-                    params.insert("NumDef".to_string(), format!("+{toughness}"));
-                } else {
-                    params.insert("NumDef".to_string(), toughness.to_string());
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::DamageAll { amount, target } => {
-                match amount {
-                    DamageAmount::Fixed(n) => {
-                        params.insert("NumDmg".to_string(), n.to_string());
-                    }
-                    DamageAmount::Variable(v) => {
-                        params.insert("NumDmg".to_string(), v.clone());
-                    }
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::DestroyAll { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::ChangeZone {
-                origin,
-                destination,
-                target,
-            }
-            | Effect::ChangeZoneAll {
-                origin,
-                destination,
-                target,
-            } => {
-                if !origin.is_empty() {
-                    params.insert("Origin".to_string(), origin.clone());
-                }
-                params.insert("Destination".to_string(), destination.clone());
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Dig { count, destination } => {
-                params.insert("DigNum".to_string(), count.to_string());
-                if !destination.is_empty() {
-                    params.insert("DestinationZone".to_string(), destination.clone());
-                }
-            }
-            Effect::GainControl { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Attach { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Fight { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Bounce {
-                target,
-                destination,
-            } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-                if !destination.is_empty() {
-                    params.insert("Destination".to_string(), destination.clone());
-                }
-            }
-            Effect::Explore | Effect::Proliferate => {}
-            Effect::CopySpell { target } => {
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::ChooseCard { choices, target } => {
-                if !choices.is_empty() {
-                    params.insert("Choices".to_string(), choices.join(","));
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::MultiplyCounter {
-                counter_type,
-                multiplier,
-                target,
-            } => {
-                params.insert("CounterType".to_string(), counter_type.clone());
-                params.insert("Multiplier".to_string(), multiplier.to_string());
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::Animate {
-                power,
-                toughness,
-                types,
-                target,
-            } => {
-                if let Some(p) = power {
-                    params.insert("Power".to_string(), p.to_string());
-                }
-                if let Some(t) = toughness {
-                    params.insert("Toughness".to_string(), t.to_string());
-                }
-                if !types.is_empty() {
-                    params.insert("Types".to_string(), types.join(","));
-                }
-                insert_target_spec(&mut params, "ValidTgts", target);
-            }
-            Effect::GenericEffect { params: p } | Effect::Cleanup { params: p } => {
-                params.clone_from(p);
-            }
-            Effect::Mana {
-                produced,
-                params: p,
-            } => {
-                params.clone_from(p);
-                if !produced.is_empty() {
-                    params.insert("Produced".to_string(), produced.clone());
-                }
-            }
-            Effect::Other { params: p, .. } => {
-                params.clone_from(p);
-            }
-        }
-        params
-    }
-}
-
-/// Helper to insert a TargetSpec into a params map.
-fn insert_target_spec(params: &mut HashMap<String, String>, key: &str, spec: &TargetSpec) {
-    let value = match spec {
-        TargetSpec::None => return,
-        TargetSpec::Any => "Any".to_string(),
-        TargetSpec::Filtered { filter } => filter.clone(),
-        TargetSpec::Player => "Player".to_string(),
-        TargetSpec::Controller => "Player.You".to_string(),
-        TargetSpec::All { filter } => {
-            if filter.is_empty() {
-                return;
-            }
-            filter.clone()
-        }
-    };
-    params.insert(key.to_string(), value);
+fn default_target_filter_none() -> TargetFilter {
+    TargetFilter::None
 }
 
 /// Returns the human-readable variant name for an Effect.
@@ -626,7 +458,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Cleanup { .. } => "Cleanup",
         Effect::Mana { .. } => "Mana",
         Effect::Discard { .. } => "Discard",
-        Effect::Other { api_type, .. } => api_type,
+        Effect::Unimplemented { name, .. } => name,
     }
 }
 
@@ -642,10 +474,10 @@ pub enum AbilityKind {
 }
 
 // ---------------------------------------------------------------------------
-// Definition types
+// Definition types -- fully typed, zero HashMap
 // ---------------------------------------------------------------------------
 
-/// Parsed ability definition with typed effect.
+/// Parsed ability definition with typed effect. Zero remaining_params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AbilityDefinition {
     pub kind: AbilityKind,
@@ -654,88 +486,99 @@ pub struct AbilityDefinition {
     pub cost: Option<AbilityCost>,
     #[serde(default)]
     pub sub_ability: Option<Box<AbilityDefinition>>,
-    /// Parameters not consumed by the typed Effect during parsing.
-    /// Contains metadata like SubAbility, Execute, SpellDescription, Defined,
-    /// ConditionCompare, etc. Used by the compat params() method.
     #[serde(default)]
-    pub remaining_params: HashMap<String, String>,
+    pub duration: Option<Duration>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub target_prompt: Option<String>,
+    #[serde(default)]
+    pub sorcery_speed: bool,
 }
 
-impl AbilityDefinition {
-    /// Returns the Forge api_type string for this ability's effect.
-    /// Compatibility bridge -- consumers that still match on api_type strings
-    /// can use this until they are migrated to match on Effect variants.
-    #[cfg(feature = "forge-compat")]
-    pub fn api_type(&self) -> &str {
-        self.effect.api_type()
-    }
-
-    /// Reconstructs a Forge-compatible params HashMap from the typed effect,
-    /// merged with any unconsumed parameters from parsing.
-    /// Compatibility bridge -- consumers that still read params by string key
-    /// can use this until they are migrated to read Effect fields.
-    #[cfg(feature = "forge-compat")]
-    pub fn params(&self) -> HashMap<String, String> {
-        let mut params = self.remaining_params.clone();
-        // Typed effect fields take precedence over remaining params
-        params.extend(self.effect.to_params());
-        params
-    }
-}
-
-/// Trigger definition with typed mode and effect.
+/// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TriggerDefinition {
     pub mode: TriggerMode,
-    /// Remaining trigger-specific parameters (Origin, Destination, ValidCard, Execute, etc.)
-    /// that are not part of the effect itself.
     #[serde(default)]
-    pub params: HashMap<String, String>,
+    pub execute: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    pub valid_card: Option<TargetFilter>,
+    #[serde(default)]
+    pub origin: Option<Zone>,
+    #[serde(default)]
+    pub destination: Option<Zone>,
+    #[serde(default)]
+    pub trigger_zones: Vec<Zone>,
+    #[serde(default)]
+    pub phase: Option<Phase>,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub combat_damage: bool,
+    #[serde(default)]
+    pub secondary: bool,
+    #[serde(default)]
+    pub valid_target: Option<TargetFilter>,
+    #[serde(default)]
+    pub valid_source: Option<TargetFilter>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-impl TriggerDefinition {
-    /// Returns the Forge mode string for this trigger.
-    /// Compatibility bridge for consumers that still compare mode as a string.
-    #[cfg(feature = "forge-compat")]
-    pub fn mode_str(&self) -> String {
-        self.mode.to_string()
-    }
-}
-
-/// Static ability definition with typed mode.
+/// Static ability definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StaticDefinition {
     pub mode: StaticMode,
-    /// Parameters for the static ability (Affected, AddPower, AddToughness, etc.)
     #[serde(default)]
-    pub params: HashMap<String, String>,
+    pub affected: Option<TargetFilter>,
+    #[serde(default)]
+    pub modifications: Vec<ContinuousModification>,
+    #[serde(default)]
+    pub condition: Option<StaticCondition>,
+    #[serde(default)]
+    pub affected_zone: Option<Zone>,
+    #[serde(default)]
+    pub effect_zone: Option<Zone>,
+    #[serde(default)]
+    pub characteristic_defining: bool,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-impl StaticDefinition {
-    /// Returns the Forge mode string for this static ability.
-    /// Compatibility bridge for consumers that still compare mode as a string.
-    #[cfg(feature = "forge-compat")]
-    pub fn mode_str(&self) -> String {
-        self.mode.to_string()
-    }
-}
-
-/// Replacement effect definition with typed event.
+/// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
-    /// Parameters for the replacement effect (conditions, modifications, etc.)
     #[serde(default)]
-    pub params: HashMap<String, String>,
+    pub execute: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    pub valid_card: Option<TargetFilter>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-impl ReplacementDefinition {
-    /// Returns the Forge event string for this replacement.
-    /// Compatibility bridge for consumers that still compare event as a string.
-    #[cfg(feature = "forge-compat")]
-    pub fn event_str(&self) -> String {
-        self.event.to_string()
-    }
+// ---------------------------------------------------------------------------
+// ContinuousModification -- typed effect modifications for layers
+// ---------------------------------------------------------------------------
+
+/// What modification a continuous effect applies to an object.
+/// Each variant knows its own layer implicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ContinuousModification {
+    AddPower { value: i32 },
+    AddToughness { value: i32 },
+    SetPower { value: i32 },
+    SetToughness { value: i32 },
+    AddKeyword { keyword: Keyword },
+    RemoveKeyword { keyword: Keyword },
+    AddAbility { ability: String },
+    RemoveAllAbilities,
+    AddType { core_type: CoreType },
+    RemoveType { core_type: CoreType },
+    SetColor { colors: Vec<ManaColor> },
+    AddColor { color: ManaColor },
 }
 
 // ---------------------------------------------------------------------------
@@ -750,70 +593,34 @@ pub enum TargetRef {
 }
 
 // ---------------------------------------------------------------------------
-// Resolved ability (UNCHANGED -- transitional, Plan 02 converts this)
+// Resolved ability -- simplified, zero HashMap
 // ---------------------------------------------------------------------------
 
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
     pub effect: Effect,
-    pub params: HashMap<String, String>,
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    #[serde(default)]
     pub sub_ability: Option<Box<ResolvedAbility>>,
-    pub svars: HashMap<String, String>,
 }
 
 impl ResolvedAbility {
-    /// Derive the api_type string from the typed Effect.
-    #[cfg(feature = "forge-compat")]
-    pub fn api_type(&self) -> &str {
-        self.effect.api_type()
-    }
-
-    /// Build from a typed Effect. Populates params automatically
-    /// from the Effect's compat bridge methods.
+    /// Build from a typed Effect. Simply stores the fields.
     pub fn new(
         effect: Effect,
         targets: Vec<TargetRef>,
         source_id: ObjectId,
         controller: PlayerId,
     ) -> Self {
-        let params = effect.to_params();
         Self {
             effect,
-            params,
             targets,
             source_id,
             controller,
             sub_ability: None,
-            svars: HashMap::new(),
-        }
-    }
-
-    /// Build from raw string api_type + params (backward compat for tests and
-    /// SubAbility chain parsing). Wraps in Effect::Other if no better match.
-    pub fn from_raw(
-        api_type: impl Into<String>,
-        params: HashMap<String, String>,
-        targets: Vec<TargetRef>,
-        source_id: ObjectId,
-        controller: PlayerId,
-    ) -> Self {
-        let api_type = api_type.into();
-        let effect = Effect::Other {
-            api_type,
-            params: params.clone(),
-        };
-        Self {
-            effect,
-            params,
-            targets,
-            source_id,
-            controller,
-            sub_ability: None,
-            svars: HashMap::new(),
         }
     }
 }
@@ -871,16 +678,14 @@ mod tests {
     #[test]
     fn resolved_ability_serializes_and_roundtrips() {
         let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DealDamage".to_string(),
-                params: std::collections::HashMap::new(),
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Object(ObjectId(10))],
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: None,
-            svars: HashMap::new(),
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -890,28 +695,21 @@ mod tests {
     #[test]
     fn resolved_ability_with_sub_ability_roundtrips() {
         let sub = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Draw".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
+            effect: Effect::Draw { count: 1 },
             targets: vec![],
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: None,
-            svars: HashMap::new(),
         };
         let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DealDamage".to_string(),
-                params: std::collections::HashMap::new(),
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(1))],
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: Some(Box::new(sub)),
-            svars: HashMap::new(),
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -943,405 +741,376 @@ mod tests {
         );
     }
 
-    // --- New typed enum tests ---
+    // --- Serde roundtrip tests for new typed definitions ---
 
     #[test]
-    #[cfg(feature = "forge-compat")]
-    fn effect_api_type_returns_correct_string() {
-        assert_eq!(
-            Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
-                target: TargetSpec::Any,
-            }
-            .api_type(),
-            "DealDamage"
-        );
-        assert_eq!(Effect::Draw { count: 1 }.api_type(), "Draw");
-        assert_eq!(Effect::Explore.api_type(), "Explore");
-        assert_eq!(Effect::Proliferate.api_type(), "Proliferate");
-        assert_eq!(
-            Effect::Other {
-                api_type: "Custom".to_string(),
-                params: HashMap::new(),
-            }
-            .api_type(),
-            "Custom"
-        );
+    fn trigger_definition_roundtrip() {
+        let trigger = TriggerDefinition {
+            mode: TriggerMode::ChangesZone,
+            execute: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::Draw { count: 1 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            })),
+            valid_card: Some(TargetFilter::SelfRef),
+            origin: Some(Zone::Battlefield),
+            destination: Some(Zone::Graveyard),
+            trigger_zones: vec![Zone::Battlefield],
+            phase: None,
+            optional: false,
+            combat_damage: false,
+            secondary: false,
+            valid_target: None,
+            valid_source: None,
+            description: Some("When ~ dies, draw a card.".to_string()),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, deserialized);
     }
 
     #[test]
-    fn effect_has_39_variants() {
-        // 38 from the registry + Other = 39 total
-        // Verify by checking api_type returns distinct strings for each variant
-        let variants: Vec<Effect> = vec![
-            Effect::DealDamage {
-                amount: DamageAmount::Fixed(1),
-                target: TargetSpec::Any,
+    fn static_definition_roundtrip() {
+        let static_def = StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            modifications: vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: Some("Other creatures you control get +1/+1.".to_string()),
+        };
+        let json = serde_json::to_string(&static_def).unwrap();
+        let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(static_def, deserialized);
+    }
+
+    #[test]
+    fn replacement_definition_roundtrip() {
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::DamageDone,
+            execute: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::GainLife { amount: 1 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            })),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some("If damage would be dealt to ~, prevent it and gain 1 life.".to_string()),
+        };
+        let json = serde_json::to_string(&replacement).unwrap();
+        let deserialized: ReplacementDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(replacement, deserialized);
+    }
+
+    #[test]
+    fn target_filter_nested_roundtrip() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        let deserialized: TargetFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(filter, deserialized);
+    }
+
+    #[test]
+    fn ability_definition_with_sub_ability_chain_roundtrip() {
+        let ability = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
             },
-            Effect::Draw { count: 1 },
-            Effect::Pump {
-                power: 1,
-                toughness: 1,
-                target: TargetSpec::Any,
-            },
-            Effect::Destroy {
-                target: TargetSpec::Any,
-            },
-            Effect::Counter {
-                target: TargetSpec::Any,
-            },
-            Effect::Token {
-                name: "T".to_string(),
-                power: 1,
-                toughness: 1,
-                types: vec![],
-                colors: vec![],
-                keywords: vec![],
-            },
-            Effect::GainLife { amount: 1 },
-            Effect::LoseLife { amount: 1 },
-            Effect::Tap {
-                target: TargetSpec::Any,
-            },
-            Effect::Untap {
-                target: TargetSpec::Any,
-            },
-            Effect::AddCounter {
-                counter_type: "p1p1".to_string(),
-                count: 1,
-                target: TargetSpec::Any,
-            },
-            Effect::RemoveCounter {
-                counter_type: "p1p1".to_string(),
-                count: 1,
-                target: TargetSpec::Any,
-            },
-            Effect::Sacrifice {
-                target: TargetSpec::Any,
-            },
-            Effect::DiscardCard {
-                count: 1,
-                target: TargetSpec::Any,
-            },
-            Effect::Mill {
-                count: 1,
-                target: TargetSpec::Any,
-            },
-            Effect::Scry { count: 1 },
-            Effect::PumpAll {
-                power: 1,
-                toughness: 1,
-                target: TargetSpec::All {
-                    filter: String::new(),
+            cost: Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            }),
+            sub_ability: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::Draw { count: 1 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            })),
+            duration: Some(Duration::UntilEndOfTurn),
+            description: Some("Deal 3 damage, then draw a card.".to_string()),
+            target_prompt: Some("Choose a target".to_string()),
+            sorcery_speed: true,
+        };
+        let json = serde_json::to_string(&ability).unwrap();
+        let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn ability_cost_expanded_variants_roundtrip() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3,
                 },
             },
-            Effect::DamageAll {
-                amount: DamageAmount::Fixed(1),
-                target: TargetSpec::All {
-                    filter: String::new(),
-                },
-            },
-            Effect::DestroyAll {
-                target: TargetSpec::All {
-                    filter: String::new(),
-                },
-            },
-            Effect::ChangeZone {
-                origin: "Library".to_string(),
-                destination: "Battlefield".to_string(),
-                target: TargetSpec::Any,
-            },
-            Effect::ChangeZoneAll {
-                origin: "Battlefield".to_string(),
-                destination: "Graveyard".to_string(),
-                target: TargetSpec::All {
-                    filter: String::new(),
-                },
-            },
-            Effect::Dig {
-                count: 3,
-                destination: String::new(),
-            },
-            Effect::GainControl {
-                target: TargetSpec::Any,
-            },
-            Effect::Attach {
-                target: TargetSpec::Any,
-            },
-            Effect::Surveil { count: 1 },
-            Effect::Fight {
-                target: TargetSpec::Any,
-            },
-            Effect::Bounce {
-                target: TargetSpec::Any,
-                destination: String::new(),
-            },
-            Effect::Explore,
-            Effect::Proliferate,
-            Effect::CopySpell {
-                target: TargetSpec::Any,
-            },
-            Effect::ChooseCard {
-                choices: vec![],
-                target: TargetSpec::Any,
-            },
-            Effect::PutCounter {
-                counter_type: "p1p1".to_string(),
+            AbilityCost::Tap,
+            AbilityCost::Loyalty { amount: -2 },
+            AbilityCost::PayLife { amount: 2 },
+            AbilityCost::Discard {
                 count: 1,
-                target: TargetSpec::Any,
+                filter: None,
             },
-            Effect::MultiplyCounter {
-                counter_type: "p1p1".to_string(),
-                multiplier: 2,
-                target: TargetSpec::Any,
-            },
-            Effect::Animate {
-                power: Some(5),
-                toughness: Some(5),
-                types: vec![],
-                target: TargetSpec::Any,
-            },
-            Effect::GenericEffect {
-                params: HashMap::new(),
-            },
-            Effect::Cleanup {
-                params: HashMap::new(),
-            },
-            Effect::Mana {
-                produced: "R".to_string(),
-                params: HashMap::new(),
-            },
-            Effect::Discard {
+            AbilityCost::Exile {
                 count: 1,
-                target: TargetSpec::Any,
+                filter: Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                }),
             },
-            Effect::Other {
-                api_type: "Custom".to_string(),
-                params: HashMap::new(),
+            AbilityCost::TapCreatures {
+                count: 2,
+                filter: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                },
+            },
+            AbilityCost::Sacrifice {
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Artifact),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                },
             },
         ];
-        assert_eq!(
-            variants.len(),
-            39,
-            "Expected 39 Effect variants (38 + Other)"
-        );
+        let json = serde_json::to_string(&costs).unwrap();
+        let deserialized: Vec<AbilityCost> = serde_json::from_str(&json).unwrap();
+        assert_eq!(costs, deserialized);
     }
 
     #[test]
-    fn effect_serde_roundtrip_internally_tagged() {
-        let effect = Effect::DealDamage {
-            amount: DamageAmount::Fixed(3),
-            target: TargetSpec::Filtered {
-                filter: "Creature".to_string(),
+    fn continuous_modification_roundtrip() {
+        let mods = vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+            ContinuousModification::SetPower { value: 0 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
             },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Defender,
+            },
+            ContinuousModification::AddAbility {
+                ability: "Hexproof".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::RemoveType {
+                core_type: CoreType::Creature,
+            },
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Blue],
+            },
+            ContinuousModification::AddColor {
+                color: ManaColor::Red,
+            },
+        ];
+        let json = serde_json::to_string(&mods).unwrap();
+        let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();
+        assert_eq!(mods, deserialized);
+    }
+
+    #[test]
+    fn effect_unimplemented_variant_roundtrip() {
+        let effect = Effect::Unimplemented {
+            name: "Venture".to_string(),
+            description: Some("Venture into the dungeon".to_string()),
         };
         let json = serde_json::to_string(&effect).unwrap();
-        // Should be internally tagged with "type" key
-        assert!(json.contains("\"type\":\"DealDamage\""));
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
     }
 
     #[test]
-    fn ability_definition_serde_roundtrip() {
-        let def = AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
-                target: TargetSpec::Any,
+    fn effect_cleanup_typed_fields_roundtrip() {
+        let effect = Effect::Cleanup {
+            clear_remembered: true,
+            clear_chosen_player: false,
+            clear_chosen_color: true,
+            clear_chosen_type: false,
+            clear_chosen_card: false,
+            clear_imprinted: true,
+            clear_triggers: false,
+            clear_coin_flips: false,
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn effect_mana_typed_roundtrip() {
+        let effect = Effect::Mana {
+            produced: vec![ManaColor::Green, ManaColor::Green],
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn effect_generic_effect_typed_roundtrip() {
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![ContinuousModification::AddPower { value: 3 }],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            }],
+            duration: Some(Duration::UntilEndOfTurn),
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn static_condition_roundtrip() {
+        let conditions = vec![
+            StaticCondition::DevotionGE {
+                colors: vec![ManaColor::White, ManaColor::Blue],
+                threshold: 7,
             },
-            cost: None,
-            sub_ability: None,
-            remaining_params: HashMap::new(),
-        };
-        let json = serde_json::to_string(&def).unwrap();
-        let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(def, deserialized);
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn ability_definition_compat_api_type() {
-        let def = AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
-                target: TargetSpec::Any,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
             },
-            cost: None,
-            sub_ability: None,
-            remaining_params: HashMap::new(),
-        };
-        assert_eq!(def.api_type(), "DealDamage");
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn ability_definition_compat_params() {
-        let def = AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
-                target: TargetSpec::Any,
+            StaticCondition::CheckSVar {
+                var: "X".to_string(),
+                compare: "GE5".to_string(),
             },
-            cost: None,
-            sub_ability: None,
-            remaining_params: HashMap::new(),
-        };
-        let params = def.params();
-        assert_eq!(params.get("NumDmg").unwrap(), "3");
-        assert_eq!(params.get("ValidTgts").unwrap(), "Any");
+            StaticCondition::None,
+        ];
+        let json = serde_json::to_string(&conditions).unwrap();
+        let deserialized: Vec<StaticCondition> = serde_json::from_str(&json).unwrap();
+        assert_eq!(conditions, deserialized);
     }
 
     #[test]
-    fn trigger_definition_serde_roundtrip() {
-        let def = TriggerDefinition {
-            mode: TriggerMode::ChangesZone,
-            params: HashMap::from([
-                ("Origin".to_string(), "Any".to_string()),
-                ("Destination".to_string(), "Battlefield".to_string()),
-            ]),
-        };
-        let json = serde_json::to_string(&def).unwrap();
-        let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(def, deserialized);
+    fn duration_roundtrip() {
+        let durations = vec![
+            Duration::UntilEndOfTurn,
+            Duration::UntilYourNextTurn,
+            Duration::UntilHostLeavesPlay,
+            Duration::Permanent,
+        ];
+        let json = serde_json::to_string(&durations).unwrap();
+        let deserialized: Vec<Duration> = serde_json::from_str(&json).unwrap();
+        assert_eq!(durations, deserialized);
     }
 
     #[test]
-    fn static_definition_serde_roundtrip() {
-        let def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            params: HashMap::from([
-                ("Affected".to_string(), "Creature.YouCtrl".to_string()),
-                ("AddPower".to_string(), "1".to_string()),
-            ]),
-        };
-        let json = serde_json::to_string(&def).unwrap();
-        let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(def, deserialized);
+    fn pt_value_roundtrip() {
+        let values = vec![
+            PtValue::Fixed(4),
+            PtValue::Variable("*".to_string()),
+            PtValue::Variable("X".to_string()),
+        ];
+        let json = serde_json::to_string(&values).unwrap();
+        let deserialized: Vec<PtValue> = serde_json::from_str(&json).unwrap();
+        assert_eq!(values, deserialized);
     }
 
     #[test]
-    fn replacement_definition_serde_roundtrip() {
-        let def = ReplacementDefinition {
-            event: ReplacementEvent::DamageDone,
-            params: HashMap::from([("ActiveZones".to_string(), "Battlefield".to_string())]),
-        };
-        let json = serde_json::to_string(&def).unwrap();
-        let deserialized: ReplacementDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(def, deserialized);
-    }
-
-    #[test]
-    fn damage_amount_variants() {
-        let fixed = DamageAmount::Fixed(5);
-        let variable = DamageAmount::Variable("X".to_string());
-        assert_ne!(fixed, variable);
-
-        let json = serde_json::to_string(&fixed).unwrap();
-        let deserialized: DamageAmount = serde_json::from_str(&json).unwrap();
-        assert_eq!(fixed, deserialized);
-    }
-
-    #[test]
-    fn target_spec_variants() {
-        let specs = vec![
-            TargetSpec::None,
-            TargetSpec::Any,
-            TargetSpec::Filtered {
-                filter: "Creature".to_string(),
+    fn filter_prop_roundtrip() {
+        let props = vec![
+            FilterProp::Token,
+            FilterProp::Attacking,
+            FilterProp::Tapped,
+            FilterProp::NonType {
+                value: "Land".to_string(),
             },
-            TargetSpec::Player,
-            TargetSpec::Controller,
-            TargetSpec::All {
-                filter: "Creature".to_string(),
+            FilterProp::WithKeyword {
+                value: "Flying".to_string(),
+            },
+            FilterProp::CountersGE {
+                counter_type: "+1/+1".to_string(),
+                count: 3,
+            },
+            FilterProp::CmcGE { value: 4 },
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            },
+            FilterProp::EnchantedBy,
+            FilterProp::EquippedBy,
+            FilterProp::Other {
+                value: "custom".to_string(),
             },
         ];
-        for spec in specs {
-            let json = serde_json::to_string(&spec).unwrap();
-            let deserialized: TargetSpec = serde_json::from_str(&json).unwrap();
-            assert_eq!(spec, deserialized);
-        }
+        let json = serde_json::to_string(&props).unwrap();
+        let deserialized: Vec<FilterProp> = serde_json::from_str(&json).unwrap();
+        assert_eq!(props, deserialized);
     }
 
     #[test]
-    fn ability_cost_variants() {
-        let costs = vec![
-            AbilityCost::Mana {
-                cost: "2R".to_string(),
-            },
-            AbilityCost::Tap,
-            AbilityCost::Loyalty { amount: -3 },
-            AbilityCost::Sacrifice {
-                target: TargetSpec::Filtered {
-                    filter: "Creature".to_string(),
-                },
-            },
-            AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Tap,
-                    AbilityCost::Mana {
-                        cost: "1".to_string(),
-                    },
-                ],
-            },
-        ];
-        for cost in costs {
-            let json = serde_json::to_string(&cost).unwrap();
-            let deserialized: AbilityCost = serde_json::from_str(&json).unwrap();
-            assert_eq!(cost, deserialized);
-        }
-    }
-
-    #[test]
-    fn effect_to_params_draw() {
-        let effect = Effect::Draw { count: 2 };
-        let params = effect.to_params();
-        assert_eq!(params.get("NumCards").unwrap(), "2");
-    }
-
-    #[test]
-    fn effect_to_params_change_zone() {
-        let effect = Effect::ChangeZone {
-            origin: "Battlefield".to_string(),
-            destination: "Graveyard".to_string(),
-            target: TargetSpec::Filtered {
-                filter: "Creature".to_string(),
-            },
-        };
-        let params = effect.to_params();
-        assert_eq!(params.get("Origin").unwrap(), "Battlefield");
-        assert_eq!(params.get("Destination").unwrap(), "Graveyard");
-        assert_eq!(params.get("ValidTgts").unwrap(), "Creature");
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn static_definition_mode_str_compat() {
-        let def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            params: HashMap::new(),
-        };
-        assert_eq!(def.mode_str(), "Continuous");
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn trigger_definition_mode_str_compat() {
-        let def = TriggerDefinition {
-            mode: TriggerMode::ChangesZone,
-            params: HashMap::new(),
-        };
-        assert_eq!(def.mode_str(), "ChangesZone");
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn replacement_definition_event_str_compat() {
-        let def = ReplacementDefinition {
-            event: ReplacementEvent::DamageDone,
-            params: HashMap::new(),
-        };
-        assert_eq!(def.event_str(), "DamageDone");
+    fn resolved_ability_no_hashmap_fields() {
+        // Verify ResolvedAbility can be created and round-tripped without any HashMap fields
+        let ability = ResolvedAbility::new(
+            Effect::Draw { count: 2 },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let json = serde_json::to_string(&ability).unwrap();
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
+        assert_eq!(ability, deserialized);
     }
 }
