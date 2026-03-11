@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: Between phases
-stopped_at: Phase 28 context revised
-last_updated: "2026-03-11T05:10:39.345Z"
-last_activity: 2026-03-10 — Completed Phase 26 (Multiplayer Polish) — 26/26 verification passed
+status: Executing Phase 28
+stopped_at: Completed 28-01-PLAN.md
+last_updated: "2026-03-11T05:57:00Z"
+last_activity: 2026-03-11 — Phase 28 Plan 01 complete (type definitions)
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 21
-  completed_plans: 21
-  percent: 88
+  total_plans: 27
+  completed_plans: 22
+  percent: 81
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 27 Aura Casting & Triggered Targeting — Pending planning
+**Current focus:** Phase 28 Native Ability Data Model — Executing (Plan 01 complete, Plans 02-06 remaining)
 
 ## Current Position
 
-Phase: 26 complete — Phase 27 next (pending), Phase 28 planned (3 plans, 0 executed)
-Status: Between phases
-Last activity: 2026-03-10 — Completed Phase 26 (Multiplayer Polish) — 26/26 verification passed
+Phase: 28 executing — Plan 01 complete, Plan 02 next
+Status: Executing Phase 28
+Last activity: 2026-03-11 — Phase 28 Plan 01 complete (type definitions)
 
-Progress: [█████████████████░░░] 21/24 plans (88%)
+Progress: [████████████████░░░░] 22/27 plans (81%)
 
 ## Performance Metrics
 
@@ -48,11 +48,13 @@ Progress: [█████████████████░░░] 21/24 p
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
 | 26 | 6/6 | 36min | 6min |
+| 28 | 1/6 | 10min | 10min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
 | Phase 26 P05 | 8min | 2 tasks | 15 files |
 | Phase 26 P06 | 8min | 3 tasks | 6 files |
+| Phase 28 P01 | 10min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -135,6 +137,11 @@ Recent decisions affecting current work:
 - [26-06]: Emote auto-fade uses 3s timeout with unique numeric IDs for overlap handling
 - [26-06]: Game duration tracked from gameStartedAt timestamp set on GameStarted event
 - [26-06]: Back to Lobby navigates to /?view=lobby for lobby return after game over
+- [28-01]: Effect::Unimplemented replaces Effect::Other -- zero HashMap, semantic marker for 2,533 unimplemented abilities
+- [28-01]: ContinuousModification defined in ability.rs with layer() impl in layers.rs -- single enum for all continuous effect modifications
+- [28-01]: TargetFilter uses nested And/Or/Not combinators with struct wrapper fields for serde compatibility
+- [28-01]: Keywords parse cost strings through parse_keyword_mana_cost() -- supports MTGJSON brace format and simple format
+- [28-01]: JsonSchema added to Zone, Phase, ManaColor, ManaCost, ManaCostShard, CoreType, Keyword for schema generation
 
 ### Roadmap Evolution
 
@@ -151,6 +158,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T05:10:39.342Z
-Stopped at: Phase 28 context revised
-Resume file: .planning/phases/28-native-ability-data-model/28-CONTEXT.md
+Last session: 2026-03-11T05:57:00Z
+Stopped at: Completed 28-01-PLAN.md
+Resume file: .planning/phases/28-native-ability-data-model/28-02-PLAN.md
