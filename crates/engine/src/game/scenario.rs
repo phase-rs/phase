@@ -55,6 +55,17 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with N players using the default format config (20 life each).
+    pub fn new_n_player(count: u8, seed: u64) -> Self {
+        GameScenario {
+            state: GameState::new(
+                crate::types::format::FormatConfig::standard(),
+                count,
+                seed,
+            ),
+        }
+    }
+
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,
     /// and `turn_number` consistently to avoid common test pitfalls.
     pub fn at_phase(&mut self, phase: Phase) -> &mut Self {
@@ -1022,5 +1033,18 @@ mod tests {
 
         // Entered this turn (turn 2), so has summoning sickness
         assert_eq!(obj.entered_battlefield_turn, Some(2));
+    }
+
+    #[test]
+    fn new_n_player_creates_correct_player_count() {
+        let scenario = GameScenario::new_n_player(4, 99);
+        let runner = scenario.build();
+        let state = runner.state();
+        assert_eq!(state.players.len(), 4);
+        assert_eq!(state.seat_order.len(), 4);
+        for i in 0..4 {
+            assert_eq!(state.players[i].id, PlayerId(i as u8));
+            assert_eq!(state.players[i].life, 20);
+        }
     }
 }
