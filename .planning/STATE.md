@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: Executing Phase 28
-stopped_at: Completed 28-01-PLAN.md
-last_updated: "2026-03-11T05:57:00Z"
-last_activity: 2026-03-11 — Phase 28 Plan 01 complete (type definitions)
+status: executing
+stopped_at: Completed 28-02-PLAN.md
+last_updated: "2026-03-11T06:15:32.562Z"
+last_activity: 2026-03-11 — Phase 28 Plan 02 complete (continuous effects subsystem)
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 27
-  completed_plans: 22
-  percent: 81
+  completed_plans: 23
+  percent: 85
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 28 Native Ability Data Model — Executing (Plan 01 complete, Plans 02-06 remaining)
+**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-02 complete, Plans 03-06 remaining)
 
 ## Current Position
 
-Phase: 28 executing — Plan 01 complete, Plan 02 next
+Phase: 28 executing — Plans 01-02 complete, Plan 03 next
 Status: Executing Phase 28
-Last activity: 2026-03-11 — Phase 28 Plan 01 complete (type definitions)
+Last activity: 2026-03-11 — Phase 28 Plan 02 complete (continuous effects subsystem)
 
-Progress: [████████████████░░░░] 22/27 plans (81%)
+Progress: [█████████████████░░░] 23/27 plans (85%)
 
 ## Performance Metrics
 
@@ -48,13 +48,14 @@ Progress: [████████████████░░░░] 22/27 p
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
 | 26 | 6/6 | 36min | 6min |
-| 28 | 1/6 | 10min | 10min |
+| 28 | 2/6 | 23min | 12min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
 | Phase 26 P05 | 8min | 2 tasks | 15 files |
 | Phase 26 P06 | 8min | 3 tasks | 6 files |
 | Phase 28 P01 | 10min | 2 tasks | 10 files |
+| Phase 28 P02 | 13min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -142,6 +143,9 @@ Recent decisions affecting current work:
 - [28-01]: TargetFilter uses nested And/Or/Not combinators with struct wrapper fields for serde compatibility
 - [28-01]: Keywords parse cost strings through parse_keyword_mana_cost() -- supports MTGJSON brace format and simple format
 - [28-01]: JsonSchema added to Zone, Phase, ManaColor, ManaCost, ManaCostShard, CoreType, Keyword for schema generation
+- [28-02]: Handler function signatures in static_abilities.rs still accept HashMap -- handler rewrite deferred to Plans 03-06
+- [28-02]: CmcGE computed inline from ManaCost fields since ManaCost lacks a cmc() method
+- [28-02]: player_matches_filter kept as string-based -- minimal usage, not worth full typed enum
 
 ### Roadmap Evolution
 
@@ -158,6 +162,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T05:57:00Z
-Stopped at: Completed 28-01-PLAN.md
-Resume file: .planning/phases/28-native-ability-data-model/28-02-PLAN.md
+Last session: 2026-03-11T06:14:30Z
+Stopped at: Completed 28-02-PLAN.md
+Resume file: .planning/phases/28-native-ability-data-model/28-03-PLAN.md
