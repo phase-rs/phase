@@ -3205,3 +3205,105 @@ mod exile_return_tests {
         assert_eq!(state.exile_links[0].exiled_id, other_exiled);
     }
 }
+
+#[cfg(test)]
+mod phase_trigger_regression_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TriggerDefinition};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+
+    /// Regression: phase triggers fired for auto-advanced phases.
+    ///
+    /// A creature with "At the beginning of combat..." had its trigger fire
+    /// even when combat was skipped (no attackers), because auto_advance()
+    /// emitted PhaseChanged { BeginCombat } and process_triggers() processed
+    /// ALL accumulated events. The fix filters PhaseChanged events to only
+    /// include the current phase.
+    #[test]
+    fn phase_trigger_does_not_fire_for_skipped_combat() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Create a creature with a "beginning of combat" phase trigger.
+        // The creature is small (0/1) so it has no potential attackers.
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Trigger Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.toughness = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::Phase,
+                phase: Some(Phase::BeginCombat),
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Activated,
+                    effect: Effect::GainLife { amount: 1 },
+                    cost: None,
+                    sub_ability: None,
+                    target_prompt: None,
+                    description: None,
+                    duration: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: None,
+                origin: None,
+                destination: None,
+                trigger_zones: vec![Zone::Battlefield],
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        // Pass priority twice (P0 passes, then P1 passes) with empty stack.
+        // This advances from PreCombatMain → BeginCombat → auto-skip combat
+        // → PostCombatMain. The PhaseChanged { BeginCombat } event should be
+        // filtered out, so the phase trigger should NOT fire.
+        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            result1.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+
+        let result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // We should now be at PostCombatMain with empty stack.
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert!(
+            state.stack.is_empty(),
+            "Stack should be empty — phase trigger for skipped BeginCombat should not fire. Stack: {:?}",
+            state.stack
+        );
+        // No pending trigger either
+        assert!(
+            state.pending_trigger.is_none(),
+            "No pending trigger should exist for a skipped phase"
+        );
+        assert!(matches!(
+            result2.waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
