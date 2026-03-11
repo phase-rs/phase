@@ -411,6 +411,43 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
+        (
+            WaitingFor::TriggerTargetSelection {
+                player,
+                legal_targets,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            // Validate targets are legal
+            for t in &targets {
+                if !legal_targets.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "Illegal target selected".to_string(),
+                    ));
+                }
+            }
+            // Take the pending trigger, set targets, push to stack
+            let trigger = state
+                .pending_trigger
+                .take()
+                .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+            let mut ability = trigger.ability;
+            ability.targets = targets;
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let entry = crate::types::game_state::StackEntry {
+                id: entry_id,
+                source_id: trigger.source_id,
+                controller: trigger.controller,
+                kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                    source_id: trigger.source_id,
+                    ability,
+                },
+            };
+            super::stack::push_to_stack(state, entry, &mut events);
+            state.priority_pass_count = 0;
+            WaitingFor::Priority { player: *player }
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -434,6 +471,31 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
         // Process triggers after action + SBA events
         let stack_before = state.stack.len();
         triggers::process_triggers(state, &events);
+
+        // Check if a trigger needs target selection from the player
+        if state.pending_trigger.is_some() {
+            let trigger = state.pending_trigger.as_ref().unwrap();
+            let target_filter =
+                triggers::extract_target_filter_from_effect(&trigger.ability.effect);
+            if let Some(filter) = target_filter {
+                let legal = super::targeting::find_legal_targets_typed(
+                    state,
+                    filter,
+                    trigger.controller,
+                    trigger.source_id,
+                );
+                let player = trigger.controller;
+                let wf = WaitingFor::TriggerTargetSelection {
+                    player,
+                    legal_targets: legal,
+                };
+                state.waiting_for = wf.clone();
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: wf,
+                });
+            }
+        }
 
         // If triggers were placed on stack, grant priority to active player
         if state.stack.len() > stack_before {
@@ -2694,5 +2756,209 @@ mod tests {
                 Some(creature)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod trigger_target_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, TargetFilter, TargetRef,
+        TriggerDefinition, TypeFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::{CardId, ObjectId};
+
+    #[test]
+    fn trigger_target_selection_select_targets_pushes_to_stack() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Create two opponent creatures as legal targets
+        let target1 = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Opp Creature 1".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&target1).unwrap().controller = PlayerId(1);
+
+        let target2 = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Opp Creature 2".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&target2).unwrap().controller = PlayerId(1);
+
+        // Create trigger creature (Banishing Light)
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // Manually set up the pending trigger state (as process_triggers would)
+        let ability = crate::types::ability::ResolvedAbility {
+            effect: Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![],
+                },
+            },
+            targets: Vec::new(),
+            source_id: trigger_creature,
+            controller: PlayerId(0),
+            sub_ability: None,
+            duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        };
+
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: trigger_creature,
+            controller: PlayerId(0),
+            trigger_def: TriggerDefinition {
+                mode: crate::types::triggers::TriggerMode::ChangesZone,
+                execute: None,
+                valid_card: None,
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            },
+            ability,
+            timestamp: 1,
+        });
+
+        let legal_targets = vec![
+            TargetRef::Object(target1),
+            TargetRef::Object(target2),
+        ];
+
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            legal_targets: legal_targets.clone(),
+        };
+
+        // Player selects target1
+        let result = apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target1)],
+            },
+        )
+        .unwrap();
+
+        // Should return Priority
+        assert!(
+            matches!(result.waiting_for, WaitingFor::Priority { .. }),
+            "Expected Priority, got {:?}",
+            result.waiting_for
+        );
+
+        // Trigger should be on the stack with the selected target
+        assert_eq!(state.stack.len(), 1, "Trigger should be on stack");
+        let entry = &state.stack[0];
+        assert_eq!(entry.source_id, trigger_creature);
+        match &entry.kind {
+            crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
+                assert_eq!(ability.targets, vec![TargetRef::Object(target1)]);
+            }
+            _ => panic!("Expected TriggeredAbility on stack"),
+        }
+
+        // Pending trigger should be consumed
+        assert!(state.pending_trigger.is_none());
+    }
+
+    #[test]
+    fn trigger_target_selection_rejects_illegal_target() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+
+        let legal_target = ObjectId(10);
+        let illegal_target = ObjectId(99);
+
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            trigger_def: TriggerDefinition {
+                mode: crate::types::triggers::TriggerMode::ChangesZone,
+                execute: None,
+                valid_card: None,
+                origin: None,
+                destination: None,
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            },
+            ability: crate::types::ability::ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+        });
+
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            legal_targets: vec![TargetRef::Object(legal_target)],
+        };
+
+        // Try to select an illegal target
+        let result = apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(illegal_target)],
+            },
+        );
+
+        assert!(result.is_err(), "Should reject illegal target");
     }
 }

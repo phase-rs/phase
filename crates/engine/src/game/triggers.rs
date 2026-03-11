@@ -13,6 +13,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::stack;
+use super::targeting;
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
@@ -151,19 +152,54 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
 
     let mut events_out = Vec::new();
     for trigger in pending {
-        let entry_id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
-
-        let entry = StackEntry {
-            id: entry_id,
-            source_id: trigger.source_id,
-            controller: trigger.controller,
-            kind: StackEntryKind::TriggeredAbility {
+        // Check if this trigger's ability has targeting requirements
+        if let Some(target_filter) = extract_target_filter_from_effect(&trigger.ability.effect) {
+            let legal = targeting::find_legal_targets_typed(
+                state,
+                target_filter,
+                trigger.controller,
+                trigger.source_id,
+            );
+            if legal.is_empty() {
+                // No legal targets -- skip this trigger entirely
+                continue;
+            }
+            if legal.len() == 1 {
+                // Auto-target: set the target and push to stack
+                let mut ability = trigger.ability;
+                ability.targets = legal;
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let entry = StackEntry {
+                    id: entry_id,
+                    source_id: trigger.source_id,
+                    controller: trigger.controller,
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: trigger.source_id,
+                        ability,
+                    },
+                };
+                stack::push_to_stack(state, entry, &mut events_out);
+            } else {
+                // Multiple targets -- store as pending, return to engine for player choice
+                state.pending_trigger = Some(trigger);
+                return;
+            }
+        } else {
+            // No targeting needed -- push to stack as normal
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let entry = StackEntry {
+                id: entry_id,
                 source_id: trigger.source_id,
-                ability: trigger.ability,
-            },
-        };
-        stack::push_to_stack(state, entry, &mut events_out);
+                controller: trigger.controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: trigger.source_id,
+                    ability: trigger.ability,
+                },
+            };
+            stack::push_to_stack(state, entry, &mut events_out);
+        }
     }
 }
 
@@ -208,6 +244,37 @@ fn build_resolved_from_def(
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
         duration: def.duration.clone(),
+    }
+}
+
+/// Extract the TargetFilter from an effect, if it has targeting requirements.
+/// Returns None for effects with no targeting (Draw, GainLife, etc.) or
+/// effects targeting self/controller (which don't need player selection).
+pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::ChangeZone { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Tap { target, .. }
+        | Effect::Untap { target, .. }
+        | Effect::Sacrifice { target, .. }
+        | Effect::GainControl { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::Fight { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::CopySpell { target, .. } => {
+            if matches!(
+                target,
+                TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+            ) {
+                None
+            } else {
+                Some(target)
+            }
+        }
+        _ => None,
     }
 }
 
