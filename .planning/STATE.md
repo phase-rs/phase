@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 29-02-PLAN.md
+stopped_at: Completed 29-04-PLAN.md
 last_updated: "2026-03-11T18:09:00Z"
 last_activity: 2026-03-11 — Phase 29 Plan 02 complete (N-Player Priority, Turns, Elimination)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 46
-  completed_plans: 32
-  percent: 70
+  completed_plans: 34
+  percent: 74
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 29 — Plan 02 of 16 complete
+Phase: 29 — Plan 04 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 02 complete (N-Player Priority, Turns, Elimination)
+Last activity: 2026-03-11 — Phase 29 Plan 04 complete (Commander Rules)
 
-Progress: [█████████████░░░░░░░] 32/46 plans (70%)
+Progress: [██████████████░░░░░░] 34/46 plans (74%)
 
 ## Performance Metrics
 
@@ -185,6 +185,10 @@ Recent decisions affecting current work:
 - [29-02]: opponent() kept as deprecated wrapper calling players::next_player() (removed in Plan 05)
 - [29-02]: SBAs collect all losers before eliminating (handles simultaneous life loss in multiplayer)
 - [29-02]: 2HG team elimination cascades through teammates() — one teammate dies, both eliminated
+- [29-04]: is_commander flag on GameObject for direct identification (not separate tracking structure)
+- [29-04]: commander_cast_count as HashMap<ObjectId, u32> on GameState for per-commander tax tracking (partner support)
+- [29-04]: Zone redirection in move_to_zone() at lowest level -- catches all zone changes including SBA-driven ones
+- [29-04]: Commander tax adds to generic mana cost rather than separate payment step
 
 ### Roadmap Evolution
 
@@ -202,6 +206,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:09:00Z
-Stopped at: Completed 29-02-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-03-PLAN.md
+Last session: 2026-03-11T18:12:00Z
+Stopped at: Completed 29-04-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-05-PLAN.md
