@@ -155,9 +155,7 @@ fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 }
 
 fn parse_non_prefix(text: &str) -> (Option<String>, usize) {
-    if text.starts_with("non") {
-        // Find the type after "non" — e.g., "nonland", "nonblack", "nonartifact", "nonlegendary"
-        let rest = &text[3..];
+    if let Some(rest) = text.strip_prefix("non") {
         let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let negated = rest[..end].to_string();
         // We consumed "non{type} " but the core type is the NEXT word, so return just the negated type

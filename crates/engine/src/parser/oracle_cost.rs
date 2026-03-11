@@ -63,13 +63,13 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         if let Some(end) = text.find(']') {
             let inner = &text[1..end];
             // Handle minus sign variants: −, –, -
-            let normalized = inner.replace('−', "-").replace('–', "-");
+            let normalized = inner.replace(['−', '–'], "-");
             if let Ok(n) = normalized.parse::<i32>() {
                 return AbilityCost::Loyalty { amount: n };
             }
             // +N
-            if normalized.starts_with('+') {
-                if let Ok(n) = normalized[1..].parse::<i32>() {
+            if let Some(stripped) = normalized.strip_prefix('+') {
+                if let Ok(n) = stripped.parse::<i32>() {
                     return AbilityCost::Loyalty { amount: n };
                 }
             }
@@ -109,8 +109,7 @@ fn parse_single_cost(text: &str) -> AbilityCost {
     }
 
     // "Discard a card" / "Discard N cards"
-    if lower.starts_with("discard ") {
-        let rest = &lower[8..];
+    if let Some(rest) = lower.strip_prefix("discard ") {
         if rest.starts_with("a card") {
             return AbilityCost::Discard { count: 1, filter: None, random: false };
         }

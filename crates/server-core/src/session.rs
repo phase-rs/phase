@@ -204,6 +204,7 @@ impl SessionManager {
 
     /// Handle a game action from a player.
     /// Returns (filtered_states_per_player, events, legal_actions_for_next_actor) on success.
+    #[allow(clippy::type_complexity)]
     pub fn handle_action(
         &mut self,
         game_code: &str,

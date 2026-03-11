@@ -51,11 +51,8 @@ async fn main() {
     let card_db = if export_path.exists() {
         CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
     } else {
-        CardDatabase::load_json(
-            &data_path.join("mtgjson/test_fixture.json"),
-            &data_path.join("abilities"),
-        )
-        .expect("Failed to load card database")
+        CardDatabase::from_mtgjson(&data_path.join("mtgjson/test_fixture.json"))
+            .expect("Failed to load card database")
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
@@ -624,7 +621,7 @@ async fn handle_client_message(
             };
 
             let mut mgr = state.lock().await;
-            let pc = requested_player_count.max(2).min(6);
+            let pc = requested_player_count.clamp(2, 6);
             let (game_code, player_token) =
                 mgr.create_game_n_players(resolved, display_name.clone(), timer_seconds, pc);
             info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");

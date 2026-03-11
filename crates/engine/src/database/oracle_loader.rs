@@ -11,7 +11,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, TargetFilter,
     TypeFilter,
 };
-use crate::types::card::{CardFace, CardLayout};
+use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -223,10 +223,11 @@ fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
 pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Error>> {
     let atomic = load_atomic_cards(mtgjson_path)?;
 
+    let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
     let errors: Vec<(PathBuf, String)> = Vec::new();
 
-    for (_card_name, faces) in &atomic.data {
+    for faces in atomic.data.values() {
         let oracle_id = faces
             .first()
             .and_then(|f| f.identifiers.scryfall_oracle_id.clone());
@@ -248,14 +249,27 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
             for face in layout_faces(&layout) {
                 face_index.insert(face.name.to_lowercase(), face.clone());
             }
+            let rules = CardRules {
+                layout: layout.clone(),
+                meld_with: None,
+                partner_with: None,
+            };
+            let primary_name = rules.name().to_lowercase();
+            cards.insert(primary_name, rules);
         } else {
             let face = build_oracle_face(&faces[0], oracle_id);
+            let rules = CardRules {
+                layout: CardLayout::Single(face.clone()),
+                meld_with: None,
+                partner_with: None,
+            };
+            cards.insert(face.name.to_lowercase(), rules);
             face_index.insert(face.name.to_lowercase(), face);
         }
     }
 
     Ok(CardDatabase {
-        cards: HashMap::new(),
+        cards,
         face_index,
         errors,
     })

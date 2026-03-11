@@ -49,7 +49,7 @@ fn normalize_self_refs(text: &str, card_name: &str) -> String {
         .replace("This artifact", "~")
 }
 
-fn split_trigger<'a>(lower: &str, original: &'a str) -> (String, String) {
+fn split_trigger(lower: &str, original: &str) -> (String, String) {
     if let Some(comma_pos) = find_effect_boundary(lower) {
         let condition = original[..comma_pos].trim().to_string();
         let effect = original[comma_pos + 2..].trim().to_string();
@@ -158,8 +158,8 @@ fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) 
     }
 
     // --- Phase triggers: "At the beginning of..." ---
-    if lower.starts_with("at the beginning of") {
-        let phase_text = lower[19..].trim();
+    if let Some(stripped) = lower.strip_prefix("at the beginning of") {
+        let phase_text = stripped.trim();
         let mut def = make_base();
         def.mode = TriggerMode::Phase;
         if phase_text.contains("upkeep") {

@@ -254,7 +254,7 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
         if let Some((n, rest)) = parse_number(after) {
             if rest.to_lowercase().starts_with("damage") {
                 let after_damage = rest.trim_start_matches(|c: char| c.is_alphabetic()).trim();
-                let after_to = if after_damage.starts_with("to ") { &after_damage[3..] } else { after_damage };
+                let after_to = after_damage.strip_prefix("to ").unwrap_or(after_damage);
                 // "each" → DamageAll
                 if after_to.starts_with("each ") {
                     let (target, _) = parse_target(after_to);
@@ -307,8 +307,8 @@ fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
         let type_name = "Token".to_string(); // simplified
         return Some(Effect::Token {
             name: type_name,
-            power: p as i32,
-            toughness: t as i32,
+            power: p,
+            toughness: t,
             types: vec!["Creature".to_string()],
             colors: vec![],
             keywords: vec![],

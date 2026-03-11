@@ -24,7 +24,7 @@ fn main() {
         eprintln!("Usage: coverage-report <data-root> [--ci]");
         eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
-        eprintln!("Loads cards via JSON (mtgjson + abilities) from <data-root>.");
+        eprintln!("Loads cards from MTGJSON data at <data-root>/mtgjson/.");
         eprintln!();
         eprintln!("Flags:");
         eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
@@ -41,15 +41,13 @@ fn main() {
         process::exit(0);
     };
 
-    // Load via CardDatabase::load_json()
-    // path is the data root directory (e.g., "data/")
+    // Load via CardDatabase::from_mtgjson() using the Oracle text parser
     let mtgjson_path = path.join("mtgjson/test_fixture.json");
-    let abilities_dir = path.join("abilities");
-    let db = match CardDatabase::load_json(&mtgjson_path, &abilities_dir) {
+    let db = match CardDatabase::from_mtgjson(&mtgjson_path) {
         Ok(db) => db,
         Err(e) => {
             eprintln!(
-                "Error loading JSON card database from {}: {}",
+                "Error loading card database from {}: {}",
                 path.display(),
                 e
             );

@@ -78,7 +78,7 @@ fn main() {
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
 
-    for (_card_name, faces) in &atomic.data {
+    for faces in atomic.data.values() {
         total_cards += 1;
 
         let oracle_id = faces

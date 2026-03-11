@@ -220,153 +220,10 @@ fn layout_faces(layout: &crate::types::card::CardLayout) -> Vec<&crate::types::c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-
-    #[cfg(feature = "forge-compat")]
-    use std::path::Path;
-
-    #[cfg(feature = "forge-compat")]
-    fn create_card_file(dir: &Path, name: &str, content: &str) {
-        std::fs::write(dir.join(format!("{}.txt", name)), content).unwrap();
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn card_with_supported_effect_is_marked_supported() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Lightning Bolt uses DealDamage which is in the effect registry
-        create_card_file(
-            tmp.path(),
-            "bolt",
-            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3 damage.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert_eq!(summary.total_cards, 1);
-        assert_eq!(summary.supported_cards, 1);
-        assert!(summary.cards[0].supported);
-        assert!(summary.cards[0].missing_handlers.is_empty());
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn card_with_unknown_effect_is_marked_unsupported() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "custom",
-            "Name:Custom Card\nManaCost:U\nTypes:Instant\nA:SP$ Fateseal | Cost$ U | Amount$ 2\nOracle:Fateseal 2.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert_eq!(summary.total_cards, 1);
-        assert_eq!(summary.supported_cards, 0);
-        assert!(!summary.cards[0].supported);
-        assert!(summary.cards[0]
-            .missing_handlers
-            .contains(&"Effect:Fateseal".to_string()));
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn vanilla_creature_is_supported() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "bear",
-            "Name:Grizzly Bears\nManaCost:1 G\nTypes:Creature Bear\nPT:2/2\nOracle:No text.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert_eq!(summary.supported_cards, 1);
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn card_with_unknown_keyword_is_unsupported() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "future",
-            "Name:Future Card\nManaCost:W\nTypes:Creature\nK:FutureKeyword\nPT:1/1\nOracle:Has FutureKeyword.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert_eq!(summary.supported_cards, 0);
-        assert!(summary.cards[0]
-            .missing_handlers
-            .iter()
-            .any(|m| m.starts_with("Keyword:")));
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn missing_handler_frequency_sorted_descending() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Two cards both missing the same effect
-        create_card_file(
-            tmp.path(),
-            "card_a",
-            "Name:Card A\nManaCost:R\nTypes:Instant\nA:SP$ Fateseal | Cost$ R\nOracle:Fateseal.",
-        );
-        create_card_file(
-            tmp.path(),
-            "card_b",
-            "Name:Card B\nManaCost:U\nTypes:Instant\nA:SP$ Fateseal | Cost$ U\nOracle:Fateseal again.",
-        );
-        create_card_file(
-            tmp.path(),
-            "card_c",
-            "Name:Card C\nManaCost:G\nTypes:Instant\nA:SP$ Polymorph | Cost$ G\nOracle:Polymorph.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert!(!summary.missing_handler_frequency.is_empty());
-        // Fateseal appears 2 times, Polymorph 1 time
-        assert_eq!(summary.missing_handler_frequency[0].0, "Effect:Fateseal");
-        assert_eq!(summary.missing_handler_frequency[0].1, 2);
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn coverage_percentage_calculated_correctly() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "bolt",
-            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3.",
-        );
-        create_card_file(
-            tmp.path(),
-            "bear",
-            "Name:Bear\nManaCost:1 G\nTypes:Creature\nPT:2/2\nOracle:Vanilla.",
-        );
-        create_card_file(
-            tmp.path(),
-            "custom",
-            "Name:Custom\nManaCost:U\nTypes:Instant\nA:SP$ Fateseal | Cost$ U\nOracle:Fateseal.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-
-        assert_eq!(summary.total_cards, 3);
-        assert_eq!(summary.supported_cards, 2);
-        // 2/3 * 100 = 66.67%
-        assert!((summary.coverage_pct - 66.66).abs() < 1.0);
-    }
 
     fn make_obj() -> GameObject {
         GameObject::new(
@@ -400,26 +257,41 @@ mod tests {
         assert!(!unimplemented_mechanics(&obj).is_empty());
     }
 
-    #[cfg(feature = "forge-compat")]
-    fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
-        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
-    }
-
-    #[cfg(feature = "forge-compat")]
     #[test]
     fn object_with_registered_ability_has_no_unimplemented() {
         let mut obj = make_obj();
-        obj.abilities
-            .push(parse_test_ability("SP$ DealDamage | Cost$ R | NumDmg$ 3"));
+        obj.abilities.push(crate::types::ability::AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        });
         assert!(unimplemented_mechanics(&obj).is_empty());
     }
 
-    #[cfg(feature = "forge-compat")]
     #[test]
     fn object_with_unregistered_ability_has_unimplemented() {
         let mut obj = make_obj();
-        obj.abilities
-            .push(parse_test_ability("SP$ Fateseal | Cost$ U | Amount$ 2"));
+        obj.abilities.push(crate::types::ability::AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Unimplemented {
+                name: "Fateseal".to_string(),
+                description: None,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        });
         assert!(!unimplemented_mechanics(&obj).is_empty());
     }
 
@@ -429,45 +301,5 @@ mod tests {
         assert!(!obj.has_unimplemented_mechanics());
         obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
         assert!(obj.has_unimplemented_mechanics());
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn ci_passes_when_all_cards_supported() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "bolt",
-            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3.",
-        );
-        create_card_file(
-            tmp.path(),
-            "bear",
-            "Name:Bear\nManaCost:1 G\nTypes:Creature\nPT:2/2\nOracle:Vanilla.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-        assert!(is_fully_covered(&summary));
-    }
-
-    #[test]
-    #[cfg(feature = "forge-compat")]
-    fn ci_fails_when_any_card_unsupported() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_card_file(
-            tmp.path(),
-            "bolt",
-            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3.",
-        );
-        create_card_file(
-            tmp.path(),
-            "custom",
-            "Name:Custom\nManaCost:U\nTypes:Instant\nA:SP$ Fateseal | Cost$ U\nOracle:Fateseal.",
-        );
-
-        let db = CardDatabase::load(tmp.path()).unwrap();
-        let summary = analyze_standard_coverage(&db);
-        assert!(!is_fully_covered(&summary));
     }
 }
