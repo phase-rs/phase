@@ -386,8 +386,8 @@ function GamePageContent({
         />
       </div>
 
-      {/* Opponent zones — upper-right: exile badge, library pile, graveyard pile */}
-      <div className="fixed right-2 top-2 z-30 flex items-start gap-2">
+      {/* Opponent zones — upper-right (1v1) or right-edge below strips (multiplayer) */}
+      <div className={`fixed z-30 flex items-start gap-2 ${opponents.length > 1 ? "right-2 top-36 scale-75 origin-top-right" : "right-2 top-2"}`}>
         <ZoneIndicator
           zone="exile"
           playerId={activeOpponentId}

@@ -89,33 +89,34 @@ export function GameBoard() {
           mode="focused"
         />
       ) : (
-        // Multiplayer: compact strips for opponents, with optional focused view
-        <div className="flex flex-col">
-          {/* Compact strips row */}
-          <div className="flex gap-2 overflow-visible px-2 py-1">
+        // Multiplayer: compact strips + optional focused battlefield
+        <>
+          {/* Compact opponent strips — fixed height, floats above focused area */}
+          <div className="relative z-20 flex shrink-0 gap-2 overflow-x-auto px-2 py-1">
             {opponents.map((opId) => (
               <PlayerArea
                 key={opId}
                 playerId={opId}
-                mode={focusedOpponent === opId ? "focused" : "compact"}
+                mode="compact"
+                isActive={focusedOpponent === opId}
                 onFocus={() =>
                   setFocusedOpponent(focusedOpponent === opId ? null : opId)
                 }
               />
             ))}
           </div>
-          {/* Focused opponent expanded view */}
+          {/* Focused opponent expanded battlefield */}
           {focusedOpponent != null && opponents.includes(focusedOpponent) && (
             <PlayerArea
               playerId={focusedOpponent}
               mode="focused"
             />
           )}
-        </div>
+        </>
       )}
 
       {/* Minimal center gap */}
-      <div className="h-1" />
+      <div className="h-1 shrink-0" />
 
       {/* Player's battlefield */}
       <PlayerArea

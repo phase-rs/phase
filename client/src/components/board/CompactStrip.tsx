@@ -7,10 +7,12 @@ import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 interface CompactStripProps {
   playerId: PlayerId;
   onClick?: () => void;
+  isActive?: boolean;
 }
 
-export function CompactStrip({ playerId, onClick }: CompactStripProps) {
+export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps) {
   const gameState = useGameStore((s) => s.gameState);
+  const isTheirTurn = gameState?.active_player === playerId;
 
   const { player, counts } = useMemo(() => {
     if (!gameState) return { player: null, counts: { creatures: 0, lands: 0, other: 0 } };
@@ -48,12 +50,15 @@ export function CompactStrip({ playerId, onClick }: CompactStripProps) {
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-900/80 px-3 py-2 transition-colors hover:border-gray-500 hover:bg-gray-800/80 ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      className={`flex items-center gap-3 rounded-lg border-2 px-3 py-2 shadow-md transition-all duration-300 hover:border-gray-400 hover:bg-gray-800/80 ${isTheirTurn ? "border-red-400 bg-black/60 ring-2 ring-red-400/40 shadow-[0_0_12px_rgba(248,113,113,0.4)]" : isActive ? "border-amber-400 bg-gray-800/90 ring-2 ring-amber-400/40 shadow-amber-500/20" : "border-gray-500 bg-gray-900/80 shadow-black/30"} ${isEliminated ? "opacity-40 grayscale" : ""}`}
       data-testid={`compact-strip-${playerId}`}
     >
       {/* Player name and life */}
       <div className="flex flex-col items-start">
-        <span className="text-xs text-gray-400">Opp {playerId + 1}</span>
+        <div className="flex items-center gap-1">
+          {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />}
+          <span className={`text-xs ${isTheirTurn ? "text-red-300 font-semibold" : "text-gray-400"}`}>Opp {playerId + 1}</span>
+        </div>
         <span className={`text-lg font-bold tabular-nums ${lifeColor}`}>
           {player.life}
         </span>

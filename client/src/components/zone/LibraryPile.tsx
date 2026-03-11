@@ -1,4 +1,5 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 interface LibraryPileProps {
@@ -25,12 +26,13 @@ function TopCard({ cardName }: { cardName: string }) {
 }
 
 export function LibraryPile({ playerId }: LibraryPileProps) {
+  const myId = usePlayerId();
   const count = useGameStore(
     (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
   );
   const canPeek = useGameStore(
     (s) =>
-      playerId === 0 &&
+      playerId === myId &&
       (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false),
   );
   const topCardName = useGameStore((s) => {

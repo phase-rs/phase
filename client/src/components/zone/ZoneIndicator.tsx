@@ -1,4 +1,5 @@
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 
 interface ZoneIndicatorProps {
   zone: "graveyard" | "exile";
@@ -12,6 +13,7 @@ const ZONE_LABELS: Record<string, string> = {
 };
 
 export function ZoneIndicator({ zone, playerId, onClick }: ZoneIndicatorProps) {
+  const myId = usePlayerId();
   const count = useGameStore((s) => {
     const state = s.gameState;
     if (!state) return 0;
@@ -32,7 +34,7 @@ export function ZoneIndicator({ zone, playerId, onClick }: ZoneIndicatorProps) {
       onClick={onClick}
       className="cursor-pointer rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400 transition-colors hover:bg-gray-700 hover:text-gray-200"
     >
-      {playerId === 1 ? "Opp " : ""}{ZONE_LABELS[zone]} ({count})
+      {playerId !== myId ? "Opp " : ""}{ZONE_LABELS[zone]} ({count})
     </button>
   );
 }

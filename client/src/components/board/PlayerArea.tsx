@@ -41,13 +41,15 @@ interface PlayerAreaProps {
   playerId: PlayerId;
   mode: PlayerAreaMode;
   onFocus?: () => void;
+  /** Whether this compact strip is the currently focused opponent */
+  isActive?: boolean;
   /** Extra content to render in the land column (e.g. undo button) */
   landColumnExtra?: React.ReactNode;
   /** Override creature groups with pre-sorted list (for blocker alignment) */
   creatureOverride?: GroupedPermanent[];
 }
 
-export function PlayerArea({ playerId, mode, onFocus, landColumnExtra, creatureOverride }: PlayerAreaProps) {
+export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra, creatureOverride }: PlayerAreaProps) {
   const gameState = useGameStore((s) => s.gameState);
 
   const partitioned = useMemo(() => {
@@ -81,6 +83,7 @@ export function PlayerArea({ playerId, mode, onFocus, landColumnExtra, creatureO
       <CompactStrip
         playerId={playerId}
         onClick={onFocus}
+        isActive={isActive}
       />
     );
   }
@@ -93,7 +96,7 @@ export function PlayerArea({ playerId, mode, onFocus, landColumnExtra, creatureO
 
   return (
     <div
-      className={`relative flex flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex min-h-0 flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
       data-testid={`player-area-${playerId}`}
     >
       {/* Lands -- left column */}
