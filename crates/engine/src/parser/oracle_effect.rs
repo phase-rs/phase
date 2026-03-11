@@ -260,38 +260,12 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 }
 
 fn split_effect_sentences(text: &str) -> Vec<String> {
-    // Split on ". " (period+space) and ", then "
-    let mut results = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if i + 7 <= chars.len() && text[i..].to_lowercase().starts_with(", then ") {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                results.push(trimmed);
-            }
-            current.clear();
-            i += 7;
-            continue;
-        }
-        if chars[i] == '.' && i + 1 < chars.len() && (chars[i + 1] == ' ' || chars[i + 1] == '\n') {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                results.push(trimmed);
-            }
-            current.clear();
-            i += 2;
-            continue;
-        }
-        current.push(chars[i]);
-        i += 1;
-    }
-    let trimmed = current.trim().trim_end_matches('.').trim().to_string();
-    if !trimmed.is_empty() {
-        results.push(trimmed);
-    }
-    results
+    text.replace(", then ", ". ")
+        .split(". ")
+        .map(|s| s.trim().trim_end_matches('.').trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 // --- Helper parsers ---
@@ -509,5 +483,16 @@ mod tests {
             def.sub_ability.unwrap().effect,
             Effect::Draw { count: 1 }
         ));
+    }
+
+    #[test]
+    fn effect_chain_with_em_dash() {
+        // Regression: em dash (U+2014, 3 bytes) must not cause a byte-boundary panic
+        let def = parse_effect_chain(
+            "Spell mastery — Draw two cards. You gain 2 life.",
+            AbilityKind::Spell,
+        );
+        // First sentence contains the em dash, should parse (possibly as unimplemented)
+        assert!(def.sub_ability.is_some());
     }
 }
