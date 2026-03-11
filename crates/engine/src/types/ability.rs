@@ -200,9 +200,13 @@ pub enum AbilityCost {
         count: u32,
         #[serde(default)]
         filter: Option<TargetFilter>,
+        #[serde(default)]
+        random: bool,
     },
     Exile {
         count: u32,
+        #[serde(default)]
+        zone: Option<Zone>,
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
@@ -210,8 +214,32 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
     },
+    RemoveCounter {
+        count: u32,
+        counter_type: String,
+        #[serde(default)]
+        target: Option<TargetFilter>,
+    },
+    PayEnergy {
+        amount: u32,
+    },
+    ReturnToHand {
+        count: u32,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    Mill {
+        count: u32,
+    },
+    Exert,
+    Reveal {
+        count: u32,
+    },
     Composite {
         costs: Vec<AbilityCost>,
+    },
+    Unimplemented {
+        description: String,
     },
 }
 
@@ -630,6 +658,8 @@ pub enum ContinuousModification {
     RemoveAllAbilities,
     AddType { core_type: CoreType },
     RemoveType { core_type: CoreType },
+    AddSubtype { subtype: String },
+    RemoveSubtype { subtype: String },
     SetColor { colors: Vec<ManaColor> },
     AddColor { color: ManaColor },
 }
@@ -951,9 +981,11 @@ mod tests {
             AbilityCost::Discard {
                 count: 1,
                 filter: None,
+                random: false,
             },
             AbilityCost::Exile {
                 count: 1,
+                zone: None,
                 filter: Some(TargetFilter::Typed {
                     card_type: Some(TypeFilter::Creature),
                     subtype: None,

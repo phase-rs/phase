@@ -214,7 +214,10 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // If b changes types (AddType/RemoveType) and a's filter references a type
     let b_changes_types = matches!(
         &b.modification,
-        ContinuousModification::AddType { .. } | ContinuousModification::RemoveType { .. }
+        ContinuousModification::AddType { .. }
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::AddSubtype { .. }
+            | ContinuousModification::RemoveSubtype { .. }
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -328,6 +331,14 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 if !obj.color.contains(color) {
                     obj.color.push(*color);
                 }
+            }
+            ContinuousModification::AddSubtype { ref subtype } => {
+                if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                    obj.card_types.subtypes.push(subtype.clone());
+                }
+            }
+            ContinuousModification::RemoveSubtype { ref subtype } => {
+                obj.card_types.subtypes.retain(|s| s != subtype);
             }
             ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
         }

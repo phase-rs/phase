@@ -293,12 +293,50 @@ fn filename_to_card_name(stem: &str) -> String {
         .join(" ")
 }
 
+/// Build fast lookup indexes from MTGJSON data for O(1) card name resolution.
+/// Returns (lowercase_map, normalized_map, normalized_prefix_map).
+fn build_mtgjson_indexes(
+    atomic: &crate::database::mtgjson::AtomicCardsFile,
+) -> (
+    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
+    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
+    HashMap<String, &Vec<crate::database::mtgjson::AtomicCard>>,
+) {
+    let mut lowercase_map = HashMap::with_capacity(atomic.data.len());
+    let mut normalized_map = HashMap::with_capacity(atomic.data.len());
+    let mut normalized_prefix_map = HashMap::with_capacity(atomic.data.len());
+
+    for (key, val) in &atomic.data {
+        let key_lower = key.to_lowercase();
+        lowercase_map.entry(key_lower.clone()).or_insert(val);
+        let key_normalized = normalize_for_match(key);
+        normalized_map
+            .entry(key_normalized.clone())
+            .or_insert(val);
+
+        // Multi-face prefix: "name a // name b" → index by "name a"
+        if let Some(idx) = key_lower.find(" // ") {
+            let prefix = &key_lower[..idx];
+            normalized_prefix_map
+                .entry(prefix.to_string())
+                .or_insert(val);
+            let prefix_normalized = normalize_for_match(&key[..key.find(" // ").unwrap_or(0)]);
+            normalized_prefix_map
+                .entry(prefix_normalized)
+                .or_insert(val);
+        }
+    }
+
+    (lowercase_map, normalized_map, normalized_prefix_map)
+}
+
 /// Load a card database from MTGJSON metadata and per-card ability JSON files.
 pub fn load_json(
     mtgjson_path: &Path,
     abilities_dir: &Path,
 ) -> Result<CardDatabase, Box<dyn Error>> {
     let atomic = load_atomic_cards(mtgjson_path)?;
+    let (lowercase_map, normalized_map, prefix_map) = build_mtgjson_indexes(&atomic);
 
     let mut cards = HashMap::new();
     let mut face_index = HashMap::new();
@@ -345,38 +383,16 @@ pub fn load_json(
             // Derive card name from filename
             let card_name = filename_to_card_name(&stem);
 
-            // Find matching MTGJSON entry
-            // Try exact match, case-insensitive match, normalized match (strip punctuation),
-            // then prefix match for multi-face cards
+            // Find matching MTGJSON entry via pre-built indexes (all O(1) lookups)
             let card_name_lower = card_name.to_lowercase();
             let card_name_normalized = normalize_for_match(&card_name);
-            let mtgjson_entry = atomic.data.get(&card_name).or_else(|| {
-                atomic.data.iter().find_map(|(key, val)| {
-                    let key_lower = key.to_lowercase();
-                    // Exact case-insensitive match
-                    if key_lower == card_name_lower {
-                        return Some(val);
-                    }
-                    // Normalized match (strips commas, apostrophes, spaces, etc.)
-                    if normalize_for_match(key) == card_name_normalized {
-                        return Some(val);
-                    }
-                    // Multi-face: "Name A // Name B" prefix match
-                    if let Some(rest) = key_lower.strip_prefix(&card_name_lower) {
-                        if rest.starts_with(" // ") {
-                            return Some(val);
-                        }
-                    }
-                    // Multi-face: normalized prefix match (no spaces after normalize)
-                    let key_normalized = normalize_for_match(key);
-                    if let Some(rest) = key_normalized.strip_prefix(&card_name_normalized) {
-                        if rest.starts_with("//") {
-                            return Some(val);
-                        }
-                    }
-                    None
-                })
-            });
+            let mtgjson_entry = atomic
+                .data
+                .get(&card_name)
+                .or_else(|| lowercase_map.get(&card_name_lower).copied())
+                .or_else(|| normalized_map.get(&card_name_normalized).copied())
+                .or_else(|| prefix_map.get(&card_name_lower).copied())
+                .or_else(|| prefix_map.get(&card_name_normalized).copied());
 
             let mtgjson_faces = match mtgjson_entry {
                 Some(faces) => faces,

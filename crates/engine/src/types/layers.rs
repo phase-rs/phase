@@ -67,9 +67,10 @@ impl ContinuousModification {
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::AddAbility { .. }
             | ContinuousModification::RemoveAllAbilities => Layer::Ability,
-            ContinuousModification::AddType { .. } | ContinuousModification::RemoveType { .. } => {
-                Layer::Type
-            }
+            ContinuousModification::AddType { .. }
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::AddSubtype { .. }
+            | ContinuousModification::RemoveSubtype { .. } => Layer::Type,
             ContinuousModification::SetColor { .. } | ContinuousModification::AddColor { .. } => {
                 Layer::Color
             }
