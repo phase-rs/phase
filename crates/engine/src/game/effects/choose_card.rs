@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -74,7 +74,7 @@ pub fn resolve(
 
     if cards.is_empty() {
         events.push(GameEvent::EffectResolved {
-            api_type: ability.api_type().to_string(),
+            api_type: effect_variant_name(&ability.effect).to_string(),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -89,7 +89,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type().to_string(),
+        api_type: effect_variant_name(&ability.effect).to_string(),
         source_id: ability.source_id,
     });
 

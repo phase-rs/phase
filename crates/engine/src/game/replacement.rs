@@ -7,6 +7,7 @@ use crate::types::game_state::{GameState, PendingReplacement};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1031,7 +1032,7 @@ fn explore_applier(
 
 // --- Registry ---
 
-pub fn build_replacement_registry() -> IndexMap<String, ReplacementHandlerEntry> {
+pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHandlerEntry> {
     let mut registry = IndexMap::new();
 
     let stub = || ReplacementHandlerEntry {
@@ -1041,92 +1042,92 @@ pub fn build_replacement_registry() -> IndexMap<String, ReplacementHandlerEntry>
 
     // 14 core types with real logic
     registry.insert(
-        "DamageDone".to_string(),
+        ReplacementEvent::DamageDone,
         ReplacementHandlerEntry {
             matcher: damage_done_matcher,
             applier: damage_done_applier,
         },
     );
     registry.insert(
-        "Moved".to_string(),
+        ReplacementEvent::Moved,
         ReplacementHandlerEntry {
             matcher: moved_matcher,
             applier: moved_applier,
         },
     );
     registry.insert(
-        "Destroy".to_string(),
+        ReplacementEvent::Destroy,
         ReplacementHandlerEntry {
             matcher: destroy_matcher,
             applier: destroy_applier,
         },
     );
     registry.insert(
-        "Draw".to_string(),
+        ReplacementEvent::Draw,
         ReplacementHandlerEntry {
             matcher: draw_matcher,
             applier: draw_applier,
         },
     );
-    registry.insert("DrawCards".to_string(), stub()); // stays stub (alias for Draw)
+    registry.insert(ReplacementEvent::Other("DrawCards".into()), stub()); // stays stub (alias for Draw)
     registry.insert(
-        "GainLife".to_string(),
+        ReplacementEvent::GainLife,
         ReplacementHandlerEntry {
             matcher: gain_life_matcher,
             applier: gain_life_applier,
         },
     );
     registry.insert(
-        "LifeReduced".to_string(),
+        ReplacementEvent::Other("LifeReduced".into()),
         ReplacementHandlerEntry {
             matcher: life_reduced_matcher,
             applier: life_reduced_applier,
         },
     );
     registry.insert(
-        "AddCounter".to_string(),
+        ReplacementEvent::Other("AddCounter".into()),
         ReplacementHandlerEntry {
             matcher: add_counter_matcher,
             applier: add_counter_applier,
         },
     );
     registry.insert(
-        "RemoveCounter".to_string(),
+        ReplacementEvent::Other("RemoveCounter".into()),
         ReplacementHandlerEntry {
             matcher: remove_counter_matcher,
             applier: remove_counter_applier,
         },
     );
     registry.insert(
-        "Tap".to_string(),
+        ReplacementEvent::Other("Tap".into()),
         ReplacementHandlerEntry {
             matcher: tap_matcher,
             applier: tap_applier,
         },
     );
     registry.insert(
-        "Untap".to_string(),
+        ReplacementEvent::Other("Untap".into()),
         ReplacementHandlerEntry {
             matcher: untap_matcher,
             applier: untap_applier,
         },
     );
     registry.insert(
-        "Counter".to_string(),
+        ReplacementEvent::Counter,
         ReplacementHandlerEntry {
             matcher: counter_matcher,
             applier: counter_applier,
         },
     );
     registry.insert(
-        "CreateToken".to_string(),
+        ReplacementEvent::Other("CreateToken".into()),
         ReplacementHandlerEntry {
             matcher: create_token_matcher,
             applier: create_token_applier,
         },
     );
     registry.insert(
-        "Attached".to_string(),
+        ReplacementEvent::Other("Attached".into()),
         ReplacementHandlerEntry {
             matcher: attached_matcher,
             applier: attached_applier,
@@ -1135,56 +1136,56 @@ pub fn build_replacement_registry() -> IndexMap<String, ReplacementHandlerEntry>
 
     // Promoted from stubs to real handlers
     registry.insert(
-        "DealtDamage".to_string(),
+        ReplacementEvent::Other("DealtDamage".into()),
         ReplacementHandlerEntry {
             matcher: dealt_damage_matcher,
             applier: dealt_damage_applier,
         },
     );
     registry.insert(
-        "Mill".to_string(),
+        ReplacementEvent::Other("Mill".into()),
         ReplacementHandlerEntry {
             matcher: mill_matcher,
             applier: mill_applier,
         },
     );
     registry.insert(
-        "PayLife".to_string(),
+        ReplacementEvent::Other("PayLife".into()),
         ReplacementHandlerEntry {
             matcher: pay_life_matcher,
             applier: pay_life_applier,
         },
     );
     registry.insert(
-        "ProduceMana".to_string(),
+        ReplacementEvent::Other("ProduceMana".into()),
         ReplacementHandlerEntry {
             matcher: produce_mana_matcher,
             applier: produce_mana_applier,
         },
     );
     registry.insert(
-        "Scry".to_string(),
+        ReplacementEvent::Other("Scry".into()),
         ReplacementHandlerEntry {
             matcher: scry_matcher,
             applier: scry_applier,
         },
     );
     registry.insert(
-        "Transform".to_string(),
+        ReplacementEvent::Other("Transform".into()),
         ReplacementHandlerEntry {
             matcher: transform_matcher,
             applier: transform_applier,
         },
     );
     registry.insert(
-        "TurnFaceUp".to_string(),
+        ReplacementEvent::TurnFaceUp,
         ReplacementHandlerEntry {
             matcher: turn_face_up_matcher,
             applier: turn_face_up_applier,
         },
     );
     registry.insert(
-        "Explore".to_string(),
+        ReplacementEvent::Other("Explore".into()),
         ReplacementHandlerEntry {
             matcher: explore_matcher,
             applier: explore_applier,
@@ -1192,19 +1193,24 @@ pub fn build_replacement_registry() -> IndexMap<String, ReplacementHandlerEntry>
     );
 
     // 12 remaining Forge types (stubs -- recognized but no-op)
-    registry.insert("BeginPhase".to_string(), stub());
-    registry.insert("BeginTurn".to_string(), stub());
-    registry.insert("DeclareBlocker".to_string(), stub());
-    registry.insert("GameLoss".to_string(), stub());
-    registry.insert("GameWin".to_string(), stub());
-    registry.insert("Learn".to_string(), stub());
-    registry.insert("LoseMana".to_string(), stub());
-    registry.insert("Proliferate".to_string(), stub());
-    registry.insert("AssembleContraption".to_string(), stub());
-    registry.insert("Cascade".to_string(), stub());
-    registry.insert("CopySpell".to_string(), stub());
-    registry.insert("PlanarDiceResult".to_string(), stub());
-    registry.insert("Planeswalk".to_string(), stub());
+    let stub_events = [
+        "BeginPhase",
+        "BeginTurn",
+        "DeclareBlocker",
+        "GameLoss",
+        "GameWin",
+        "Learn",
+        "LoseMana",
+        "Proliferate",
+        "AssembleContraption",
+        "Cascade",
+        "CopySpell",
+        "PlanarDiceResult",
+        "Planeswalk",
+    ];
+    for ev in &stub_events {
+        registry.insert(ReplacementEvent::Other((*ev).into()), stub());
+    }
 
     registry
 }
@@ -1214,7 +1220,7 @@ pub fn build_replacement_registry() -> IndexMap<String, ReplacementHandlerEntry>
 pub fn find_applicable_replacements(
     state: &GameState,
     event: &ProposedEvent,
-    registry: &IndexMap<String, ReplacementHandlerEntry>,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
     let mut candidates = Vec::new();
 
@@ -1234,7 +1240,7 @@ pub fn find_applicable_replacements(
                 continue;
             }
 
-            if let Some(handler) = registry.get(&repl_def.event_str()) {
+            if let Some(handler) = registry.get(&repl_def.event) {
                 if (handler.matcher)(event, &repl_def.params, obj.id, state) {
                     candidates.push(rid);
                 }
@@ -1251,14 +1257,15 @@ fn apply_single_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
     rid: ReplacementId,
-    registry: &IndexMap<String, ReplacementHandlerEntry>,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
     if let Some(obj) = state.objects.get(&rid.source) {
         if let Some(repl_def) = obj.replacement_definitions.get(rid.index) {
-            let event_type = repl_def.event_str();
+            let event_key = repl_def.event.clone();
             let params = repl_def.params.clone();
-            if let Some(handler) = registry.get(&event_type) {
+            if let Some(handler) = registry.get(&event_key) {
+                let event_type = event_key.to_string();
                 match (handler.applier)(proposed, &params, rid.source, state, events) {
                     ApplyResult::Modified(new_event) => {
                         events.push(GameEvent::ReplacementApplied {
@@ -1285,7 +1292,7 @@ fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
     mut depth: u16,
-    registry: &IndexMap<String, ReplacementHandlerEntry>,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     loop {
@@ -1795,45 +1802,49 @@ mod tests {
         );
 
         // Verify all expected keys
-        let expected = [
-            "DamageDone",
-            "Moved",
-            "Destroy",
-            "Draw",
-            "DrawCards",
-            "GainLife",
-            "LifeReduced",
-            "AddCounter",
-            "RemoveCounter",
-            "Tap",
-            "Untap",
-            "Counter",
-            "CreateToken",
-            "Attached",
-            "BeginPhase",
-            "BeginTurn",
-            "DealtDamage",
-            "DeclareBlocker",
-            "Explore",
-            "GameLoss",
-            "GameWin",
-            "Learn",
-            "LoseMana",
-            "Mill",
-            "PayLife",
-            "ProduceMana",
-            "Proliferate",
-            "Scry",
-            "Transform",
-            "TurnFaceUp",
-            "AssembleContraption",
-            "Cascade",
-            "CopySpell",
-            "PlanarDiceResult",
-            "Planeswalk",
+        let expected: Vec<ReplacementEvent> = vec![
+            ReplacementEvent::DamageDone,
+            ReplacementEvent::Moved,
+            ReplacementEvent::Destroy,
+            ReplacementEvent::Draw,
+            ReplacementEvent::Other("DrawCards".into()),
+            ReplacementEvent::GainLife,
+            ReplacementEvent::Other("LifeReduced".into()),
+            ReplacementEvent::Other("AddCounter".into()),
+            ReplacementEvent::Other("RemoveCounter".into()),
+            ReplacementEvent::Other("Tap".into()),
+            ReplacementEvent::Other("Untap".into()),
+            ReplacementEvent::Counter,
+            ReplacementEvent::Other("CreateToken".into()),
+            ReplacementEvent::Other("Attached".into()),
+            ReplacementEvent::Other("BeginPhase".into()),
+            ReplacementEvent::Other("BeginTurn".into()),
+            ReplacementEvent::Other("DealtDamage".into()),
+            ReplacementEvent::Other("DeclareBlocker".into()),
+            ReplacementEvent::Other("Explore".into()),
+            ReplacementEvent::Other("GameLoss".into()),
+            ReplacementEvent::Other("GameWin".into()),
+            ReplacementEvent::Other("Learn".into()),
+            ReplacementEvent::Other("LoseMana".into()),
+            ReplacementEvent::Other("Mill".into()),
+            ReplacementEvent::Other("PayLife".into()),
+            ReplacementEvent::Other("ProduceMana".into()),
+            ReplacementEvent::Other("Proliferate".into()),
+            ReplacementEvent::Other("Scry".into()),
+            ReplacementEvent::Other("Transform".into()),
+            ReplacementEvent::TurnFaceUp,
+            ReplacementEvent::Other("AssembleContraption".into()),
+            ReplacementEvent::Other("Cascade".into()),
+            ReplacementEvent::Other("CopySpell".into()),
+            ReplacementEvent::Other("PlanarDiceResult".into()),
+            ReplacementEvent::Other("Planeswalk".into()),
         ];
-        for key in expected {
-            assert!(registry.contains_key(key), "registry missing key: {}", key);
+        for key in &expected {
+            assert!(
+                registry.contains_key(key),
+                "registry missing key: {}",
+                key
+            );
         }
     }
 }

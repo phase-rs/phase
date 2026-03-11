@@ -116,7 +116,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                     timestamp: obj.timestamp,
                     params: def.params.clone(),
                     affected_filter: affected.clone(),
-                    mode: def.mode_str(),
+                    mode: def.mode.to_string(),
                 });
             }
         }

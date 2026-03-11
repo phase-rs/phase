@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
-use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec};
+use crate::types::ability::{
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -79,7 +81,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type().to_string(),
+        api_type: effect_variant_name(&ability.effect).to_string(),
         source_id: ability.source_id,
     });
 

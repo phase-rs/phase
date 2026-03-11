@@ -4,6 +4,7 @@ use crate::game::filter::{object_matches_filter, player_matches_filter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 /// Describes what a static ability does (returned by handlers).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,54 +34,75 @@ pub type StaticAbilityHandler = fn(
 ) -> Vec<StaticEffect>;
 
 /// Build the static ability handler registry.
-/// Maps mode strings to handler functions.
-pub fn build_static_registry() -> HashMap<String, StaticAbilityHandler> {
-    let mut registry: HashMap<String, StaticAbilityHandler> = HashMap::new();
+/// Maps StaticMode keys to handler functions.
+pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
+    let mut registry: HashMap<StaticMode, StaticAbilityHandler> = HashMap::new();
 
     // Core continuous mode (evaluated through layers)
-    registry.insert("Continuous".to_string(), handle_continuous);
+    registry.insert(StaticMode::Continuous, handle_continuous);
 
     // Core rule-modification handlers with real logic
-    registry.insert("CantAttack".to_string(), handle_rule_mod);
-    registry.insert("CantBlock".to_string(), handle_rule_mod);
-    registry.insert("CantBeTargeted".to_string(), handle_rule_mod);
-    registry.insert("CantBeCast".to_string(), handle_rule_mod);
-    registry.insert("CantBeActivated".to_string(), handle_rule_mod);
-    registry.insert("CastWithFlash".to_string(), handle_rule_mod);
-    registry.insert("ReduceCost".to_string(), handle_rule_mod);
-    registry.insert("RaiseCost".to_string(), handle_rule_mod);
-    registry.insert("CantGainLife".to_string(), handle_rule_mod);
-    registry.insert("CantLoseLife".to_string(), handle_rule_mod);
-    registry.insert("MustAttack".to_string(), handle_rule_mod);
-    registry.insert("MustBlock".to_string(), handle_rule_mod);
-    registry.insert("CantDraw".to_string(), handle_rule_mod);
-    registry.insert("Panharmonicon".to_string(), handle_rule_mod);
-    registry.insert("IgnoreHexproof".to_string(), handle_rule_mod);
+    registry.insert(StaticMode::CantAttack, handle_rule_mod);
+    registry.insert(StaticMode::CantBlock, handle_rule_mod);
+    registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
+    registry.insert(StaticMode::CantBeCast, handle_rule_mod);
+    registry.insert(StaticMode::CantBeActivated, handle_rule_mod);
+    registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
+    registry.insert(StaticMode::ReduceCost, handle_rule_mod);
+    registry.insert(StaticMode::RaiseCost, handle_rule_mod);
+    registry.insert(StaticMode::CantGainLife, handle_rule_mod);
+    registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
+    registry.insert(StaticMode::MustAttack, handle_rule_mod);
+    registry.insert(StaticMode::MustBlock, handle_rule_mod);
+    registry.insert(StaticMode::CantDraw, handle_rule_mod);
+    registry.insert(StaticMode::Panharmonicon, handle_rule_mod);
+    registry.insert(StaticMode::IgnoreHexproof, handle_rule_mod);
 
     // Promoted static ability handlers
-    registry.insert("CantBeBlocked".to_string(), handle_cant_be_blocked);
-    registry.insert("Ward".to_string(), handle_ward);
-    registry.insert("Protection".to_string(), handle_protection);
+    registry.insert(
+        StaticMode::Other("CantBeBlocked".into()),
+        handle_cant_be_blocked,
+    );
+    registry.insert(StaticMode::Other("Ward".into()), handle_ward);
+    registry.insert(StaticMode::Other("Protection".into()), handle_protection);
 
     // Promoted static ability handlers -- Standard-relevant mechanics
-    registry.insert("Indestructible".to_string(), handle_indestructible);
-    registry.insert("CantBeCountered".to_string(), handle_cant_be_countered);
-    registry.insert("CantBeDestroyed".to_string(), handle_cant_be_destroyed);
-    registry.insert("FlashBack".to_string(), handle_flashback);
-    registry.insert("Shroud".to_string(), handle_shroud);
-    registry.insert("Vigilance".to_string(), handle_static_vigilance);
-    registry.insert("Menace".to_string(), handle_static_menace);
-    registry.insert("Reach".to_string(), handle_static_reach);
-    registry.insert("Flying".to_string(), handle_static_flying);
-    registry.insert("Trample".to_string(), handle_static_trample);
-    registry.insert("Deathtouch".to_string(), handle_static_deathtouch);
-    registry.insert("Lifelink".to_string(), handle_static_lifelink);
-    registry.insert("CantTap".to_string(), handle_rule_mod);
-    registry.insert("CantUntap".to_string(), handle_rule_mod);
-    registry.insert("MustBeBlocked".to_string(), handle_rule_mod);
-    registry.insert("CantAttackAlone".to_string(), handle_rule_mod);
-    registry.insert("CantBlockAlone".to_string(), handle_rule_mod);
-    registry.insert("MayLookAtTopOfLibrary".to_string(), handle_rule_mod);
+    registry.insert(
+        StaticMode::Other("Indestructible".into()),
+        handle_indestructible,
+    );
+    registry.insert(
+        StaticMode::Other("CantBeCountered".into()),
+        handle_cant_be_countered,
+    );
+    registry.insert(
+        StaticMode::Other("CantBeDestroyed".into()),
+        handle_cant_be_destroyed,
+    );
+    registry.insert(StaticMode::Other("FlashBack".into()), handle_flashback);
+    registry.insert(StaticMode::Other("Shroud".into()), handle_shroud);
+    registry.insert(
+        StaticMode::Other("Vigilance".into()),
+        handle_static_vigilance,
+    );
+    registry.insert(StaticMode::Other("Menace".into()), handle_static_menace);
+    registry.insert(StaticMode::Other("Reach".into()), handle_static_reach);
+    registry.insert(StaticMode::Other("Flying".into()), handle_static_flying);
+    registry.insert(StaticMode::Other("Trample".into()), handle_static_trample);
+    registry.insert(
+        StaticMode::Other("Deathtouch".into()),
+        handle_static_deathtouch,
+    );
+    registry.insert(StaticMode::Other("Lifelink".into()), handle_static_lifelink);
+    registry.insert(StaticMode::Other("CantTap".into()), handle_rule_mod);
+    registry.insert(StaticMode::Other("CantUntap".into()), handle_rule_mod);
+    registry.insert(StaticMode::Other("MustBeBlocked".into()), handle_rule_mod);
+    registry.insert(StaticMode::Other("CantAttackAlone".into()), handle_rule_mod);
+    registry.insert(StaticMode::Other("CantBlockAlone".into()), handle_rule_mod);
+    registry.insert(
+        StaticMode::Other("MayLookAtTopOfLibrary".into()),
+        handle_rule_mod,
+    );
 
     // Stub modes -- recognized but no-op until needed
     let stubs = [
@@ -114,7 +136,7 @@ pub fn build_static_registry() -> HashMap<String, StaticAbilityHandler> {
         "ChangesZoneAll",
     ];
     for mode in &stubs {
-        registry.insert(mode.to_string(), handle_stub);
+        registry.insert(StaticMode::Other((*mode).into()), handle_stub);
     }
 
     registry
@@ -328,6 +350,7 @@ fn handle_stub(
 /// Scans battlefield objects for static_definitions matching the mode,
 /// then checks if the static's condition applies.
 pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheckContext) -> bool {
+    let target_mode: StaticMode = mode.parse().unwrap();
     for &id in &state.battlefield {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
@@ -335,7 +358,7 @@ pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheck
         };
 
         for def in &obj.static_definitions {
-            if def.mode_str() != mode {
+            if def.mode != target_mode {
                 continue;
             }
 
@@ -649,7 +672,7 @@ mod tests {
         let state = setup();
         let params = HashMap::new();
 
-        for mode in &[
+        for mode_str in &[
             "Indestructible",
             "CantBeCountered",
             "CantBeDestroyed",
@@ -663,14 +686,15 @@ mod tests {
             "Lifelink",
             "Shroud",
         ] {
+            let mode_key = StaticMode::Other((*mode_str).into());
             let handler = registry
-                .get(*mode)
-                .unwrap_or_else(|| panic!("{} should be in registry", mode));
+                .get(&mode_key)
+                .unwrap_or_else(|| panic!("{} should be in registry", mode_str));
             let effects = handler(&state, &params, ObjectId(1));
             assert!(
                 !effects.is_empty(),
                 "{} should return non-empty effects (no longer a stub)",
-                mode
+                mode_str
             );
         }
     }

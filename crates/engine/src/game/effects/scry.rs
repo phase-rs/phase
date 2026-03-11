@@ -1,4 +1,4 @@
-use crate::types::ability::{Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -29,7 +29,7 @@ pub fn resolve(
     let count = scry_num.min(player.library.len());
     if count == 0 {
         events.push(GameEvent::EffectResolved {
-            api_type: ability.api_type().to_string(),
+            api_type: effect_variant_name(&ability.effect).to_string(),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -44,7 +44,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type().to_string(),
+        api_type: effect_variant_name(&ability.effect).to_string(),
         source_id: ability.source_id,
     });
 

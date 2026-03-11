@@ -161,7 +161,12 @@ pub fn resolve_ability_chain(
     if let Some(svar_name) = sub_key {
         if let Some(raw_ability) = ability.svars.get(svar_name) {
             if let Ok(def) = parse_ability(raw_ability) {
-                let params = def.params();
+                let mut params = def.effect.to_params();
+                params.extend(
+                    def.remaining_params
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
                 let mut sub_resolved = ResolvedAbility {
                     effect: def.effect.clone(),
                     params,

@@ -31,9 +31,7 @@ fn main() {
         eprintln!();
         eprintln!("Flags:");
         eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
-        eprintln!(
-            "  --json  Load cards via JSON (mtgjson + abilities) instead of .txt files"
-        );
+        eprintln!("  --json  Load cards via JSON (mtgjson + abilities) instead of .txt files");
         eprintln!();
         eprintln!("Outputting empty coverage summary to stdout.");
         let empty = CoverageSummary {

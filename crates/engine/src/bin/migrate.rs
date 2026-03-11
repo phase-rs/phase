@@ -43,7 +43,7 @@ fn card_rules_to_ability_file(rules: &CardRules) -> AbilityFile {
         },
         CardLayout::Specialize(base, variants) => {
             let mut faces = vec![face_to_abilities(base)];
-            faces.extend(variants.iter().map(|v| face_to_abilities(v)));
+            faces.extend(variants.iter().map(face_to_abilities));
             AbilityFile {
                 schema: Some("schema.json".to_string()),
                 abilities: vec![],

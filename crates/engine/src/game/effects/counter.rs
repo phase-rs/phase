@@ -1,8 +1,9 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// Counter target spells on the stack.
@@ -33,7 +34,7 @@ pub fn resolve(
                 .map(|obj| {
                     obj.static_definitions
                         .iter()
-                        .any(|sd| sd.mode_str() == "CantBeCountered")
+                        .any(|sd| sd.mode == StaticMode::Other("CantBeCountered".into()))
                 })
                 .unwrap_or(false);
             if has_cant_be_countered {
@@ -55,7 +56,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type().to_string(),
+        api_type: effect_variant_name(&ability.effect).to_string(),
         source_id: ability.source_id,
     });
 

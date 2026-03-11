@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -24,7 +24,7 @@ pub fn resolve(
     attach_to(state, source_id, target_id);
 
     events.push(GameEvent::EffectResolved {
-        api_type: "Attach".to_string(),
+        api_type: effect_variant_name(&ability.effect).to_string(),
         source_id,
     });
 

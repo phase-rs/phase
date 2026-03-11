@@ -5,11 +5,14 @@ use std::str::FromStr;
 use crate::database::CardDatabase;
 use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
-use crate::game::static_abilities::build_static_registry;
+use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
 use crate::parser::ability::parse_ability;
-use crate::types::ability::{AbilityDefinition, StaticDefinition, TriggerDefinition};
+use crate::types::ability::{
+    effect_variant_name, AbilityDefinition, StaticDefinition, TriggerDefinition,
+};
 use crate::types::keywords::Keyword;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +49,7 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
 
     // 2. Check abilities against known effect types
     for def in &obj.abilities {
-        let api = def.api_type();
+        let api = effect_variant_name(&def.effect);
         if !api.is_empty() && !is_known_effect(api) {
             return true;
         }
@@ -65,7 +68,7 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     // 4. Check static ability modes against static registry
     let static_registry = build_static_registry();
     for stat in &obj.static_definitions {
-        if !static_registry.contains_key(&stat.mode_str()) {
+        if !static_registry.contains_key(&stat.mode) {
             return true;
         }
     }
@@ -107,7 +110,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             for svar_val in face.svars.values() {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
-                        let api = def.api_type();
+                        let api = effect_variant_name(&def.effect);
                         if !api.is_empty() && !is_known_effect(api) {
                             let label = format!("Effect:{api}");
                             if !missing.contains(&label) {
@@ -155,7 +158,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
 fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
     for def in abilities {
-        let api = def.api_type();
+        let api = effect_variant_name(&def.effect);
         if !api.is_empty() && !is_known_effect(api) {
             let label = format!("Effect:{api}");
             if !missing.contains(&label) {
@@ -195,11 +198,11 @@ fn check_keywords(keywords: &[String], missing: &mut Vec<String>) {
 
 fn check_statics(
     statics: &[StaticDefinition],
-    static_registry: &HashMap<String, crate::game::static_abilities::StaticAbilityHandler>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     missing: &mut Vec<String>,
 ) {
     for def in statics {
-        if !static_registry.contains_key(&def.mode_str()) {
+        if !static_registry.contains_key(&def.mode) {
             let label = format!("Static:{}", def.mode);
             if !missing.contains(&label) {
                 missing.push(label);

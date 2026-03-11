@@ -583,6 +583,52 @@ fn insert_target_spec(params: &mut HashMap<String, String>, key: &str, spec: &Ta
     params.insert(key.to_string(), value);
 }
 
+/// Returns the human-readable variant name for an Effect.
+/// Production API for GameEvent::EffectResolved api_type strings and logging.
+pub fn effect_variant_name(effect: &Effect) -> &str {
+    match effect {
+        Effect::DealDamage { .. } => "DealDamage",
+        Effect::Draw { .. } => "Draw",
+        Effect::Pump { .. } => "Pump",
+        Effect::Destroy { .. } => "Destroy",
+        Effect::Counter { .. } => "Counter",
+        Effect::Token { .. } => "Token",
+        Effect::GainLife { .. } => "GainLife",
+        Effect::LoseLife { .. } => "LoseLife",
+        Effect::Tap { .. } => "Tap",
+        Effect::Untap { .. } => "Untap",
+        Effect::AddCounter { .. } => "AddCounter",
+        Effect::RemoveCounter { .. } => "RemoveCounter",
+        Effect::Sacrifice { .. } => "Sacrifice",
+        Effect::DiscardCard { .. } => "DiscardCard",
+        Effect::Mill { .. } => "Mill",
+        Effect::Scry { .. } => "Scry",
+        Effect::PumpAll { .. } => "PumpAll",
+        Effect::DamageAll { .. } => "DamageAll",
+        Effect::DestroyAll { .. } => "DestroyAll",
+        Effect::ChangeZone { .. } => "ChangeZone",
+        Effect::ChangeZoneAll { .. } => "ChangeZoneAll",
+        Effect::Dig { .. } => "Dig",
+        Effect::GainControl { .. } => "GainControl",
+        Effect::Attach { .. } => "Attach",
+        Effect::Surveil { .. } => "Surveil",
+        Effect::Fight { .. } => "Fight",
+        Effect::Bounce { .. } => "Bounce",
+        Effect::Explore => "Explore",
+        Effect::Proliferate => "Proliferate",
+        Effect::CopySpell { .. } => "CopySpell",
+        Effect::ChooseCard { .. } => "ChooseCard",
+        Effect::PutCounter { .. } => "PutCounter",
+        Effect::MultiplyCounter { .. } => "MultiplyCounter",
+        Effect::Animate { .. } => "Animate",
+        Effect::GenericEffect { .. } => "Effect",
+        Effect::Cleanup { .. } => "Cleanup",
+        Effect::Mana { .. } => "Mana",
+        Effect::Discard { .. } => "Discard",
+        Effect::Other { api_type, .. } => api_type,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ability kinds
 // ---------------------------------------------------------------------------

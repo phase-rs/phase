@@ -571,9 +571,7 @@ pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> 
     let mut mana_parts: Vec<String> = Vec::new();
 
     for comp in &components {
-        if comp == "T" {
-            costs.push(AbilityCost::Tap);
-        } else if comp == "Untap" || comp == "Q" {
+        if comp == "T" || comp == "Untap" || comp == "Q" {
             costs.push(AbilityCost::Tap);
         } else if let Some(amount) = parse_loyalty(comp) {
             costs.push(AbilityCost::Loyalty { amount });

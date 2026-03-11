@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 /// Tracks the state of the current combat phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -151,7 +152,7 @@ pub fn validate_blockers(
         if attacker
             .static_definitions
             .iter()
-            .any(|sd| sd.mode_str() == "CantBeBlocked")
+            .any(|sd| sd.mode == StaticMode::Other("CantBeBlocked".into()))
         {
             return Err(format!(
                 "{:?} cannot block {:?} (can't be blocked)",
@@ -381,7 +382,7 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
     if attacker
         .static_definitions
         .iter()
-        .any(|sd| sd.mode_str() == "CantBeBlocked")
+        .any(|sd| sd.mode == StaticMode::Other("CantBeBlocked".into()))
     {
         return false;
     }
