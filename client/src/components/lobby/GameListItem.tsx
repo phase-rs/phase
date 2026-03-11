@@ -1,14 +1,33 @@
+import type { GameFormat } from "../../adapter/types";
+
 interface LobbyGame {
   game_code: string;
   host_name: string;
   created_at: number;
   has_password: boolean;
+  format?: GameFormat;
+  current_players?: number;
+  max_players?: number;
 }
 
 interface GameListItemProps {
   game: LobbyGame;
   onJoin: (code: string) => void;
 }
+
+const FORMAT_BADGE_CLASSES: Record<GameFormat, string> = {
+  Standard: "bg-blue-500/20 text-blue-300",
+  Commander: "bg-indigo-500/20 text-indigo-300",
+  FreeForAll: "bg-amber-500/20 text-amber-300",
+  TwoHeadedGiant: "bg-emerald-500/20 text-emerald-300",
+};
+
+const FORMAT_LABELS: Record<GameFormat, string> = {
+  Standard: "STD",
+  Commander: "CMD",
+  FreeForAll: "FFA",
+  TwoHeadedGiant: "2HG",
+};
 
 function formatWaitTime(createdAt: number): string {
   const now = Math.floor(Date.now() / 1000);
@@ -21,18 +40,34 @@ function formatWaitTime(createdAt: number): string {
 }
 
 export function GameListItem({ game, onJoin }: GameListItemProps) {
+  const format = game.format ?? "Standard";
+  const badgeClass = FORMAT_BADGE_CLASSES[format];
+  const formatLabel = FORMAT_LABELS[format];
+
   return (
     <button
       onClick={() => onJoin(game.game_code)}
       className="flex w-full items-center gap-3 rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-3 text-left transition-colors hover:border-gray-500 hover:bg-gray-800"
     >
-      {/* Host name */}
+      {/* Format badge */}
+      <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
+        {formatLabel}
+      </span>
+
+      {/* Host name and metadata */}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-gray-200">
           {game.host_name || "Anonymous"}
         </p>
         <p className="text-xs text-gray-500">{formatWaitTime(game.created_at)}</p>
       </div>
+
+      {/* Player count */}
+      {game.max_players != null && (
+        <span className="flex-shrink-0 text-xs text-gray-400">
+          {game.current_players ?? 1}/{game.max_players}
+        </span>
+      )}
 
       {/* Lock icon for password-protected games */}
       {game.has_password && (

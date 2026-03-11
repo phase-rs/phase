@@ -30,6 +30,7 @@ function loadActiveDeck(): ParsedDeck | null {
   return JSON.parse(raw) as ParsedDeck;
 }
 
+type ConnectionMode = "server" | "p2p";
 type MultiplayerView = "deck-select" | "lobby" | "host-setup" | "waiting";
 
 const BACK_TARGETS: Record<MultiplayerView, string> = {
@@ -47,6 +48,7 @@ export function MultiplayerPage() {
 
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
   const [hostIsPublic, setHostIsPublic] = useState(true);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("server");
   const hostWsRef = useRef<WebSocket | null>(null);
 
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
@@ -106,6 +108,8 @@ export function MultiplayerPage() {
               public: settings.public,
               password: settings.password || null,
               timer_seconds: settings.timerSeconds,
+              format_config: settings.formatConfig,
+              ai_seats: settings.aiSeats,
             },
           }),
         );
@@ -225,8 +229,8 @@ export function MultiplayerPage() {
 
       {view === "lobby" && (
         <LobbyView
-          onHostGame={() => setView("host-setup")}
-          onHostP2P={handleHostP2P}
+          onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
+          onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
           onJoinGame={handleJoinWithPassword}
           activeDeckName={activeDeckName}
           onChangeDeck={() => setView("deck-select")}
@@ -235,8 +239,9 @@ export function MultiplayerPage() {
 
       {view === "host-setup" && (
         <HostSetup
-          onHost={handleHostWithSettings}
+          onHost={connectionMode === "p2p" ? () => handleHostP2P() : handleHostWithSettings}
           onBack={() => setView("lobby")}
+          connectionMode={connectionMode}
         />
       )}
 

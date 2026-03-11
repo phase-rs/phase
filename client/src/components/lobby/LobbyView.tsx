@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { GameFormat } from "../../adapter/types";
 import { parseJoinCode } from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -14,6 +15,14 @@ interface LobbyViewProps {
   onChangeDeck: () => void;
 }
 
+const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
+  { value: null, label: "All" },
+  { value: "Standard", label: "STD" },
+  { value: "Commander", label: "CMD" },
+  { value: "FreeForAll", label: "FFA" },
+  { value: "TwoHeadedGiant", label: "2HG" },
+];
+
 export function LobbyView({
   onHostGame,
   onHostP2P,
@@ -27,6 +36,7 @@ export function LobbyView({
   const [joinCode, setJoinCode] = useState("");
   const [passwordModal, setPasswordModal] = useState<{ gameCode: string } | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
+  const [formatFilter, setFormatFilter] = useState<GameFormat | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -111,6 +121,10 @@ export function LobbyView({
     }
   }, [passwordModal, passwordInput, onJoinGame]);
 
+  const filteredGames = formatFilter
+    ? games.filter((g) => (g.format ?? "Standard") === formatFilter)
+    : games;
+
   return (
     <div className="relative z-10 flex w-full max-w-lg flex-col items-center gap-6 px-4">
       {/* Header */}
@@ -137,9 +151,26 @@ export function LobbyView({
         </button>
       </div>
 
+      {/* Format filter */}
+      <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
+        {FORMAT_FILTERS.map((opt) => (
+          <button
+            key={opt.label}
+            onClick={() => setFormatFilter(opt.value)}
+            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+              formatFilter === opt.value
+                ? "bg-cyan-600 text-white"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
       {/* Game list */}
       <div className="w-full">
-        {games.length === 0 ? (
+        {filteredGames.length === 0 ? (
           <div className="rounded-lg border border-dashed border-gray-700 py-8 text-center">
             <p className="text-sm text-gray-500">
               No games available. Host one or join by code!
@@ -147,7 +178,7 @@ export function LobbyView({
           </div>
         ) : (
           <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
-            {games.map((game) => (
+            {filteredGames.map((game) => (
               <GameListItem
                 key={game.game_code}
                 game={game}
