@@ -16,6 +16,7 @@ import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
 import type { ParsedDeck } from "../services/deckParser";
 import type { GamePreset } from "../services/presets";
+import { savePreset } from "../services/presets";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
@@ -122,6 +123,21 @@ export function GameSetupPage() {
     saveActiveGame({ id: gameId, mode: "ai", difficulty });
     useGameStore.setState({ gameId });
     navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}`);
+  };
+
+  const handleSavePreset = () => {
+    if (!selectedFormat || !formatConfig) return;
+    const name = prompt("Preset name:");
+    if (!name) return;
+    savePreset({
+      id: crypto.randomUUID(),
+      name,
+      format: selectedFormat,
+      formatConfig,
+      deckId: activeDeckName,
+      aiDifficulty: difficulty,
+      playerCount,
+    });
   };
 
   const handlePresetSelect = (preset: GamePreset) => {
@@ -352,6 +368,7 @@ export function GameSetupPage() {
             difficulty={difficulty}
             onDifficultyChange={setDifficulty}
             onStartGame={handleDeckConfirm}
+            format={selectedFormat ?? undefined}
           />
         )}
 
@@ -414,6 +431,13 @@ export function GameSetupPage() {
                   P2P not available for 3+ player games
                 </p>
               )}
+
+              <button
+                onClick={handleSavePreset}
+                className="mt-2 text-xs text-gray-500 transition-colors hover:text-gray-300"
+              >
+                Save as Preset
+              </button>
             </div>
           </div>
         )}

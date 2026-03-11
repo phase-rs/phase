@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../../constants/storage";
+import { COMMANDER_PRECONS } from "../../data/commanderPrecons";
 import { STARTER_DECKS } from "../../data/starterDecks";
 import { useCardImage } from "../../hooks/useCardImage";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { menuButtonClass } from "./buttonStyles";
+import type { GameFormat } from "../../adapter/types";
 import type { ParsedDeck } from "../../services/deckParser";
 
 const DIFFICULTIES = [
@@ -25,6 +27,23 @@ const COLOR_DOT_CLASS: Record<string, string> = {
   G: "bg-green-500",
 };
 
+const PRECON_PREFIX = "[Pre-built] ";
+
+const PRECON_NAMES = new Set(COMMANDER_PRECONS.map((p) => PRECON_PREFIX + p.name));
+
+function seedCommanderPrecons(): void {
+  for (const precon of COMMANDER_PRECONS) {
+    const key = STORAGE_KEY_PREFIX + PRECON_PREFIX + precon.name;
+    if (localStorage.getItem(key)) continue;
+    const deck: ParsedDeck = {
+      main: precon.cards,
+      sideboard: [],
+      commander: [precon.commander],
+    };
+    localStorage.setItem(key, JSON.stringify(deck));
+  }
+}
+
 interface DeckGalleryProps {
   onSelectDeck: (deckName: string) => void;
   activeDeckName: string | null;
@@ -32,6 +51,7 @@ interface DeckGalleryProps {
   difficulty: string;
   onDifficultyChange: (d: string) => void;
   onStartGame: () => void;
+  format?: GameFormat;
 }
 
 function getDeckColorIdentity(deckName: string): string[] {
@@ -46,11 +66,14 @@ function getDeckCardCount(deckName: string): number {
   return deck.main.reduce((sum, e) => sum + e.count, 0);
 }
 
-/** Find the first non-basic-land card name in a deck for art display. */
+/** Find the representative card for art display. Prefers commander, then first non-basic. */
 function getRepresentativeCard(deckName: string): string | null {
   const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
   if (!raw) return null;
   const deck = JSON.parse(raw) as ParsedDeck;
+  if (deck.commander && deck.commander.length > 0) {
+    return deck.commander[0];
+  }
   const entry = deck.main.find((e) => !BASIC_LANDS.has(e.name));
   return entry?.name ?? null;
 }
@@ -80,13 +103,17 @@ export function DeckGallery({
   difficulty,
   onDifficultyChange,
   onStartGame,
+  format,
 }: DeckGalleryProps) {
   const [deckNames, setDeckNames] = useState<string[]>([]);
   const [showImport, setShowImport] = useState(false);
 
   useEffect(() => {
+    if (format === "Commander") {
+      seedCommanderPrecons();
+    }
     setDeckNames(listSavedDeckNames());
-  }, []);
+  }, [format]);
 
   // Restore last-used deck on mount
   useEffect(() => {
@@ -133,6 +160,8 @@ export function DeckGallery({
           const colors = getDeckColorIdentity(name);
           const count = getDeckCardCount(name);
           const representativeCard = getRepresentativeCard(name);
+          const isPrecon = PRECON_NAMES.has(name);
+          const displayName = isPrecon ? name.slice(PRECON_PREFIX.length) : name;
 
           return (
             <button
@@ -146,8 +175,14 @@ export function DeckGallery({
             >
               <DeckArtTile cardName={representativeCard} />
 
+              {isPrecon && (
+                <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+                  Pre-built
+                </span>
+              )}
+
               <div className="relative z-10 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-3 pb-3 pt-8">
-                <p className="text-sm font-semibold text-white">{name}</p>
+                <p className="text-sm font-semibold text-white">{displayName}</p>
                 <div className="mt-1 flex items-center gap-2">
                   <div className="flex gap-1">
                     {colors.map((c) => (

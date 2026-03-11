@@ -19,6 +19,7 @@ data/*
 !data/mtgjson/
 data/mtgjson/AtomicCards.json
 !data/abilities/
+!data/precons/
 
 # OS
 .DS_Store
