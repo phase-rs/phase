@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 29-14-PLAN.md
-last_updated: "2026-03-11T18:37:00.658Z"
-last_activity: 2026-03-11 — Phase 29 Plan 15 complete (Remaining PlayerId(1-x) Migration)
+stopped_at: Completed 29-07-PLAN.md
+last_updated: "2026-03-11T19:09:29.114Z"
+last_activity: 2026-03-11 — Phase 29 Plan 09 complete (AI N-Player Threat Evaluation and Scaled Search)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 47
-  completed_plans: 39
+  completed_plans: 41
   percent: 81
 ---
 
@@ -70,6 +70,7 @@ Progress: [████████████████░░░░] 38/47 p
 | Phase 29 P16 | 2min | 1 tasks | 0 files |
 | Phase 29 P15 | 4min | 2 tasks | 1 files |
 | Phase 29 P14 | 4min | 1 tasks | 1 files |
+| Phase 29 P07 | 9min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -208,6 +209,9 @@ Recent decisions affecting current work:
 - [29-09]: choose_attackers_with_targets() as primary API; choose_attackers() backward-compat wrapper
 - [29-09]: Alpha-strike detection allocates smallest attackers first to just exceed lethal threshold
 - [29-09]: create_config_for_players() applies player-count scaling on top of platform scaling
+- [Phase 29]: PlayerArea creatureOverride prop keeps blocker sorting in GameBoard
+- [Phase 29]: buildAttacks defaults all attackers to first non-eliminated opponent; per-creature target selection in Plan 08
+- [Phase 29]: AttackTarget uses discriminated union { type, data } matching Rust serde output
 
 ### Roadmap Evolution
 
@@ -225,6 +229,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:38:31Z
-Stopped at: Completed 29-09-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-10-PLAN.md
+Last session: 2026-03-11T19:09:29.111Z
+Stopped at: Completed 29-07-PLAN.md
+Resume file: None
