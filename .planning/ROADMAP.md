@@ -181,3 +181,38 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
 | 25. Forge Removal & Relicensing | 3/3 | Complete   | 2026-03-11 | - |
 | 26. Multiplayer Polish | 6/6 | Complete   | 2026-03-11 | - |
+
+### Phase 27: Aura Casting, Triggered Ability Targeting, and "Until Leaves" Exile Return
+**Goal**: Implement full Aura spell support (targeting + attachment), triggered ability target selection, and "until source leaves the battlefield" exile return tracking
+**Depends on**: Phase 26
+**Success Criteria** (what must be TRUE):
+  1. Aura spells prompt the player for an enchant target during casting and attach to that target on resolution
+  2. Triggered abilities with ValidTgts prompt the player for target selection before going on the stack
+  3. Cards exiled with Duration$ UntilHostLeavesPlay return to the battlefield when the source leaves
+  4. General filter fallback in targeting.rs handles any Forge-style filter string (including nonLand, nonCreature patterns)
+  5. `cargo test --all` passes with new tests covering all three features
+
+Plans: TBD
+
+### Phase 28: Native Ability Data Model
+**Goal**: Eliminate all Forge scripting DSL from the card data format and engine runtime — every ability, trigger, static, replacement, and SVar chain expressed through fully typed Rust structures with zero HashMap<String, String> params, zero raw SVar strings, and zero runtime string parsing
+**Depends on**: Phase 27
+**Requirements**: NAT-01, NAT-02, NAT-03, NAT-04, NAT-05, NAT-06
+**Success Criteria** (what must be TRUE):
+  1. `TriggerDefinition`, `StaticDefinition`, and `ReplacementDefinition` use typed struct fields instead of `params: HashMap<String, String>`
+  2. `svars: HashMap<String, String>` eliminated from `CardFace` — SubAbility chains resolved at data-load time as typed structures
+  3. `remaining_params` field removed from `AbilityDefinition` — all parameters mapped to typed fields
+  4. `parser::ability::parse_ability()` gated behind `forge-compat` — zero Forge string parsing at runtime
+  5. All 32K `data/abilities/*.json` files migrated to native typed JSON schema
+  6. `cargo test --all` passes and `card-data.json` uses the new format
+**Plans**: 3 plans
+
+**Execution Order:**
+Wave 1: Plan 01 (type definitions + migration binary)
+Wave 2: Plan 02 (runtime consumer migration + struct cleanup)
+Wave 3: Plan 03 (data migration + validation)
+
+Plans:
+- [ ] 28-01-PLAN.md — Add typed fields to definition structs, replace Effect::Other, write migration binary
+- [ ] 28-02-PLAN.md — Migrate runtime consumers to typed fields, remove params/svars/remaining_params, gate parse_ability
+- [ ] 28-03-PLAN.md — Run 32K file migration, update json_loader, regenerate card-data.json, validate full suite
