@@ -1,5 +1,5 @@
 use crate::game::combat::has_summoning_sickness;
-use crate::game::coverage::has_unimplemented_mechanics;
+use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
@@ -9,7 +9,7 @@ use crate::types::game_state::GameState;
 ///
 /// This must be called by any consumer (WASM, Tauri, server) before
 /// serializing the state to the frontend. It sets:
-/// - `GameObject::has_unimplemented_mechanics`
+/// - `GameObject::unimplemented_mechanics`
 /// - `GameObject::has_summoning_sickness`
 /// - `GameObject::devotion` (for Theros gods pattern)
 /// - `Player::can_look_at_top_of_library`
@@ -17,7 +17,7 @@ pub fn derive_display_state(state: &mut GameState) {
     let turn = state.turn_number;
 
     for obj in state.objects.values_mut() {
-        obj.has_unimplemented_mechanics = has_unimplemented_mechanics(obj);
+        obj.unimplemented_mechanics = unimplemented_mechanics(obj);
         obj.has_summoning_sickness = has_summoning_sickness(obj, turn);
     }
 
@@ -137,7 +137,7 @@ mod tests {
 
         // Should have set the flag (false for a card with no mechanics)
         let obj = &state.objects[&id];
-        assert!(!obj.has_unimplemented_mechanics);
+        assert!(obj.unimplemented_mechanics.is_empty());
     }
 
     #[test]

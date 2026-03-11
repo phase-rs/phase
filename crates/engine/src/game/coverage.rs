@@ -34,21 +34,21 @@ pub struct CoverageSummary {
 /// Checks keywords (Unknown variant = unrecognized), abilities (api_type
 /// not in effect registry), triggers (mode not in trigger registry), and
 /// static abilities (mode not in static registry).
-pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
+pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
+    let mut missing = Vec::new();
+
     // 1. Any Unknown keyword means the parser didn't recognize it
-    if obj
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::Unknown(_)))
-    {
-        return true;
+    for kw in &obj.keywords {
+        if let Keyword::Unknown(s) = kw {
+            missing.push(format!("Keyword: {s}"));
+        }
     }
 
     // 2. Check abilities against known effect types
     for def in &obj.abilities {
         let api = effect_variant_name(&def.effect);
         if !api.is_empty() && !is_known_effect(api) {
-            return true;
+            missing.push(format!("Effect: {api}"));
         }
     }
 
@@ -58,7 +58,7 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || !trigger_registry.contains_key(&trig.mode)
         {
-            return true;
+            missing.push(format!("Trigger: {}", trig.mode));
         }
     }
 
@@ -66,11 +66,11 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     let static_registry = build_static_registry();
     for stat in &obj.static_definitions {
         if !static_registry.contains_key(&stat.mode) {
-            return true;
+            missing.push(format!("Static: {}", stat.mode));
         }
     }
 
-    false
+    missing
 }
 
 /// Analyze Standard-legal card coverage by checking which cards have
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn vanilla_object_has_no_unimplemented_mechanics() {
         let obj = make_obj();
-        assert!(!has_unimplemented_mechanics(&obj));
+        assert!(unimplemented_mechanics(&obj).is_empty());
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         let mut obj = make_obj();
         obj.keywords.push(Keyword::Flying);
         obj.keywords.push(Keyword::Haste);
-        assert!(!has_unimplemented_mechanics(&obj));
+        assert!(unimplemented_mechanics(&obj).is_empty());
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         let mut obj = make_obj();
         obj.keywords
             .push(Keyword::Unknown("FutureKeyword".to_string()));
-        assert!(has_unimplemented_mechanics(&obj));
+        assert!(!unimplemented_mechanics(&obj).is_empty());
     }
 
     #[cfg(feature = "forge-compat")]
@@ -411,7 +411,7 @@ mod tests {
         let mut obj = make_obj();
         obj.abilities
             .push(parse_test_ability("SP$ DealDamage | Cost$ R | NumDmg$ 3"));
-        assert!(!has_unimplemented_mechanics(&obj));
+        assert!(unimplemented_mechanics(&obj).is_empty());
     }
 
     #[cfg(feature = "forge-compat")]
@@ -420,7 +420,7 @@ mod tests {
         let mut obj = make_obj();
         obj.abilities
             .push(parse_test_ability("SP$ Fateseal | Cost$ U | Amount$ 2"));
-        assert!(has_unimplemented_mechanics(&obj));
+        assert!(!unimplemented_mechanics(&obj).is_empty());
     }
 
     #[test]

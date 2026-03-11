@@ -134,7 +134,7 @@ export function PlayerHand() {
               key={obj.id}
               objectId={obj.id}
               cardName={obj.name}
-              hasUnimplementedMechanics={obj.has_unimplemented_mechanics}
+              unimplementedMechanics={obj.unimplemented_mechanics}
               index={i}
               handSize={handObjects.length}
               rotation={rotation}
@@ -160,7 +160,7 @@ export function PlayerHand() {
 interface HandCardProps {
   objectId: number;
   cardName: string;
-  hasUnimplementedMechanics?: boolean;
+  unimplementedMechanics?: string[];
   index: number;
   handSize: number;
   rotation: number;
@@ -180,7 +180,7 @@ interface HandCardProps {
 function HandCard({
   objectId,
   cardName,
-  hasUnimplementedMechanics,
+  unimplementedMechanics,
   index,
   handSize,
   rotation,
@@ -261,7 +261,7 @@ function HandCard({
       }}
       {...longPressHandlers}
     >
-      <CardImage cardName={cardName} size="normal" hasUnimplementedMechanics={hasUnimplementedMechanics} className="!w-[calc(var(--card-w)*1.3)] !h-[calc(var(--card-h)*1.3)]" />
+      <CardImage cardName={cardName} size="normal" unimplementedMechanics={unimplementedMechanics} className="!w-[calc(var(--card-w)*1.3)] !h-[calc(var(--card-h)*1.3)]" />
     </motion.div>
   );
 }

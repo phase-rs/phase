@@ -115,7 +115,7 @@ export interface GameObject {
   base_color: ManaColor[];
   timestamp: number;
   entered_battlefield_turn: number | null;
-  has_unimplemented_mechanics?: boolean;
+  unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;
   devotion?: number;
   back_face?: {

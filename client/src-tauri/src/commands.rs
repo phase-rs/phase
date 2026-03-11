@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use engine::game::combat::has_summoning_sickness;
-use engine::game::coverage::has_unimplemented_mechanics;
+use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::apply;
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
@@ -54,7 +54,7 @@ pub fn get_game_state(state: tauri::State<AppState>) -> Result<GameState, String
     // Compute derived fields (same as WASM bridge)
     let turn = game.turn_number;
     for obj in game.objects.values_mut() {
-        obj.has_unimplemented_mechanics = has_unimplemented_mechanics(obj);
+        obj.unimplemented_mechanics = unimplemented_mechanics(obj);
         obj.has_summoning_sickness = has_summoning_sickness(obj, turn);
     }
 

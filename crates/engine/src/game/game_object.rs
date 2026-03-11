@@ -89,9 +89,9 @@ pub struct GameObject {
     // Summoning sickness
     pub entered_battlefield_turn: Option<u32>,
 
-    // Coverage flag (computed for serialization, not persisted)
-    #[serde(skip_deserializing, default)]
-    pub has_unimplemented_mechanics: bool,
+    // Coverage: lists unimplemented mechanics (computed for serialization, not persisted)
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub unimplemented_mechanics: Vec<String>,
 
     // Derived field: true when this creature can't attack/block due to summoning sickness.
     // Computed before serialization, not persisted.
@@ -144,7 +144,7 @@ impl GameObject {
             base_color: Vec::new(),
             timestamp: 0,
             entered_battlefield_turn: None,
-            has_unimplemented_mechanics: false,
+            unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             devotion: None,
             loyalty_activated_this_turn: false,
@@ -158,7 +158,7 @@ impl GameObject {
 
     /// Check if this object uses any mechanics the engine cannot handle.
     pub fn has_unimplemented_mechanics(&self) -> bool {
-        super::coverage::has_unimplemented_mechanics(self)
+        !super::coverage::unimplemented_mechanics(self).is_empty()
     }
 }
 
