@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Phase 25 context gathered
-last_updated: "2026-03-10T23:34:48.367Z"
-last_activity: 2026-03-10 — Completed Plan 24-03 (CI Coverage Gates)
+status: executing
+stopped_at: Completed 25-01-PLAN.md
+last_updated: "2026-03-11T00:14:17Z"
+last_activity: 2026-03-11 — Completed Plan 25-01 (Typed Dispatch Migration)
 progress:
   total_phases: 5
   completed_phases: 4
-  total_plans: 12
-  completed_plans: 12
-  percent: 100
+  total_plans: 15
+  completed_plans: 14
+  percent: 93
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 24 Card Migration — All 3 plans complete
+**Current focus:** Phase 25 Forge Removal & Relicensing — Plan 01 complete
 
 ## Current Position
 
-Phase: 24 (fourth of 5 in v1.2) — Card Migration
-Plan: 3/3 complete
-Status: Phase 24 complete
-Last activity: 2026-03-10 — Completed Plan 24-03 (CI Coverage Gates)
+Phase: 25 (fifth of 5 in v1.2) — Forge Removal & Relicensing
+Plan: 1/3 complete
+Status: Executing Phase 25
+Last activity: 2026-03-11 — Completed Plan 25-01 (Typed Dispatch Migration)
 
-Progress: [██████████] 100%
+Progress: [█████████░] 93%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 13 (v1.2)
+- Total plans completed: 14 (v1.2)
 - Average duration: 13min
-- Total execution time: 2.8 hours
+- Total execution time: 3.0 hours
 
 **By Phase:**
 
@@ -47,6 +47,7 @@ Progress: [██████████] 100%
 | 22 | 3/3 | 35min | 12min |
 | 23 | 2/2 | 18min | 9min |
 | 24 | 3/3 | 43min | 14min |
+| 25 | 1/3 | 13min | 13min |
 
 ## Accumulated Context
 
@@ -98,6 +99,13 @@ Recent decisions affecting current work:
 - [24-03]: Benign MTGJSON keyword mismatches stripped in coverage binary (bare parameterized keywords, action keywords like Scry/Mill)
 - [24-03]: Coverage manifest filtering applied after analyze_standard_coverage() -- binary-local logic, coverage.rs unchanged
 - [24-03]: MTGJSON action keywords (Scry, Mill, Surveil, Fateseal) excluded from coverage since handled as effects, not keywords
+- [25-01]: effect_variant_name() as standalone function for production variant-to-string mapping (not a method on Effect)
+- [25-01]: Effect::to_params() stays ungated -- legitimate typed-to-HashMap serialization for SubAbility chains
+- [25-01]: Test code retains compat bridge methods (api_type, params, from_raw) -- gated in Plan 02
+
+### Roadmap Evolution
+
+- Phase 26 added: Polish and fix multi-player with lobby and embedded server
 
 ### Pending Todos
 
@@ -109,6 +117,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T23:34:48.362Z
-Stopped at: Phase 25 context gathered
-Resume file: .planning/phases/25-forge-removal-relicensing/25-CONTEXT.md
+Last session: 2026-03-11T00:14:17Z
+Stopped at: Completed 25-01-PLAN.md
+Resume file: .planning/phases/25-forge-removal-relicensing/25-01-SUMMARY.md
