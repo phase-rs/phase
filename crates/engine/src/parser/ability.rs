@@ -1,4 +1,4 @@
-use crate::types::ability::TargetSpec;
+use crate::types::ability::TargetFilter;
 
 use super::ParseError;
 
@@ -56,6 +56,35 @@ fn parse_loyalty(s: &str) -> Option<i32> {
     None
 }
 
+/// Parse a mana string component into a ManaCost.
+fn parse_mana_string(s: &str) -> crate::types::mana::ManaCost {
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    let mut shards = Vec::new();
+    let mut generic = 0u32;
+
+    for part in s.split_whitespace() {
+        if let Ok(n) = part.parse::<u32>() {
+            generic += n;
+        } else {
+            for ch in part.chars() {
+                match ch {
+                    'W' => shards.push(ManaCostShard::White),
+                    'U' => shards.push(ManaCostShard::Blue),
+                    'B' => shards.push(ManaCostShard::Black),
+                    'R' => shards.push(ManaCostShard::Red),
+                    'G' => shards.push(ManaCostShard::Green),
+                    'C' => shards.push(ManaCostShard::Colorless),
+                    'X' => shards.push(ManaCostShard::X),
+                    _ => generic += 1,
+                }
+            }
+        }
+    }
+
+    ManaCost::Cost { shards, generic }
+}
+
 /// Parse a single cost component into an AbilityCost.
 fn parse_single_cost(comp: &str) -> crate::types::ability::AbilityCost {
     use crate::types::ability::AbilityCost;
@@ -75,19 +104,19 @@ fn parse_single_cost(comp: &str) -> crate::types::ability::AbilityCost {
     // Sacrifice: Sac<...>
     if comp.starts_with("Sac<") {
         return AbilityCost::Sacrifice {
-            target: TargetSpec::None,
+            target: TargetFilter::None,
         };
     }
     // Known mana symbols: single digits, color letters, hybrid (e.g. "WB"), X
     // Anything simple and alphanumeric that looks like mana
     if is_mana_component(comp) {
         return AbilityCost::Mana {
-            cost: comp.to_string(),
+            cost: parse_mana_string(comp),
         };
     }
     // Unknown: preserve as Mana fallback to retain data
     AbilityCost::Mana {
-        cost: comp.to_string(),
+        cost: parse_mana_string(comp),
     }
 }
 
@@ -141,14 +170,16 @@ pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> 
             costs.push(AbilityCost::Loyalty { amount });
         } else if comp.starts_with("Sac<") {
             costs.push(AbilityCost::Sacrifice {
-                target: TargetSpec::None,
+                target: TargetFilter::None,
             });
         } else if is_mana_component(comp) {
             mana_parts.push(comp.clone());
         } else {
             // Unknown non-mana component (e.g. PayLife<2>, Discard<1/Card>, tapXType<...>)
             // Preserve as Mana fallback
-            costs.push(AbilityCost::Mana { cost: comp.clone() });
+            costs.push(AbilityCost::Mana {
+                cost: parse_mana_string(comp),
+            });
         }
     }
 
@@ -157,7 +188,7 @@ pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> 
         costs.insert(
             0,
             AbilityCost::Mana {
-                cost: mana_parts.join(" "),
+                cost: parse_mana_string(&mana_parts.join(" ")),
             },
         );
     }
@@ -211,10 +242,10 @@ fn parse_params(raw: &str) -> HashMap<String, String> {
 #[cfg(feature = "forge-compat")]
 fn parse_target_spec(value: &str) -> TargetSpec {
     match value {
-        "Any" => TargetSpec::Any,
-        "Player" => TargetSpec::Player,
-        "Player.You" => TargetSpec::Controller,
-        "" => TargetSpec::None,
+        "Any" => TargetFilter::Any,
+        "Player" => TargetFilter::Player,
+        "Player.You" => TargetFilter::Controller,
+        "" => TargetFilter::None,
         filter => TargetSpec::Filtered {
             filter: filter.to_string(),
         },
@@ -237,7 +268,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::DealDamage { amount, target }
         }
         "Draw" => {
@@ -259,7 +290,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Pump {
                 power,
                 toughness,
@@ -270,14 +301,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Destroy { target }
         }
         "Counter" => {
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Counter { target }
         }
         "Token" => {
@@ -329,14 +360,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Tap { target }
         }
         "Untap" => {
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Untap { target }
         }
         "AddCounter" | "PutCounter" => {
@@ -348,7 +379,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             if api_type == "PutCounter" {
                 Effect::PutCounter {
                     counter_type,
@@ -372,7 +403,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::RemoveCounter {
                 counter_type,
                 count,
@@ -383,7 +414,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Sacrifice { target }
         }
         "DiscardCard" => {
@@ -394,7 +425,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::DiscardCard { count, target }
         }
         "Discard" => {
@@ -405,7 +436,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Discard { count, target }
         }
         "Mill" => {
@@ -416,7 +447,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Mill { count, target }
         }
         "Scry" => {
@@ -479,7 +510,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::ChangeZone {
                 origin,
                 destination,
@@ -513,14 +544,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::GainControl { target }
         }
         "Attach" => {
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Attach { target }
         }
         "Surveil" => {
@@ -535,14 +566,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Fight { target }
         }
         "Bounce" => {
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             let destination = params.remove("Destination").unwrap_or_default();
             Effect::Bounce {
                 target,
@@ -555,7 +586,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::CopySpell { target }
         }
         "ChooseCard" => {
@@ -566,7 +597,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::ChooseCard { choices, target }
         }
         "MultiplyCounter" => {
@@ -578,7 +609,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::MultiplyCounter {
                 counter_type,
                 multiplier,
@@ -595,7 +626,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             let target = params
                 .remove("ValidTgts")
                 .map(|v| parse_target_spec(&v))
-                .unwrap_or(TargetSpec::Any);
+                .unwrap_or(TargetFilter::Any);
             Effect::Animate {
                 power,
                 toughness,
@@ -707,138 +738,127 @@ pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError>
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+    use crate::types::ability::AbilityCost;
+    use crate::types::mana::{ManaCost, ManaCostShard};
 
     #[test]
     fn parse_cost_tap_only() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("T").unwrap();
         assert_eq!(cost, AbilityCost::Tap);
     }
 
     #[test]
     fn parse_cost_mana_simple() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("3 W").unwrap();
         assert_eq!(
             cost,
             AbilityCost::Mana {
-                cost: "3 W".to_string()
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 3,
+                }
             }
         );
     }
 
     #[test]
     fn parse_cost_mana_single() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("R").unwrap();
         assert_eq!(
             cost,
             AbilityCost::Mana {
-                cost: "R".to_string()
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                }
             }
         );
     }
 
     #[test]
     fn parse_cost_loyalty_add() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("AddCounter<2/LOYALTY>").unwrap();
         assert_eq!(cost, AbilityCost::Loyalty { amount: 2 });
     }
 
     #[test]
     fn parse_cost_loyalty_sub() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("SubCounter<1/LOYALTY>").unwrap();
         assert_eq!(cost, AbilityCost::Loyalty { amount: -1 });
     }
 
     #[test]
     fn parse_cost_loyalty_zero() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("AddCounter<0/LOYALTY>").unwrap();
         assert_eq!(cost, AbilityCost::Loyalty { amount: 0 });
     }
 
     #[test]
     fn parse_cost_sacrifice() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("Sac<1/CARDNAME>").unwrap();
         assert_eq!(
             cost,
             AbilityCost::Sacrifice {
-                target: TargetSpec::None
+                target: TargetFilter::None
             }
         );
     }
 
     #[test]
     fn parse_cost_composite_mana_and_tap() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("2 T").unwrap();
-        assert_eq!(
-            cost,
-            AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Mana {
-                        cost: "2".to_string()
-                    },
-                    AbilityCost::Tap,
-                ]
+        match cost {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+                assert_eq!(costs[1], AbilityCost::Tap);
             }
-        );
+            _ => panic!("Expected Composite"),
+        }
     }
 
     #[test]
     fn parse_cost_composite_mana_and_sacrifice() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("R Sac<1/CARDNAME>").unwrap();
-        assert_eq!(
-            cost,
-            AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Mana {
-                        cost: "R".to_string()
-                    },
+        match cost {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    &costs[1],
                     AbilityCost::Sacrifice {
-                        target: TargetSpec::None
-                    },
-                ]
+                        target: TargetFilter::None
+                    }
+                ));
             }
-        );
+            _ => panic!("Expected Composite"),
+        }
     }
 
     #[test]
     fn parse_cost_composite_mana_tap_sacrifice() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("2 T Sac<1/CARDNAME>").unwrap();
-        assert_eq!(
-            cost,
-            AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Mana {
-                        cost: "2".to_string()
-                    },
-                    AbilityCost::Tap,
+        match cost {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+                assert_eq!(costs[1], AbilityCost::Tap);
+                assert!(matches!(
+                    &costs[2],
                     AbilityCost::Sacrifice {
-                        target: TargetSpec::None
-                    },
-                ]
+                        target: TargetFilter::None
+                    }
+                ));
             }
-        );
+            _ => panic!("Expected Composite"),
+        }
     }
 
     #[test]
     fn parse_cost_unknown_fallback() {
-        use crate::types::ability::AbilityCost;
         // Unknown cost components are preserved as Mana fallback
         let cost = parse_cost("PayLife<2>").unwrap();
-        assert_eq!(
-            cost,
-            AbilityCost::Mana {
-                cost: "PayLife<2>".to_string()
-            }
-        );
+        assert!(matches!(cost, AbilityCost::Mana { .. }));
     }
 
     #[test]
@@ -853,7 +873,6 @@ mod cost_tests {
 
     #[test]
     fn parse_cost_untap() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("Q").unwrap();
         assert_eq!(cost, AbilityCost::Tap);
         let cost = parse_cost("Untap").unwrap();
@@ -877,22 +896,16 @@ mod cost_tests {
 
     #[test]
     fn parse_cost_composite_with_discard() {
-        use crate::types::ability::AbilityCost;
         let cost = parse_cost("U T Discard<1/Card>").unwrap();
-        assert_eq!(
-            cost,
-            AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Mana {
-                        cost: "U".to_string()
-                    },
-                    AbilityCost::Tap,
-                    AbilityCost::Mana {
-                        cost: "Discard<1/Card>".to_string()
-                    },
-                ]
+        match cost {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+                assert_eq!(costs[1], AbilityCost::Tap);
+                assert!(matches!(&costs[2], AbilityCost::Mana { .. }));
             }
-        );
+            _ => panic!("Expected Composite"),
+        }
     }
 }
 

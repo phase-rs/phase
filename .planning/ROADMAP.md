@@ -206,7 +206,7 @@ Wave 4: Plan 05 (frontend + CI verification + human verify)
 Plans:
 - [x] 28-01-PLAN.md — Type system overhaul: TargetFilter, Duration, PtValue, ContinuousModification, typed definition structs, Effect cleanup, serde roundtrip tests — completed 2026-03-11
 - [ ] 28-02-PLAN.md — Layers/filter/deck_loading rewrite: typed ContinuousModification, TargetFilter matching, svars removal
-- [ ] 28-03-PLAN.md — Triggers/effects core/parser rewrite: typed TriggerDefinition, SubAbility chain, cleanup/mana handlers, forge-compat gating
+- [x] 28-03-PLAN.md — Triggers/effects core/parser rewrite: typed TriggerDefinition, SubAbility chain, cleanup/mana handlers, forge-compat gating — completed 2026-03-11
 - [ ] 28-04-PLAN.md — Migration binary + 32K JSON file migration + json_loader update + schema regeneration
 - [ ] 28-05-PLAN.md — Frontend type updates, WASM rebuild, full CI verification, human gameplay verification
 - [ ] 28-06-PLAN.md — Bulk effect handler updates + Effect::Other test rewrites across 22 files

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 28-02-PLAN.md
-last_updated: "2026-03-11T06:15:32.562Z"
-last_activity: 2026-03-11 — Phase 28 Plan 02 complete (continuous effects subsystem)
+stopped_at: Completed 28-03-PLAN.md
+last_updated: "2026-03-11T06:19:01Z"
+last_activity: 2026-03-11 — Phase 28 Plan 03 complete (trigger/effects pipeline rewrite)
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 27
-  completed_plans: 23
-  percent: 85
+  completed_plans: 24
+  percent: 89
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 28 executing — Plans 01-02 complete, Plan 03 next
+Phase: 28 executing — Plans 01-03 complete, Plan 04 next
 Status: Executing Phase 28
-Last activity: 2026-03-11 — Phase 28 Plan 02 complete (continuous effects subsystem)
+Last activity: 2026-03-11 — Phase 28 Plan 03 complete (trigger/effects pipeline rewrite)
 
-Progress: [█████████████████░░░] 23/27 plans (85%)
+Progress: [██████████████████░░] 24/27 plans (89%)
 
 ## Performance Metrics
 
@@ -48,7 +48,7 @@ Progress: [█████████████████░░░] 23/27 p
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
 | 26 | 6/6 | 36min | 6min |
-| 28 | 2/6 | 23min | 12min |
+| 28 | 3/6 | 48min | 16min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
@@ -56,6 +56,7 @@ Progress: [█████████████████░░░] 23/27 p
 | Phase 26 P06 | 8min | 3 tasks | 6 files |
 | Phase 28 P01 | 10min | 2 tasks | 10 files |
 | Phase 28 P02 | 13min | 3 tasks | 5 files |
+| Phase 28 P03 | 25min | 3 tasks | 26 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,10 @@ Recent decisions affecting current work:
 - [28-02]: Handler function signatures in static_abilities.rs still accept HashMap -- handler rewrite deferred to Plans 03-06
 - [28-02]: CmcGE computed inline from ManaCost fields since ManaCost lacks a cmc() method
 - [28-02]: player_matches_filter kept as string-based -- minimal usage, not worth full typed enum
+- [28-03]: SubAbility chain simplified to typed recursion with 20-depth safety limit (no SVar lookup, no parse_ability)
+- [28-03]: extract_target_filter_string() and get_valid_tgts_string() bridge typed TargetFilter to string-based targeting system (temporary until targeting is fully typed)
+- [28-03]: parse_cost() kept always-available (not forge-compat gated) -- used by JSON ability loading path
+- [28-03]: target_filter_matches_object() in triggers.rs handles runtime TargetFilter matching for trigger validation
 
 ### Roadmap Evolution
 
@@ -162,6 +167,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T06:14:30Z
-Stopped at: Completed 28-02-PLAN.md
-Resume file: .planning/phases/28-native-ability-data-model/28-03-PLAN.md
+Last session: 2026-03-11T06:19:01Z
+Stopped at: Completed 28-03-PLAN.md
+Resume file: .planning/phases/28-native-ability-data-model/28-04-PLAN.md
