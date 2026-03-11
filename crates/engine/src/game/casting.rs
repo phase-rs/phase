@@ -108,6 +108,48 @@ pub fn handle_cast_spell(
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
+
+    // Check if this is an Aura spell -- Auras target via Enchant keyword, not via effect targets
+    // Re-read obj after evaluate_layers (which needs &mut state)
+    let obj = state.objects.get(&object_id).unwrap();
+    let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
+    if is_aura {
+        let enchant_filter = obj.keywords.iter().find_map(|k| {
+            if let crate::types::keywords::Keyword::Enchant(filter) = k {
+                Some(filter.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(filter) = enchant_filter {
+            let legal =
+                targeting::find_legal_targets_typed(state, &filter, player, object_id);
+            if legal.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets for Aura".to_string(),
+                ));
+            }
+            if legal.len() == 1 {
+                let mut resolved = resolved;
+                resolved.targets = legal;
+                return pay_and_push(
+                    state, player, object_id, card_id, resolved, &mana_cost, events,
+                );
+            } else {
+                return Ok(WaitingFor::TargetSelection {
+                    player,
+                    pending_cast: Box::new(PendingCast {
+                        object_id,
+                        card_id,
+                        ability: resolved,
+                        cost: mana_cost,
+                    }),
+                    legal_targets: legal,
+                });
+            }
+        }
+    }
+
     // Targeting uses typed target_prompt or target filter from ability_def
     // For now, use string-based targeting via the old filter system
     // until the typed targeting infrastructure is complete
@@ -989,6 +1031,7 @@ mod tests {
             let obj = state.objects.get_mut(&creature).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.keywords.push(Keyword::Hexproof);
+            obj.base_keywords.push(Keyword::Hexproof);
         }
 
         // Only target is hexproof opponent creature -- should fail
