@@ -9,6 +9,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::casting;
+use super::derived::derive_display_state;
 use super::effects;
 use super::mana_abilities;
 use super::mana_payment;
@@ -33,6 +34,12 @@ pub enum EngineError {
 }
 
 pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
+    let result = apply_action(state, action);
+    derive_display_state(state);
+    result
+}
+
+fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
 
     // Validate and process action against current WaitingFor
@@ -494,6 +501,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                     legal_targets: legal,
                 };
                 state.waiting_for = wf.clone();
+                derive_display_state(state);
                 return Ok(ActionResult {
                     events,
                     waiting_for: wf,
@@ -783,6 +791,7 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     };
 
     state.waiting_for = waiting_for.clone();
+    derive_display_state(state);
 
     ActionResult {
         events,
@@ -808,6 +817,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
 
     let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
+    derive_display_state(state);
 
     ActionResult {
         events,

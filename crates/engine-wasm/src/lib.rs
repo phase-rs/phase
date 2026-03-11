@@ -6,11 +6,8 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-use engine::game::devotion::count_devotion;
 use engine::game::engine::apply;
-use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
-use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
 
 use phase_ai::choose_action;
@@ -81,69 +78,14 @@ pub fn submit_action(action: JsValue) -> JsValue {
 }
 
 /// Get the current game state as JSON.
-/// Computes the `has_unimplemented_mechanics` flag on each object before
-/// serializing so the frontend can display coverage warnings.
+/// Derived display fields (summoning sickness, devotion, etc.) are computed
+/// automatically by the engine in apply()/start_game().
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
-        let mut state_ref = gs.borrow_mut();
-        match state_ref.as_mut() {
-            Some(state) => {
-                let turn = state.turn_number;
-                for obj in state.objects.values_mut() {
-                    obj.has_unimplemented_mechanics =
-                        engine::game::coverage::has_unimplemented_mechanics(obj);
-                    obj.has_summoning_sickness =
-                        engine::game::combat::has_summoning_sickness(obj, turn);
-                }
-
-                // Compute per-card devotion for cards with CheckSVar condition in their statics
-                // (Theros gods pattern — derive colors from the card's own base_color)
-                let devotion_cards: Vec<_> = state
-                    .objects
-                    .iter()
-                    .filter_map(|(&id, obj)| {
-                        let has_devotion_static = obj.static_definitions.iter().any(|def| {
-                            matches!(
-                                &def.condition,
-                                Some(engine::types::ability::StaticCondition::CheckSVar { .. })
-                            ) || matches!(
-                                &def.condition,
-                                Some(engine::types::ability::StaticCondition::DevotionGE { .. })
-                            )
-                        });
-                        if has_devotion_static && !obj.base_color.is_empty() {
-                            let devotion = count_devotion(state, obj.controller, &obj.base_color);
-                            Some((id, devotion))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for (id, devotion) in devotion_cards {
-                    if let Some(obj) = state.objects.get_mut(&id) {
-                        obj.devotion = Some(devotion);
-                    }
-                }
-
-                // Compute per-player derived fields (separate pass to avoid borrow conflict)
-                let peek_flags: Vec<bool> = state
-                    .players
-                    .iter()
-                    .map(|p| {
-                        let ctx = StaticCheckContext {
-                            player_id: Some(p.id),
-                            ..Default::default()
-                        };
-                        check_static_ability(state, "MayLookAtTopOfLibrary", &ctx)
-                    })
-                    .collect();
-                for (i, flag) in peek_flags.into_iter().enumerate() {
-                    state.players[i].can_look_at_top_of_library = flag;
-                }
-
-                serde_wasm_bindgen::to_value(state).unwrap()
-            }
+        let state_ref = gs.borrow();
+        match state_ref.as_ref() {
+            Some(state) => serde_wasm_bindgen::to_value(state).unwrap(),
             None => JsValue::NULL,
         }
     })

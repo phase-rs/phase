@@ -279,7 +279,8 @@ export type GameEvent =
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
   | { type: "Transformed"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
-  | { type: "TurnedFaceUp"; data: { object_id: ObjectId } };
+  | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
+  | { type: "CardsRevealed"; data: { player: PlayerId; card_names: string[] } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

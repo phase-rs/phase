@@ -138,6 +138,10 @@ pub enum GameEvent {
     TurnedFaceUp {
         object_id: ObjectId,
     },
+    CardsRevealed {
+        player: PlayerId,
+        card_names: Vec<String>,
+    },
 }
 
 #[cfg(test)]

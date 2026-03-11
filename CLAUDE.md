@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 phase.rs is a Magic: The Gathering game engine written in Rust (compiling to native + WASM) with a React/TypeScript frontend. It implements MTG game rules using functional architecture (discriminated unions, pure reducers, immutable state) with an Arena-quality browser UI. Card data is sourced from MTGJSON (MIT-licensed) with custom typed JSON ability definitions.
 
+## Design Principles
+
+- **Idiomatic Rust first.** Every decision should be through the lens of "what is the idiomatic Rust path, and what is the cleanest architecture." No shortcuts.
+- **Clean, extensible, maintainable engine.** The engine crate is the source of truth — no logic in transport layers (WASM bridge, Tauri IPC, WebSocket server). Transport layers are thin serialization boundaries only.
+- **Push logic down.** Derived state, validation, and game rules belong in the engine. If multiple consumers need the same behavior, it must live in the engine, not be duplicated per-adapter.
+
 ## Setup
 
 ```bash

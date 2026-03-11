@@ -89,6 +89,15 @@ pub fn resolve(
 
     // Reveal top card
     let top_card_id = player.library[0];
+    let revealed_name = state
+        .objects
+        .get(&top_card_id)
+        .map(|o| o.name.clone())
+        .unwrap_or_default();
+    events.push(GameEvent::CardsRevealed {
+        player: controller,
+        card_names: vec![revealed_name],
+    });
 
     // Check if it's a land
     let is_land = state
