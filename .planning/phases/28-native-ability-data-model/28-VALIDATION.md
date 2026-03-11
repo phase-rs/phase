@@ -17,8 +17,8 @@ created: 2026-03-10
 
 | Property | Value |
 |----------|-------|
-| **Framework** | Rust `#[cfg(test)]` + cargo test |
-| **Config file** | `Cargo.toml` (workspace) |
+| **Framework** | Rust built-in `#[test]` + insta 1.x for snapshots |
+| **Config file** | Cargo.toml (workspace-level test config) |
 | **Quick run command** | `cargo test -p engine` |
 | **Full suite command** | `cargo test --all` |
 | **Estimated runtime** | ~30 seconds |
@@ -38,12 +38,14 @@ created: 2026-03-10
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 28-01-01 | 01 | 1 | SC-1 | unit | `cargo test -p engine` | ✅ | ⬜ pending |
-| 28-02-01 | 02 | 1 | SC-2 | unit | `cargo test -p engine` | ✅ | ⬜ pending |
-| 28-03-01 | 03 | 2 | SC-3 | unit | `cargo test -p engine` | ✅ | ⬜ pending |
-| 28-04-01 | 04 | 2 | SC-4 | integration | `cargo test --all` | ✅ | ⬜ pending |
-| 28-05-01 | 05 | 3 | SC-5 | integration | `cargo test --all` | ✅ | ⬜ pending |
-| 28-06-01 | 06 | 3 | SC-6 | integration | `cargo test --all` | ✅ | ⬜ pending |
+| 28-01-01 | 01 | 1 | NAT-01 | unit | `cargo test -p engine types::ability::tests` | Partial | ⬜ pending |
+| 28-01-02 | 01 | 1 | NAT-04 | unit | `cargo test -p engine game::filter::tests` | Yes (rewrite) | ⬜ pending |
+| 28-01-03 | 01 | 1 | NAT-01 | unit | `cargo test -p engine types::ability::tests` | ❌ W0 | ⬜ pending |
+| 28-02-01 | 02 | 2 | NAT-02 | unit+integration | `cargo test -p engine game::triggers::tests` | Partial | ⬜ pending |
+| 28-02-02 | 02 | 2 | NAT-03 | unit | `cargo test -p engine -- remaining_params` | Partial | ⬜ pending |
+| 28-02-03 | 02 | 2 | NAT-01 | integration | `cargo test -p engine game::layers::tests` | Partial | ⬜ pending |
+| 28-03-01 | 03 | 3 | NAT-05 | unit | `cargo test -p engine` (compile without forge-compat) | ❌ W0 | ⬜ pending |
+| 28-03-02 | 03 | 3 | NAT-06 | integration | `cargo test -p engine database::json_loader::tests` | Partial | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -51,7 +53,14 @@ created: 2026-03-10
 
 ## Wave 0 Requirements
 
-*Existing infrastructure covers all phase requirements.*
+- [ ] New test for typed TriggerDefinition construction and serialization roundtrip
+- [ ] New test for typed StaticDefinition with ContinuousModification
+- [ ] New test for TargetFilter matching (typed replacement for filter.rs tests)
+- [ ] New test for SubAbility chain resolution without SVar lookup
+- [ ] Migration binary tests (old format → new format → round-trip)
+- [ ] Compile-without-forge-compat test to verify parse_ability() gating
+
+*Existing infrastructure covers most requirements; Wave 0 fills gaps for new types and migration.*
 
 ---
 
@@ -59,7 +68,7 @@ created: 2026-03-10
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| card-data.json format correct | SC-6 | Spot-check specific cards | `python3 -c "import json; d=json.load(open('client/public/card-data.json')); c=d['Lightning Bolt']; assert 'svars' not in c; assert 'remaining_params' not in str(c)"` |
+| 32K JSON files all valid after migration | NAT-06 | Bulk file I/O + visual spot-check | Run migration binary, load card-data.json, spot-check 10 random cards |
 
 ---
 
