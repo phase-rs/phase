@@ -1,13 +1,14 @@
 use std::convert::Infallible;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ability::TargetFilter;
 use super::mana::{ManaColor, ManaCost};
 
 /// What a Protection keyword protects from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ProtectionTarget {
     Color(ManaColor),
     CardType(String),
@@ -18,7 +19,7 @@ pub enum ProtectionTarget {
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
 /// Unknown captures any unrecognized keyword string for forward compatibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Keyword {
     // Evasion / Combat
     Flying,

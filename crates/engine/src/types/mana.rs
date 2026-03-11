@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::ObjectId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ManaColor {
     White,
     Blue,
@@ -36,7 +37,7 @@ pub struct ManaUnit {
     pub restrictions: Vec<ManaRestriction>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ManaCostShard {
     // Basic colored
     White,
@@ -234,7 +235,7 @@ impl FromStr for ManaCostShard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ManaCost {
     NoCost,
     Cost {
