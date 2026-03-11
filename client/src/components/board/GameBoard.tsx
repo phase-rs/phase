@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -16,7 +16,8 @@ export function GameBoard() {
   const myId = usePlayerId();
 
   // Track which opponent is focused (expanded) in multiplayer
-  const [focusedOpponent, setFocusedOpponent] = useState<PlayerId | null>(null);
+  const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
+  const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
 
   // Compute live opponents from seat order
   const opponents = useMemo(() => {
@@ -91,7 +92,7 @@ export function GameBoard() {
         // Multiplayer: compact strips for opponents, with optional focused view
         <div className="flex flex-col">
           {/* Compact strips row */}
-          <div className="flex gap-2 overflow-x-auto px-2 py-1">
+          <div className="flex gap-2 overflow-visible px-2 py-1">
             {opponents.map((opId) => (
               <PlayerArea
                 key={opId}

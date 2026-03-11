@@ -11,8 +11,15 @@ interface OpponentHandProps {
 
 export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const myId = usePlayerId();
-  const opponentId = myId === 0 ? 1 : 0;
-  const opponent = useGameStore((s) => s.gameState?.players[opponentId]);
+  const focusedOpponent = useUiStore((s) => s.focusedOpponent);
+  const gameState = useGameStore((s) => s.gameState);
+  const opponents = gameState
+    ? (gameState.seat_order ?? gameState.players.map((p) => p.id)).filter(
+        (id) => id !== myId && !(gameState.eliminated_players ?? []).includes(id),
+      )
+    : [];
+  const opponentId = focusedOpponent ?? opponents[0] ?? (myId === 0 ? 1 : 0);
+  const opponent = gameState?.players[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
 

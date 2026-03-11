@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -262,6 +262,14 @@ function GamePageContent({
   const playerId = usePlayerId();
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  const focusedOpponent = useUiStore((s) => s.focusedOpponent);
+  const opponents = useMemo(() => {
+    if (!gameState) return [];
+    const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
+    const eliminated = gameState.eliminated_players ?? [];
+    return seatOrder.filter((id) => id !== playerId && !eliminated.includes(id));
+  }, [gameState, playerId]);
+  const activeOpponentId = focusedOpponent ?? opponents[0] ?? (playerId === 0 ? 1 : 0);
 
   const handleConcede = useCallback(() => {
     if (adapter && adapter instanceof WebSocketAdapter) {
@@ -382,13 +390,13 @@ function GamePageContent({
       <div className="fixed right-2 top-2 z-30 flex items-start gap-2">
         <ZoneIndicator
           zone="exile"
-          playerId={playerId === 0 ? 1 : 0}
-          onClick={() => setViewingZone({ zone: "exile", playerId: playerId === 0 ? 1 : 0 })}
+          playerId={activeOpponentId}
+          onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
         />
-        <LibraryPile playerId={playerId === 0 ? 1 : 0} />
+        <LibraryPile playerId={activeOpponentId} />
         <GraveyardPile
-          playerId={playerId === 0 ? 1 : 0}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId: playerId === 0 ? 1 : 0 })}
+          playerId={activeOpponentId}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId: activeOpponentId })}
         />
       </div>
 
@@ -855,7 +863,9 @@ function GameOverScreen({
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
   const playerLife = players?.[activePlayerId]?.life ?? 0;
-  const opponentLife = players?.[activePlayerId === 0 ? 1 : 0]?.life ?? 0;
+  const opponentLife = players
+    ? (players.find((p) => p.id !== activePlayerId)?.life ?? 0)
+    : 0;
 
   const isVictory = winner === activePlayerId;
   const isDraw = winner == null;

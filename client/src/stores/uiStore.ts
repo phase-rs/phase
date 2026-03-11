@@ -21,6 +21,7 @@ interface UiStoreState {
   endTurnSinceTurn: number | null;
   showTurnBanner: boolean;
   turnBannerText: string;
+  focusedOpponent: number | null;
 }
 
 interface UiStoreActions {
@@ -43,6 +44,7 @@ interface UiStoreActions {
   toggleEndTurnMode: (turnNumber: number) => void;
   clearEndTurnMode: () => void;
   flashTurnBanner: (text: string) => void;
+  setFocusedOpponent: (id: number | null) => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -67,6 +69,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   endTurnSinceTurn: null,
   showTurnBanner: false,
   turnBannerText: "",
+  focusedOpponent: null,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -134,4 +137,5 @@ export const useUiStore = create<UiStore>()((set) => ({
     set({ showTurnBanner: true, turnBannerText: text });
     setTimeout(() => set({ showTurnBanner: false }), 1500);
   },
+  setFocusedOpponent: (id) => set({ focusedOpponent: id }),
 }));
