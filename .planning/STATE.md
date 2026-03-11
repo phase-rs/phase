@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: executing
-stopped_at: Completed 27-03-PLAN.md
-last_updated: "2026-03-11T08:49:00Z"
-last_activity: 2026-03-11 — Phase 27 Plan 03 complete (triggered targeting and exile return tracking)
+status: completed
+stopped_at: Completed 27-04-PLAN.md
+last_updated: "2026-03-11T13:26:53Z"
+last_activity: 2026-03-11 — Phase 27 Plan 04 complete (TriggerTargetSelection UI and context rewrite)
 progress:
   total_phases: 8
   completed_phases: 7
-  total_plans: 30
-  completed_plans: 29
+  total_plans: 31
+  completed_plans: 30
   percent: 97
 ---
 
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Complete (all 3 plans)
+**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Complete (all 4 plans)
 
 ## Current Position
 
-Phase: 27 complete — All 3 plans complete
+Phase: 27 complete — All 4 plans complete
 Status: Phase 27 Complete
-Last activity: 2026-03-11 — Phase 27 Plan 03 complete (triggered targeting and exile return tracking)
+Last activity: 2026-03-11 — Phase 27 Plan 04 complete (TriggerTargetSelection UI and context rewrite)
 
-Progress: [███████████████████░] 29/30 plans (97%)
+Progress: [██████████████████░░] 30/31 plans (97%)
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [███████████████████░] 29/30 p
 | Phase 27 P01 | 11min | 2 tasks | 11 files |
 | Phase 27 P02 | 6min | 2 tasks | 2 files |
 | Phase 27 P03 | 13min | 2 tasks | 3 files |
+| Phase 27 P04 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -173,6 +174,8 @@ Recent decisions affecting current work:
 - [27-03]: Multi-target triggers return early from process_triggers; remaining triggers deferred until after target selection
 - [27-03]: check_exile_returns placed after SBAs and before triggers so returned permanents get ETB triggers
 - [27-03]: Exile return gracefully handles cards already moved from exile (no panic, no-op)
+- [27-04]: TargetingOverlay reuses existing targeting UI for TriggerTargetSelection (no separate component)
+- [27-04]: Cancel button hidden for trigger targeting (MTG triggers are mandatory)
 
 ### Roadmap Evolution
 
@@ -189,6 +192,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T08:49:00Z
-Stopped at: Completed 27-03-PLAN.md
-Resume file: Phase 27 complete
+Last session: 2026-03-11T13:26:53Z
+Stopped at: Completed 27-04-PLAN.md
+Resume file: Phase 27 complete (all 4 plans)
