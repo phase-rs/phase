@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: in-progress
-stopped_at: Completed 29-05-PLAN.md
-last_updated: "2026-03-11T18:09:00Z"
-last_activity: 2026-03-11 — Phase 29 Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
+status: executing
+stopped_at: Completed 29-16-PLAN.md
+last_updated: "2026-03-11T18:34:08.444Z"
+last_activity: 2026-03-11 — Phase 29 Plan 16 complete (Effects Modules N-Z PlayerId(1-x) Migration)
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 46
+  total_plans: 47
   completed_plans: 37
   percent: 80
 ---
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 29 Support N Players — Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
+**Current focus:** Phase 29 Support N Players — Plan 16 complete (Effects Modules N-Z PlayerId(1-x) Migration)
 
 ## Current Position
 
-Phase: 29 — Plan 06 of 16 complete
+Phase: 29 — Plan 16 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 06 complete (Transport and AI N-Player Migration)
+Last activity: 2026-03-11 — Phase 29 Plan 16 complete (Effects Modules N-Z PlayerId(1-x) Migration)
 
 Progress: [████████████████░░░░] 37/46 plans (80%)
 
@@ -67,6 +67,7 @@ Progress: [████████████████░░░░] 37/46 p
 | Phase 29 P02 | 11min | 2 tasks | 11 files |
 | Phase 29 P03 | 25min | 2 tasks | 11 files |
 | Phase 29 P05 | 3min | 1 tasks | 3 files |
+| Phase 29 P16 | 2min | 1 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -197,6 +198,7 @@ Recent decisions affecting current work:
 - [29-06]: Protocol player_count defaults to 2 via serde default for backward compat
 - [29-05]: engine.rs DeclareBlockers uses WaitingFor player field instead of recomputing defending player
 - [29-05]: opponent() removed from priority.rs (zero external callers in engine crate)
+- [Phase 29]: No code changes needed for Plan 16 — Plan 05 already eliminated all PlayerId(1-x) from effects modules
 
 ### Roadmap Evolution
 
@@ -214,6 +216,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:29:00Z
-Stopped at: Completed 29-06-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-07-PLAN.md
+Last session: 2026-03-11T18:34:06.452Z
+Stopped at: Completed 29-16-PLAN.md
+Resume file: None
