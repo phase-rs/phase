@@ -195,20 +195,21 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
   5. `parser::ability::parse_ability()` gated behind `forge-compat` — zero Forge string parsing at runtime
   6. All 32K `data/abilities/*.json` files migrated to native typed JSON schema
   7. `cargo test --all` passes and `card-data.json` uses the new format
-**Plans**: 5 plans
+**Plans**: 6 plans
 
 **Execution Order:**
-Wave 1: Plan 01 (type definitions)
-Wave 2: Plans 02 + 03 (parallel — layers/filter subsystem, triggers/effects subsystem)
+Wave 1: Plan 01 (type definitions + serde roundtrip tests)
+Wave 2: Plans 02 + 03 + 06 (parallel — layers/filter subsystem, triggers/effects pipeline, bulk handler updates)
 Wave 3: Plan 04 (migration binary + JSON migration)
 Wave 4: Plan 05 (frontend + CI verification + human verify)
 
 Plans:
-- [ ] 28-01-PLAN.md — Type system overhaul: TargetFilter, Duration, PtValue, ContinuousModification, typed definition structs, Effect cleanup
+- [ ] 28-01-PLAN.md — Type system overhaul: TargetFilter, Duration, PtValue, ContinuousModification, typed definition structs, Effect cleanup, serde roundtrip tests
 - [ ] 28-02-PLAN.md — Layers/filter/deck_loading rewrite: typed ContinuousModification, TargetFilter matching, svars removal
-- [ ] 28-03-PLAN.md — Triggers/effects/parser rewrite: typed TriggerDefinition, SubAbility chain, Effect::Other removal, forge-compat gating
+- [ ] 28-03-PLAN.md — Triggers/effects core/parser rewrite: typed TriggerDefinition, SubAbility chain, cleanup/mana handlers, forge-compat gating
 - [ ] 28-04-PLAN.md — Migration binary + 32K JSON file migration + json_loader update + schema regeneration
 - [ ] 28-05-PLAN.md — Frontend type updates, WASM rebuild, full CI verification, human gameplay verification
+- [ ] 28-06-PLAN.md — Bulk effect handler updates + Effect::Other test rewrites across 22 files
 
 ### Phase 27: Aura Casting, Triggered Ability Targeting, and "Until Leaves" Exile Return
 **Goal**: Implement full Aura spell support (targeting + attachment), triggered ability target selection, and "until source leaves the battlefield" exile return tracking
