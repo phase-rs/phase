@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 28-06-PLAN.md
-last_updated: "2026-03-11T06:51:06Z"
-last_activity: 2026-03-11 — Phase 28 Plan 06 complete (bulk effect handler migration)
+stopped_at: Completed 28-04-PLAN.md
+last_updated: "2026-03-11T07:05:00Z"
+last_activity: 2026-03-11 — Phase 28 Plan 04 complete (data migration of 30K ability JSON files)
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 27
-  completed_plans: 25
-  percent: 93
+  completed_plans: 26
+  percent: 96
 ---
 
 # Project State
@@ -21,22 +21,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-03, 06 complete, Plans 04-05 remaining)
+**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-04, 06 complete, Plan 05 remaining)
 
 ## Current Position
 
-Phase: 28 executing — Plans 01-03, 06 complete, Plan 04 next
+Phase: 28 executing — Plans 01-04, 06 complete, Plan 05 next
 Status: Executing Phase 28
-Last activity: 2026-03-11 — Phase 28 Plan 06 complete (bulk effect handler migration)
+Last activity: 2026-03-11 — Phase 28 Plan 04 complete (data migration of 30K ability JSON files)
 
-Progress: [██████████████████░░] 25/27 plans (93%)
+Progress: [███████████████████░] 26/27 plans (96%)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 17 (v1.2)
+- Total plans completed: 18 (v1.2)
 - Average duration: 12min
-- Total execution time: 3.4 hours
+- Total execution time: 3.5 hours
 
 **By Phase:**
 
@@ -48,7 +48,7 @@ Progress: [██████████████████░░] 25/27 p
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
 | 26 | 6/6 | 36min | 6min |
-| 28 | 4/6 | 138min | 35min |
+| 28 | 5/6 | 146min | 29min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
@@ -58,6 +58,7 @@ Progress: [██████████████████░░] 25/27 p
 | Phase 28 P02 | 13min | 3 tasks | 5 files |
 | Phase 28 P03 | 25min | 3 tasks | 26 files |
 | Phase 28 P06 | 90min | 2 tasks | 35 files |
+| Phase 28 P04 | 8min | 2 tasks | 30127 files |
 
 ## Accumulated Context
 
@@ -156,6 +157,9 @@ Recent decisions affecting current work:
 - [28-06]: Effect::Unimplemented { name, description: None } for test dummy effects -- semantically clear placeholders
 - [28-06]: json_smoke_test made tolerant of old-schema ability JSON files during migration period
 - [28-06]: CardFace.svars removed, power/toughness use PtValue, keywords use Keyword enum (matching Plan 01 types)
+- [28-04]: JSON-level migration via serde_json::Value instead of typed deserialization -- avoids old-format/new-type mismatch
+- [28-04]: Unresolvable SVar Execute references logged as warnings (15,930 triggers) -- SVars not available in JSON files
+- [28-04]: Migration binary runs without forge-compat feature -- operates on JSON values, not Forge parser
 
 ### Roadmap Evolution
 
@@ -172,6 +176,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T06:51:06Z
-Stopped at: Completed 28-06-PLAN.md
-Resume file: .planning/phases/28-native-ability-data-model/28-04-PLAN.md
+Last session: 2026-03-11T07:05:00Z
+Stopped at: Completed 28-04-PLAN.md
+Resume file: .planning/phases/28-native-ability-data-model/28-05-PLAN.md
