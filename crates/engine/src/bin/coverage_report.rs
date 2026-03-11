@@ -46,11 +46,7 @@ fn main() {
     let db = match CardDatabase::from_mtgjson(&mtgjson_path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!(
-                "Error loading card database from {}: {}",
-                path.display(),
-                e
-            );
+            eprintln!("Error loading card database from {}: {}", path.display(), e);
             let empty = CoverageSummary {
                 total_cards: 0,
                 supported_cards: 0,

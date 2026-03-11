@@ -444,9 +444,9 @@ fn attacker_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     let default_target = engine::game::players::opponents(state, player)
         .first()
         .map(|&opp| AttackTarget::Player(opp))
-        .unwrap_or(AttackTarget::Player(
-            engine::game::players::next_player(state, player),
-        ));
+        .unwrap_or(AttackTarget::Player(engine::game::players::next_player(
+            state, player,
+        )));
 
     // Always allow not attacking
     let mut actions = vec![GameAction::DeclareAttackers {

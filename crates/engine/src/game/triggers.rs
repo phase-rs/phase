@@ -2514,7 +2514,13 @@ pub mod tests {
             "Opp Creature 1".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&target1).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         state.objects.get_mut(&target1).unwrap().controller = PlayerId(1);
 
         let target2 = create_object(
@@ -2524,7 +2530,13 @@ pub mod tests {
             "Opp Creature 2".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&target2).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         state.objects.get_mut(&target2).unwrap().controller = PlayerId(1);
 
         // Create a creature with ETB exile trigger targeting a creature opponent controls
@@ -2584,7 +2596,10 @@ pub mod tests {
         process_triggers(&mut state, &events);
 
         // Multiple legal targets -> should set pending_trigger, NOT push to stack
-        assert!(state.pending_trigger.is_some(), "Should have pending trigger");
+        assert!(
+            state.pending_trigger.is_some(),
+            "Should have pending trigger"
+        );
         assert_eq!(state.stack.len(), 0, "Should NOT be on stack yet");
         let pending = state.pending_trigger.as_ref().unwrap();
         assert_eq!(pending.source_id, trigger_creature);
@@ -2605,7 +2620,13 @@ pub mod tests {
             "Opp Creature".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&target1).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         state.objects.get_mut(&target1).unwrap().controller = PlayerId(1);
 
         // Create trigger creature
@@ -2664,13 +2685,19 @@ pub mod tests {
         process_triggers(&mut state, &events);
 
         // Single legal target -> auto-target and push to stack
-        assert!(state.pending_trigger.is_none(), "Should NOT have pending trigger");
+        assert!(
+            state.pending_trigger.is_none(),
+            "Should NOT have pending trigger"
+        );
         assert_eq!(state.stack.len(), 1, "Should be on stack");
         let entry = &state.stack[0];
         match &entry.kind {
             StackEntryKind::TriggeredAbility { ability, .. } => {
                 assert_eq!(ability.targets.len(), 1);
-                assert_eq!(ability.targets[0], crate::types::ability::TargetRef::Object(target1));
+                assert_eq!(
+                    ability.targets[0],
+                    crate::types::ability::TargetRef::Object(target1)
+                );
             }
             _ => panic!("Expected TriggeredAbility on stack"),
         }
@@ -2739,7 +2766,10 @@ pub mod tests {
         process_triggers(&mut state, &events);
 
         // Zero legal targets -> trigger is skipped
-        assert!(state.pending_trigger.is_none(), "Should NOT have pending trigger");
+        assert!(
+            state.pending_trigger.is_none(),
+            "Should NOT have pending trigger"
+        );
         assert_eq!(state.stack.len(), 0, "Should NOT be on stack");
     }
 

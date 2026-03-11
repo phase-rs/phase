@@ -116,9 +116,9 @@ pub fn choose_action(
         let default_target = engine::game::players::opponents(state, ai_player)
             .first()
             .map(|&opp| AttackTarget::Player(opp))
-            .unwrap_or(AttackTarget::Player(
-                engine::game::players::next_player(state, ai_player),
-            ));
+            .unwrap_or(AttackTarget::Player(engine::game::players::next_player(
+                state, ai_player,
+            )));
         let attacks: Vec<_> = selected
             .into_iter()
             .map(|id| (id, default_target.clone()))

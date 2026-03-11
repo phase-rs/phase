@@ -438,7 +438,12 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
         if let Some(amount) = parse_loyalty_number(prefix) {
             // Verify it looks like a loyalty prefix (starts with +, −, –, -, or is "0")
             let first_char = prefix.trim().chars().next()?;
-            if first_char == '+' || first_char == '−' || first_char == '–' || first_char == '-' || prefix.trim() == "0" {
+            if first_char == '+'
+                || first_char == '−'
+                || first_char == '–'
+                || first_char == '-'
+                || prefix.trim() == "0"
+            {
                 let effect_text = trimmed[colon_pos + 1..].trim();
                 let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                 def.cost = Some(AbilityCost::Loyalty { amount });
@@ -486,10 +491,7 @@ fn find_activated_colon(line: &str) -> Option<usize> {
         "tap",
         "untap",
     ];
-    if cost_starters
-        .iter()
-        .any(|s| lower_prefix.starts_with(s))
-    {
+    if cost_starters.iter().any(|s| lower_prefix.starts_with(s)) {
         return Some(colon_pos);
     }
 
@@ -520,8 +522,9 @@ fn is_replacement_pattern(lower: &str) -> bool {
 fn is_saga_chapter(lower: &str) -> bool {
     let trimmed = lower.trim();
     // Saga chapter lines start with roman numerals followed by "—" or "-"
-    for prefix in &["i —", "ii —", "iii —", "iv —", "v —", "i -", "ii -", "iii -", "iv -", "v -"]
-    {
+    for prefix in &[
+        "i —", "ii —", "iii —", "iv —", "v —", "i -", "ii -", "iii -", "iv -", "v -",
+    ] {
         if trimmed.starts_with(prefix) {
             return true;
         }
@@ -590,13 +593,7 @@ mod tests {
 
     #[test]
     fn murder_spell_destroy() {
-        let r = parse(
-            "Destroy target creature.",
-            "Murder",
-            &[],
-            &["Instant"],
-            &[],
-        );
+        let r = parse("Destroy target creature.", "Murder", &[], &["Instant"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
     }
@@ -678,7 +675,7 @@ mod tests {
             &["Beast"],
         );
         assert_eq!(r.abilities.len(), 0); // keyword line skipped
-        // Should have static, replacement, and trigger
+                                          // Should have static, replacement, and trigger
         assert!(r.statics.len() + r.replacements.len() + r.triggers.len() >= 2);
     }
 

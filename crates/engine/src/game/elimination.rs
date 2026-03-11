@@ -13,11 +13,7 @@ use super::players;
 /// - Emits PlayerEliminated event
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
-pub fn eliminate_player(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) {
+pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     // Skip if already eliminated
     if state
         .players
@@ -163,12 +159,18 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id: PlayerId(0) })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::GameOver { winner: Some(PlayerId(1)) })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerEliminated {
+                player_id: PlayerId(0)
+            }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        )));
     }
 
     // --- 3-player elimination (game continues) ---
@@ -181,9 +183,12 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         assert!(state.players[1].is_eliminated);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id: PlayerId(1) })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerEliminated {
+                player_id: PlayerId(1)
+            }
+        )));
         // Game should NOT be over — 2 players still alive
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
     }

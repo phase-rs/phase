@@ -12,7 +12,7 @@ use engine::types::ability::{
 use engine::types::card::{CardFace, CardLayout};
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaColor};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -46,8 +46,7 @@ fn main() {
         i += 1;
     }
 
-    let data_dir = data_dir
-        .or_else(|| std::env::var("PHASE_DATA_DIR").ok().map(PathBuf::from));
+    let data_dir = data_dir.or_else(|| std::env::var("PHASE_DATA_DIR").ok().map(PathBuf::from));
 
     let mtgjson_path = match mtgjson_override {
         Some(p) => p,

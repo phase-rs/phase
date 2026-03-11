@@ -83,10 +83,11 @@ pub fn find_legal_targets_typed(
     // Check if filter could match stack spells (Card type or Any)
     let matches_stack = matches!(
         filter,
-        TargetFilter::Any | TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            ..
-        }
+        TargetFilter::Any
+            | TargetFilter::Typed {
+                card_type: Some(TypeFilter::Card),
+                ..
+            }
     );
     if matches_stack {
         add_stack_spells(state, &mut targets);

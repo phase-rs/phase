@@ -1,9 +1,9 @@
-use crate::types::ability::{AbilityKind, TargetFilter, TriggerDefinition};
-use crate::types::triggers::TriggerMode;
-use crate::types::phase::Phase;
-use crate::types::zones::Zone;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
+use crate::types::ability::{AbilityKind, TargetFilter, TriggerDefinition};
+use crate::types::phase::Phase;
+use crate::types::triggers::TriggerMode;
+use crate::types::zones::Zone;
 
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
@@ -27,7 +27,10 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
 
     // Parse the effect
     let execute = if !effect_clean.is_empty() {
-        Some(Box::new(parse_effect_chain(&effect_clean, AbilityKind::Spell)))
+        Some(Box::new(parse_effect_chain(
+            &effect_clean,
+            AbilityKind::Spell,
+        )))
     } else {
         None
     };

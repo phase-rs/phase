@@ -1,7 +1,7 @@
-use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter};
-use crate::types::zones::Zone;
 use super::oracle_target::parse_target;
 use super::oracle_util::{parse_mana_production, parse_number};
+use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter};
+use crate::types::zones::Zone;
 
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
@@ -38,11 +38,19 @@ pub fn parse_effect(text: &str) -> Effect {
     // --- Exile: "exile target/all {filter}" ---
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let (target, _) = parse_target(&text[6..]);
-        return Effect::ChangeZoneAll { origin: None, destination: Zone::Exile, target };
+        return Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target,
+        };
     }
     if lower.starts_with("exile ") {
         let (target, _) = parse_target(&text[6..]);
-        return Effect::ChangeZone { origin: None, destination: Zone::Exile, target };
+        return Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target,
+        };
     }
 
     // --- Draw: "draw N card(s)" ---
@@ -59,9 +67,13 @@ pub fn parse_effect(text: &str) -> Effect {
 
     // --- Life: "gain N life" / "you gain N life" ---
     if lower.contains("gain") && lower.contains("life") {
-        let after_gain = if lower.starts_with("you gain ") { &text[9..] }
-            else if lower.starts_with("gain ") { &text[5..] }
-            else { "" };
+        let after_gain = if lower.starts_with("you gain ") {
+            &text[9..]
+        } else if lower.starts_with("gain ") {
+            &text[5..]
+        } else {
+            ""
+        };
         if !after_gain.is_empty() {
             let amount = parse_number(after_gain).map(|(n, _)| n as i32).unwrap_or(1);
             return Effect::GainLife { amount };
@@ -76,7 +88,11 @@ pub fn parse_effect(text: &str) -> Effect {
     }
 
     // --- Pump: "{target} gets +N/+M [until end of turn]" ---
-    if lower.contains("gets +") || lower.contains("gets -") || lower.contains("get +") || lower.contains("get -") {
+    if lower.contains("gets +")
+        || lower.contains("gets -")
+        || lower.contains("get +")
+        || lower.contains("get -")
+    {
         if let Some(pump) = try_parse_pump(&lower, text) {
             return pump;
         }
@@ -97,7 +113,10 @@ pub fn parse_effect(text: &str) -> Effect {
     // --- Mill ---
     if lower.starts_with("mill ") {
         let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Mill { count, target: TargetFilter::Any };
+        return Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        };
     }
 
     // --- Tap/Untap ---
@@ -121,7 +140,10 @@ pub fn parse_effect(text: &str) -> Effect {
     // Oracle parser always emits Effect::Discard per spec convention.
     if lower.starts_with("discard ") {
         let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Discard { count, target: TargetFilter::Any };
+        return Effect::Discard {
+            count,
+            target: TargetFilter::Any,
+        };
     }
 
     // --- Put counter ---
@@ -134,18 +156,28 @@ pub fn parse_effect(text: &str) -> Effect {
     // --- Return / Bounce ---
     if lower.starts_with("return ") {
         let (target, _) = parse_target(&text[7..]);
-        return Effect::Bounce { target, destination: None };
+        return Effect::Bounce {
+            target,
+            destination: None,
+        };
     }
 
     // --- Search library ---
     if lower.starts_with("search your library") || lower.starts_with("search their library") {
-        return Effect::ChangeZone { origin: Some(Zone::Library), destination: Zone::Hand, target: TargetFilter::Any };
+        return Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Hand,
+            target: TargetFilter::Any,
+        };
     }
 
     // --- Look at top N / Dig ---
     if lower.starts_with("look at the top ") {
         let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Dig { count, destination: None };
+        return Effect::Dig {
+            count,
+            destination: None,
+        };
     }
 
     // --- Fight ---
@@ -168,8 +200,12 @@ pub fn parse_effect(text: &str) -> Effect {
     }
 
     // --- Single-word effects ---
-    if lower == "explore" || lower.starts_with("explore.") { return Effect::Explore; }
-    if lower == "proliferate" || lower.starts_with("proliferate.") { return Effect::Proliferate; }
+    if lower == "explore" || lower.starts_with("explore.") {
+        return Effect::Explore;
+    }
+    if lower == "proliferate" || lower.starts_with("proliferate.") {
+        return Effect::Proliferate;
+    }
 
     // --- Fallback ---
     let verb = lower.split_whitespace().next().unwrap_or("unknown");
@@ -209,9 +245,16 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     } else {
         defs.pop().unwrap_or_else(|| AbilityDefinition {
             kind,
-            effect: Effect::Unimplemented { name: "empty".to_string(), description: None },
-            cost: None, sub_ability: None, duration: None, description: None,
-            target_prompt: None, sorcery_speed: false,
+            effect: Effect::Unimplemented {
+                name: "empty".to_string(),
+                description: None,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         })
     }
 }
@@ -225,14 +268,18 @@ fn split_effect_sentences(text: &str) -> Vec<String> {
     while i < chars.len() {
         if i + 7 <= chars.len() && text[i..].to_lowercase().starts_with(", then ") {
             let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() { results.push(trimmed); }
+            if !trimmed.is_empty() {
+                results.push(trimmed);
+            }
             current.clear();
             i += 7;
             continue;
         }
         if chars[i] == '.' && i + 1 < chars.len() && (chars[i + 1] == ' ' || chars[i + 1] == '\n') {
             let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() { results.push(trimmed); }
+            if !trimmed.is_empty() {
+                results.push(trimmed);
+            }
             current.clear();
             i += 2;
             continue;
@@ -241,7 +288,9 @@ fn split_effect_sentences(text: &str) -> Vec<String> {
         i += 1;
     }
     let trimmed = current.trim().trim_end_matches('.').trim().to_string();
-    if !trimmed.is_empty() { results.push(trimmed); }
+    if !trimmed.is_empty() {
+        results.push(trimmed);
+    }
     results
 }
 
@@ -258,10 +307,16 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
                 // "each" → DamageAll
                 if after_to.starts_with("each ") {
                     let (target, _) = parse_target(after_to);
-                    return Some(Effect::DamageAll { amount: DamageAmount::Fixed(n as i32), target });
+                    return Some(Effect::DamageAll {
+                        amount: DamageAmount::Fixed(n as i32),
+                        target,
+                    });
                 }
                 let (target, _) = parse_target(after_to);
-                return Some(Effect::DealDamage { amount: DamageAmount::Fixed(n as i32), target });
+                return Some(Effect::DealDamage {
+                    amount: DamageAmount::Fixed(n as i32),
+                    target,
+                });
             }
         }
     }
@@ -271,9 +326,17 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
     // Match "+N/+M" or "+N/-M" pattern
     let re_pos = lower.find("gets ").or_else(|| lower.find("get "))?;
-    let offset = if lower[re_pos..].starts_with("gets ") { 5 } else { 4 };
+    let offset = if lower[re_pos..].starts_with("gets ") {
+        5
+    } else {
+        4
+    };
     let after = &text[re_pos + offset..].trim();
-    parse_pt_modifier(after).map(|(p, t)| Effect::Pump { power: p, toughness: t, target: TargetFilter::Any })
+    parse_pt_modifier(after).map(|(p, t)| Effect::Pump {
+        power: p,
+        toughness: t,
+        target: TargetFilter::Any,
+    })
 }
 
 fn parse_pt_modifier(text: &str) -> Option<(i32, i32)> {
@@ -295,7 +358,11 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
     // Next word is counter type
     let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let counter_type = rest[..type_end].to_string();
-    Some(Effect::PutCounter { counter_type, count: count as i32, target: TargetFilter::Any })
+    Some(Effect::PutCounter {
+        counter_type,
+        count: count as i32,
+        target: TargetFilter::Any,
+    })
 }
 
 fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
@@ -316,7 +383,10 @@ fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
         });
     }
     // Fallback: unstructured token
-    Some(Effect::Unimplemented { name: "create".to_string(), description: Some(lower.to_string()) })
+    Some(Effect::Unimplemented {
+        name: "create".to_string(),
+        description: Some(lower.to_string()),
+    })
 }
 
 fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
@@ -335,19 +405,40 @@ mod tests {
     #[test]
     fn effect_lightning_bolt() {
         let e = parse_effect("Lightning Bolt deals 3 damage to any target");
-        assert!(matches!(e, Effect::DealDamage { amount: DamageAmount::Fixed(3), target: TargetFilter::Any }));
+        assert!(matches!(
+            e,
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any
+            }
+        ));
     }
 
     #[test]
     fn effect_murder() {
         let e = parse_effect("Destroy target creature");
-        assert!(matches!(e, Effect::Destroy { target: TargetFilter::Typed { card_type: Some(TypeFilter::Creature), .. } }));
+        assert!(matches!(
+            e,
+            Effect::Destroy {
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
     fn effect_giant_growth() {
         let e = parse_effect("Target creature gets +3/+3 until end of turn");
-        assert!(matches!(e, Effect::Pump { power: 3, toughness: 3, .. }));
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: 3,
+                toughness: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -389,7 +480,12 @@ mod tests {
     #[test]
     fn effect_disenchant() {
         let e = parse_effect("Destroy target artifact or enchantment");
-        assert!(matches!(e, Effect::Destroy { target: TargetFilter::Or { .. } }));
+        assert!(matches!(
+            e,
+            Effect::Destroy {
+                target: TargetFilter::Or { .. }
+            }
+        ));
     }
 
     #[test]
@@ -409,6 +505,9 @@ mod tests {
         let def = parse_effect_chain("You gain 3 life. Draw a card.", AbilityKind::Spell);
         assert!(matches!(def.effect, Effect::GainLife { amount: 3 }));
         assert!(def.sub_ability.is_some());
-        assert!(matches!(def.sub_ability.unwrap().effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            def.sub_ability.unwrap().effect,
+            Effect::Draw { count: 1 }
+        ));
     }
 }

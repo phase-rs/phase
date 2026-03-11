@@ -15,7 +15,10 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if lower.starts_with("target player or planeswalker") {
         return (
             TargetFilter::Or {
-                filters: vec![TargetFilter::Player, typed(TypeFilter::Planeswalker, None, vec![])],
+                filters: vec![
+                    TargetFilter::Player,
+                    typed(TypeFilter::Planeswalker, None, vec![]),
+                ],
             },
             &text[29..],
         );
@@ -159,7 +162,10 @@ fn parse_non_prefix(text: &str) -> (Option<String>, usize) {
         let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let negated = rest[..end].to_string();
         // We consumed "non{type} " but the core type is the NEXT word, so return just the negated type
-        (Some(negated), 3 + end + if rest.len() > end { 1 } else { 0 })
+        (
+            Some(negated),
+            3 + end + if rest.len() > end { 1 } else { 0 },
+        )
     } else {
         (None, 0)
     }
@@ -207,7 +213,11 @@ fn parse_controller_suffix(text: &str) -> Option<ControllerRef> {
     }
 }
 
-fn typed(card_type: TypeFilter, subtype: Option<String>, properties: Vec<FilterProp>) -> TargetFilter {
+fn typed(
+    card_type: TypeFilter,
+    subtype: Option<String>,
+    properties: Vec<FilterProp>,
+) -> TargetFilter {
     TargetFilter::Typed {
         card_type: Some(card_type),
         subtype,

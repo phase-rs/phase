@@ -1,6 +1,6 @@
-use crate::types::ability::{AbilityCost, TargetFilter};
-use super::oracle_util::parse_mana_symbols;
 use super::oracle_target::parse_target;
+use super::oracle_util::parse_mana_symbols;
+use crate::types::ability::{AbilityCost, TargetFilter};
 
 /// Parse the cost portion before `:` in an Oracle activated ability.
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
@@ -85,7 +85,9 @@ fn parse_single_cost(text: &str) -> AbilityCost {
             || rest.to_lowercase() == "this artifact"
             || rest.to_lowercase() == "this enchantment"
         {
-            return AbilityCost::Sacrifice { target: TargetFilter::SelfRef };
+            return AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+            };
         }
         // "Sacrifice a {filter}"
         let rest_lower = rest.to_lowercase();
@@ -103,7 +105,11 @@ fn parse_single_cost(text: &str) -> AbilityCost {
     // "Pay N life"
     if lower.starts_with("pay ") && lower.contains("life") {
         let rest = &lower[4..];
-        if let Some(n) = rest.split_whitespace().next().and_then(|w| w.parse::<u32>().ok()) {
+        if let Some(n) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|w| w.parse::<u32>().ok())
+        {
             return AbilityCost::PayLife { amount: n };
         }
     }
@@ -111,21 +117,38 @@ fn parse_single_cost(text: &str) -> AbilityCost {
     // "Discard a card" / "Discard N cards"
     if let Some(rest) = lower.strip_prefix("discard ") {
         if rest.starts_with("a card") {
-            return AbilityCost::Discard { count: 1, filter: None, random: false };
+            return AbilityCost::Discard {
+                count: 1,
+                filter: None,
+                random: false,
+            };
         }
         if let Ok(n) = rest.split_whitespace().next().unwrap_or("").parse::<u32>() {
-            return AbilityCost::Discard { count: n, filter: None, random: false };
+            return AbilityCost::Discard {
+                count: n,
+                filter: None,
+                random: false,
+            };
         }
-        return AbilityCost::Discard { count: 1, filter: None, random: false };
+        return AbilityCost::Discard {
+            count: 1,
+            filter: None,
+            random: false,
+        };
     }
 
     // "Exile {filter} from your graveyard"
     if lower.starts_with("exile ") && lower.contains("from your graveyard") {
         let rest = &text[6..];
-        let gy_pos = rest.to_lowercase().find("from your graveyard").unwrap_or(rest.len());
+        let gy_pos = rest
+            .to_lowercase()
+            .find("from your graveyard")
+            .unwrap_or(rest.len());
         let filter_text = rest[..gy_pos].trim();
         // Simple: count if starts with number
-        let count = filter_text.split_whitespace().next()
+        let count = filter_text
+            .split_whitespace()
+            .next()
             .and_then(|w| w.parse::<u32>().ok())
             .unwrap_or(1);
         return AbilityCost::Exile {
@@ -141,7 +164,11 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         if words.len() >= 4 {
             let count = words[1].parse::<u32>().unwrap_or(1);
             let counter_type = words[2].to_string();
-            return AbilityCost::RemoveCounter { count, counter_type, target: None };
+            return AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: None,
+            };
         }
     }
 
@@ -154,7 +181,9 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    AbilityCost::Unimplemented { description: text.to_string() }
+    AbilityCost::Unimplemented {
+        description: text.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -177,7 +206,12 @@ mod tests {
     fn cost_mana() {
         assert_eq!(
             parse_oracle_cost("{2}{W}"),
-            AbilityCost::Mana { cost: ManaCost::Cost { generic: 2, shards: vec![ManaCostShard::White] } }
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![ManaCostShard::White]
+                }
+            }
         );
     }
 
@@ -196,7 +230,9 @@ mod tests {
     fn cost_sacrifice_self() {
         assert_eq!(
             parse_oracle_cost("Sacrifice ~"),
-            AbilityCost::Sacrifice { target: TargetFilter::SelfRef }
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef
+            }
         );
     }
 
@@ -204,7 +240,13 @@ mod tests {
     fn cost_sacrifice_creature() {
         match parse_oracle_cost("Sacrifice a creature") {
             AbilityCost::Sacrifice { target } => {
-                assert!(matches!(target, TargetFilter::Typed { card_type: Some(TypeFilter::Creature), .. }));
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Creature),
+                        ..
+                    }
+                ));
             }
             other => panic!("Expected Sacrifice, got {:?}", other),
         }
@@ -212,17 +254,26 @@ mod tests {
 
     #[test]
     fn cost_pay_life() {
-        assert_eq!(parse_oracle_cost("Pay 3 life"), AbilityCost::PayLife { amount: 3 });
+        assert_eq!(
+            parse_oracle_cost("Pay 3 life"),
+            AbilityCost::PayLife { amount: 3 }
+        );
     }
 
     #[test]
     fn cost_loyalty_positive() {
-        assert_eq!(parse_oracle_cost("[+2]"), AbilityCost::Loyalty { amount: 2 });
+        assert_eq!(
+            parse_oracle_cost("[+2]"),
+            AbilityCost::Loyalty { amount: 2 }
+        );
     }
 
     #[test]
     fn cost_loyalty_negative() {
-        assert_eq!(parse_oracle_cost("[−3]"), AbilityCost::Loyalty { amount: -3 });
+        assert_eq!(
+            parse_oracle_cost("[−3]"),
+            AbilityCost::Loyalty { amount: -3 }
+        );
     }
 
     #[test]
@@ -234,7 +285,11 @@ mod tests {
     fn cost_discard() {
         assert_eq!(
             parse_oracle_cost("Discard a card"),
-            AbilityCost::Discard { count: 1, filter: None, random: false }
+            AbilityCost::Discard {
+                count: 1,
+                filter: None,
+                random: false
+            }
         );
     }
 

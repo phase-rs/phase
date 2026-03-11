@@ -18,10 +18,7 @@ pub fn next_player(state: &GameState, current: PlayerId) -> PlayerId {
         return current;
     }
 
-    let current_idx = seat_order
-        .iter()
-        .position(|&id| id == current)
-        .unwrap_or(0);
+    let current_idx = seat_order.iter().position(|&id| id == current).unwrap_or(0);
 
     for offset in 1..=len {
         let idx = (current_idx + offset) % len;
@@ -176,7 +173,10 @@ mod tests {
     #[test]
     fn opponents_returns_all_living_except_self() {
         let state = make_state(3, FormatConfig::free_for_all());
-        assert_eq!(opponents(&state, PlayerId(0)), vec![PlayerId(1), PlayerId(2)]);
+        assert_eq!(
+            opponents(&state, PlayerId(0)),
+            vec![PlayerId(1), PlayerId(2)]
+        );
     }
 
     #[test]
@@ -199,7 +199,10 @@ mod tests {
     fn apnap_order_starts_from_active_player() {
         let mut state = make_state(3, FormatConfig::free_for_all());
         state.active_player = PlayerId(1);
-        assert_eq!(apnap_order(&state), vec![PlayerId(1), PlayerId(2), PlayerId(0)]);
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(1), PlayerId(2), PlayerId(0)]
+        );
     }
 
     #[test]
@@ -223,7 +226,14 @@ mod tests {
         state.active_player = PlayerId(3);
         assert_eq!(
             apnap_order(&state),
-            vec![PlayerId(3), PlayerId(4), PlayerId(5), PlayerId(0), PlayerId(1), PlayerId(2)]
+            vec![
+                PlayerId(3),
+                PlayerId(4),
+                PlayerId(5),
+                PlayerId(0),
+                PlayerId(1),
+                PlayerId(2)
+            ]
         );
     }
 

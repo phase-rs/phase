@@ -1,9 +1,9 @@
+use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
-use super::oracle_util::strip_reminder_text;
 
 /// Parse a static/continuous ability line into a StaticDefinition.
 /// Handles: "Enchanted creature gets +N/+M", "has {keyword}",
@@ -149,7 +149,10 @@ fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
 }
 
 fn map_keyword(text: &str) -> Option<Keyword> {
-    let word = text.split(|c: char| c.is_whitespace() || c == '.').next()?.trim();
+    let word = text
+        .split(|c: char| c.is_whitespace() || c == '.')
+        .next()?
+        .trim();
     match word {
         "flying" => Some(Keyword::Flying),
         "trample" => Some(Keyword::Trample),
@@ -175,20 +178,30 @@ mod tests {
     fn static_bonesplitter() {
         let def = parse_static_line("Equipped creature gets +2/+0.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(def.modifications.contains(&ContinuousModification::AddPower { value: 2 }));
-        assert!(def.modifications.contains(&ContinuousModification::AddToughness { value: 0 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }));
     }
 
     #[test]
     fn static_rancor() {
         let def = parse_static_line("Enchanted creature gets +2/+0 and has trample.").unwrap();
         assert!(def.modifications.len() >= 3); // +2, +0, trample
-        assert!(def.modifications.contains(&ContinuousModification::AddKeyword { keyword: Keyword::Trample }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample
+            }));
     }
 
     #[test]
     fn static_cant_be_blocked() {
-        let def = parse_static_line("Questing Beast can't be blocked by creatures with power 2 or less.").unwrap();
+        let def =
+            parse_static_line("Questing Beast can't be blocked by creatures with power 2 or less.")
+                .unwrap();
         assert!(matches!(def.mode, StaticMode::CantBlock));
     }
 
@@ -196,6 +209,12 @@ mod tests {
     fn static_creatures_you_control() {
         let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(matches!(def.affected, Some(TargetFilter::Typed { controller: Some(ControllerRef::You), .. })));
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed {
+                controller: Some(ControllerRef::You),
+                ..
+            })
+        ));
     }
 }

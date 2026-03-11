@@ -1,7 +1,7 @@
-use crate::types::ability::{AbilityKind, ReplacementDefinition, TargetFilter};
-use crate::types::replacements::ReplacementEvent;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
+use crate::types::ability::{AbilityKind, ReplacementDefinition, TargetFilter};
+use crate::types::replacements::ReplacementEvent;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
 /// Handles: "If ~ would die", "Prevent all combat damage",
@@ -9,14 +9,14 @@ use super::oracle_util::strip_reminder_text;
 pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
-    let normalized = text.replace(card_name, "~")
+    let normalized = text
+        .replace(card_name, "~")
         .replace("this creature", "~")
         .replace("This creature", "~");
     let norm_lower = normalized.to_lowercase();
 
     // --- "~ enters the battlefield tapped" ---
-    if norm_lower.contains("enters the battlefield tapped")
-        || norm_lower.contains("enters tapped")
+    if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
         return Some(ReplacementDefinition {
             event: ReplacementEvent::Moved,
@@ -100,20 +100,30 @@ mod tests {
 
     #[test]
     fn replacement_enters_tapped() {
-        let def = parse_replacement_line("Gutterbones enters the battlefield tapped.", "Gutterbones").unwrap();
+        let def =
+            parse_replacement_line("Gutterbones enters the battlefield tapped.", "Gutterbones")
+                .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
     #[test]
     fn replacement_prevent_all_combat_damage() {
-        let def = parse_replacement_line("Prevent all combat damage that would be dealt to you.", "Some Card").unwrap();
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to you.",
+            "Some Card",
+        )
+        .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
     }
 
     #[test]
     fn replacement_damage_cant_be_prevented() {
-        let def = parse_replacement_line("Combat damage that would be dealt by creatures you control can't be prevented.", "Questing Beast").unwrap();
+        let def = parse_replacement_line(
+            "Combat damage that would be dealt by creatures you control can't be prevented.",
+            "Questing Beast",
+        )
+        .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
     }
 

@@ -448,9 +448,7 @@ fn apply_combat_damage(
                                 if let Some(entry) = state
                                     .commander_damage
                                     .iter_mut()
-                                    .find(|e| {
-                                        e.player == *player_id && e.commander == *source_id
-                                    })
+                                    .find(|e| e.player == *player_id && e.commander == *source_id)
                                 {
                                     entry.damage += amount;
                                 } else {

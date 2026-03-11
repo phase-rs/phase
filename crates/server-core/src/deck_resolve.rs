@@ -39,4 +39,3 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<Vec<DeckEntry>
 
     Ok(entries)
 }
-

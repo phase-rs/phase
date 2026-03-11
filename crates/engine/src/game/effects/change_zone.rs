@@ -47,12 +47,10 @@ pub fn resolve(
                             if let Some(crate::types::ability::Duration::UntilHostLeavesPlay) =
                                 &ability.duration
                             {
-                                state
-                                    .exile_links
-                                    .push(crate::types::game_state::ExileLink {
-                                        exiled_id: object_id,
-                                        source_id: ability.source_id,
-                                    });
+                                state.exile_links.push(crate::types::game_state::ExileLink {
+                                    exiled_id: object_id,
+                                    source_id: ability.source_id,
+                                });
                             }
                         }
                     }
@@ -265,7 +263,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.exile.contains(&target_id));
-        assert!(state.exile_links.is_empty(), "Should NOT record ExileLink without UntilHostLeavesPlay");
+        assert!(
+            state.exile_links.is_empty(),
+            "Should NOT record ExileLink without UntilHostLeavesPlay"
+        );
     }
 
     #[test]

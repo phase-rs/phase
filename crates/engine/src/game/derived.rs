@@ -30,7 +30,8 @@ pub fn derive_display_state(state: &mut GameState) {
             let has_devotion_static = obj.static_definitions.iter().any(|def| {
                 matches!(
                     &def.condition,
-                    Some(StaticCondition::CheckSVar { .. }) | Some(StaticCondition::DevotionGE { .. })
+                    Some(StaticCondition::CheckSVar { .. })
+                        | Some(StaticCondition::DevotionGE { .. })
                 )
             });
             if has_devotion_static && !obj.base_color.is_empty() {

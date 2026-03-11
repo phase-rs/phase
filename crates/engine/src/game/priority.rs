@@ -85,7 +85,6 @@ pub fn reset_priority(state: &mut GameState) {
     state.priority_pass_count = 0;
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

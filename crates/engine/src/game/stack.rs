@@ -195,10 +195,7 @@ mod tests {
         GameState::new_two_player(42)
     }
 
-    fn create_aura_on_stack(
-        state: &mut GameState,
-        target_id: ObjectId,
-    ) -> ObjectId {
+    fn create_aura_on_stack(state: &mut GameState, target_id: ObjectId) -> ObjectId {
         let aura_id = create_object(
             state,
             CardId(100),

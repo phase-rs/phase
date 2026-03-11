@@ -1,4 +1,4 @@
-use crate::types::mana::{ManaCost, ManaCostShard, ManaColor};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// Strip reminder text (parenthesized) from a line.
 pub fn strip_reminder_text(text: &str) -> String {
@@ -7,7 +7,9 @@ pub fn strip_reminder_text(text: &str) -> String {
     for ch in text.chars() {
         match ch {
             '(' => depth += 1,
-            ')' => { depth = depth.saturating_sub(1); }
+            ')' => {
+                depth = depth.saturating_sub(1);
+            }
             _ if depth == 0 => result.push(ch),
             _ => {}
         }
@@ -17,8 +19,7 @@ pub fn strip_reminder_text(text: &str) -> String {
 
 /// Replace "~" and "CARDNAME" with the actual card name, then lowercase for matching.
 pub fn self_ref(text: &str, card_name: &str) -> String {
-    text.replace('~', card_name)
-        .replace("CARDNAME", card_name)
+    text.replace('~', card_name).replace("CARDNAME", card_name)
 }
 
 /// Parse an English number word or digit at the start of text.
@@ -26,7 +27,9 @@ pub fn self_ref(text: &str, card_name: &str) -> String {
 pub fn parse_number(text: &str) -> Option<(u32, &str)> {
     let text = text.trim_start();
     // Try digit(s) first
-    let digit_end = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let digit_end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
     if digit_end > 0 {
         if let Ok(n) = text[..digit_end].parse::<u32>() {
             return Some((n, text[digit_end..].trim_start()));
@@ -34,19 +37,36 @@ pub fn parse_number(text: &str) -> Option<(u32, &str)> {
     }
     // English words
     let words: &[(&str, u32)] = &[
-        ("twenty", 20), ("nineteen", 19), ("eighteen", 18), ("seventeen", 17),
-        ("sixteen", 16), ("fifteen", 15), ("fourteen", 14), ("thirteen", 13),
-        ("twelve", 12), ("eleven", 11), ("ten", 10), ("nine", 9),
-        ("eight", 8), ("seven", 7), ("six", 6), ("five", 5),
-        ("four", 4), ("three", 3), ("two", 2), ("one", 1),
-        ("an", 1), ("a", 1),
+        ("twenty", 20),
+        ("nineteen", 19),
+        ("eighteen", 18),
+        ("seventeen", 17),
+        ("sixteen", 16),
+        ("fifteen", 15),
+        ("fourteen", 14),
+        ("thirteen", 13),
+        ("twelve", 12),
+        ("eleven", 11),
+        ("ten", 10),
+        ("nine", 9),
+        ("eight", 8),
+        ("seven", 7),
+        ("six", 6),
+        ("five", 5),
+        ("four", 4),
+        ("three", 3),
+        ("two", 2),
+        ("one", 1),
+        ("an", 1),
+        ("a", 1),
     ];
     let lower = text.to_lowercase();
     for &(word, val) in words {
         if lower.starts_with(word) {
             let rest = &text[word.len()..];
             // "a" and "an" must be followed by space or end
-            if word.len() <= 2 && !rest.starts_with(|c: char| c.is_whitespace()) && !rest.is_empty() {
+            if word.len() <= 2 && !rest.starts_with(|c: char| c.is_whitespace()) && !rest.is_empty()
+            {
                 continue;
             }
             return Some((val, rest.trim_start()));
@@ -199,7 +219,9 @@ mod tests {
     #[test]
     fn strip_reminder_text_basic() {
         assert_eq!(
-            strip_reminder_text("Flying (This creature can't be blocked except by creatures with flying.)"),
+            strip_reminder_text(
+                "Flying (This creature can't be blocked except by creatures with flying.)"
+            ),
             "Flying"
         );
     }
@@ -214,25 +236,43 @@ mod tests {
 
     #[test]
     fn strip_reminder_text_no_parens() {
-        assert_eq!(strip_reminder_text("Destroy target creature."), "Destroy target creature.");
+        assert_eq!(
+            strip_reminder_text("Destroy target creature."),
+            "Destroy target creature."
+        );
     }
 
     #[test]
     fn self_ref_replaces_tilde() {
-        assert_eq!(self_ref("~ deals 3 damage", "Lightning Bolt"), "Lightning Bolt deals 3 damage");
+        assert_eq!(
+            self_ref("~ deals 3 damage", "Lightning Bolt"),
+            "Lightning Bolt deals 3 damage"
+        );
     }
 
     #[test]
     fn parse_mana_symbols_basic() {
         let (cost, rest) = parse_mana_symbols("{2}{W}").unwrap();
-        assert_eq!(cost, ManaCost::Cost { generic: 2, shards: vec![ManaCostShard::White] });
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::White]
+            }
+        );
         assert_eq!(rest, "");
     }
 
     #[test]
     fn parse_mana_symbols_hybrid() {
         let (cost, _) = parse_mana_symbols("{G/W}").unwrap();
-        assert_eq!(cost, ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::GreenWhite] });
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::GreenWhite]
+            }
+        );
     }
 
     #[test]

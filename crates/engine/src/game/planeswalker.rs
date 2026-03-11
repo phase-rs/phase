@@ -252,14 +252,17 @@ mod tests {
             PlayerId(0),
             "Liliana",
             5,
-            vec![make_loyalty_ability(-3, Effect::Destroy {
-                target: crate::types::ability::TargetFilter::Typed {
-                    card_type: Some(crate::types::ability::TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
+            vec![make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Typed {
+                        card_type: Some(crate::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
+                    },
                 },
-            })],
+            )],
         );
 
         let mut events = Vec::new();
@@ -375,14 +378,17 @@ mod tests {
             PlayerId(0),
             "Liliana",
             2,
-            vec![make_loyalty_ability(-3, Effect::Destroy {
-                target: crate::types::ability::TargetFilter::Typed {
-                    card_type: Some(crate::types::ability::TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
+            vec![make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Typed {
+                        card_type: Some(crate::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
+                    },
                 },
-            })],
+            )],
         );
 
         let mut events = Vec::new();
@@ -431,16 +437,22 @@ mod tests {
             1
         );
         assert_eq!(
-            parse_loyalty_cost(&make_loyalty_ability(-3, Effect::Destroy {
-                target: crate::types::ability::TargetFilter::Any,
-            })),
+            parse_loyalty_cost(&make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Any,
+                }
+            )),
             -3
         );
         assert_eq!(
-            parse_loyalty_cost(&make_loyalty_ability(0, Effect::Mill {
-                count: 3,
-                target: crate::types::ability::TargetFilter::Any,
-            })),
+            parse_loyalty_cost(&make_loyalty_ability(
+                0,
+                Effect::Mill {
+                    count: 3,
+                    target: crate::types::ability::TargetFilter::Any,
+                }
+            )),
             0
         );
         // No loyalty cost

@@ -33,7 +33,13 @@ fn snapshot_murder() {
 
 #[test]
 fn snapshot_counterspell() {
-    let result = parse("Counter target spell.", "Counterspell", &[], &["Instant"], &[]);
+    let result = parse(
+        "Counter target spell.",
+        "Counterspell",
+        &[],
+        &["Instant"],
+        &[],
+    );
     insta::assert_json_snapshot!(result);
 }
 
