@@ -38,12 +38,28 @@
   ],
   "triggers": [
     {
-      "description": "When CARDNAME enters, exile target nonland permanent an opponent controls until CARDNAME leaves the battlefield.",
-      "destination": "Battlefield",
       "mode": "ChangesZone",
+      "destination": "Battlefield",
       "origin": "Battlefield",
       "valid_card": {
         "type": "SelfRef"
+      },
+      "description": "When CARDNAME enters, exile target nonland permanent an opponent controls until CARDNAME leaves the battlefield.",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": "Battlefield",
+          "destination": "Exile",
+          "target": {
+            "type": "Typed",
+            "card_type": "Permanent",
+            "controller": "Opponent",
+            "properties": [{ "type": "NonType", "value": "Land" }]
+          }
+        },
+        "duration": "UntilHostLeavesPlay",
+        "target_prompt": "Select target nonland permanent an opponent controls"
       }
     }
   ]

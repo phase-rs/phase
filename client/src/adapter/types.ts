@@ -211,7 +211,8 @@ export type WaitingFor =
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number } }
-  | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } };
+  | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
