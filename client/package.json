@@ -15,10 +15,11 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
     "@tailwindcss/vite": "^4.2.1",
+    "@tauri-apps/api": "^2",
     "framer-motion": "^12.35.1",
     "idb-keyval": "^6.2.2",
+    "peerjs": "^1.5.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router": "^7.13.1",
@@ -28,8 +29,8 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
     "@eslint/js": "^9.21.0",
+    "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
     "@types/react": "^19.0.0",
