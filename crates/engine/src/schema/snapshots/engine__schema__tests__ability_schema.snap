@@ -895,6 +895,12 @@ expression: schema
                 "$ref": "#/$defs/ManaColor"
               }
             },
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
             "keywords": {
               "type": "array",
               "default": [],

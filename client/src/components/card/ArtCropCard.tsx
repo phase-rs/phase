@@ -26,12 +26,12 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const cardName = obj?.name ?? "";
-  const { src, isLoading } = useCardImage(cardName, { size: "art_crop" });
+  const isToken = obj?.card_id === 0;
+  const { src, isLoading } = useCardImage(cardName, { size: "art_crop", isToken });
 
   if (!obj) return null;
 
   const hasDfc = obj.back_face != null;
-  const isToken = obj.card_id === 0;
   const frameColor = getFrameColor(obj.color);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);

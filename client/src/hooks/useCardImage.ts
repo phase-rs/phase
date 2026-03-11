@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
-import { fetchCardImageUrl } from "../services/scryfall.ts";
+import { fetchCardImageUrl, fetchTokenImageUrl } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
   size?: "small" | "normal" | "large" | "art_crop";
   faceIndex?: number;
+  isToken?: boolean;
 }
 
 interface UseCardImageResult {
@@ -18,6 +19,7 @@ export function useCardImage(
 ): UseCardImageResult {
   const size = options?.size ?? "normal";
   const faceIndex = options?.faceIndex ?? 0;
+  const isToken = options?.isToken ?? false;
   const [src, setSrc] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -30,8 +32,9 @@ export function useCardImage(
       setSrc(null);
 
       try {
-        // Check cache first
-        const cached = await getCachedImage(cardName, size);
+        // Check cache first (tokens use a prefixed key to avoid collisions)
+        const cacheKey = isToken ? `token:${cardName}` : cardName;
+        const cached = await getCachedImage(cacheKey, size);
         if (cached) {
           if (!cancelled) {
             objectUrl = cached;
@@ -44,7 +47,9 @@ export function useCardImage(
         }
 
         // Cache miss - fetch from Scryfall
-        const directUrl = await fetchCardImageUrl(cardName, faceIndex, size);
+        const directUrl = isToken
+          ? await fetchTokenImageUrl(cardName, size)
+          : await fetchCardImageUrl(cardName, faceIndex, size);
         if (!cancelled) {
           setSrc(directUrl);
           setIsLoading(false);
@@ -64,7 +69,7 @@ export function useCardImage(
         revokeImageUrl(objectUrl);
       }
     };
-  }, [cardName, size, faceIndex]);
+  }, [cardName, size, faceIndex, isToken]);
 
   return { src, isLoading };
 }

@@ -11,7 +11,8 @@
         "power": 0,
         "toughness": 0,
         "type": "Token",
-        "types": []
+        "types": [],
+        "count": 2
       },
       "kind": "Spell",
       "sub_ability": null

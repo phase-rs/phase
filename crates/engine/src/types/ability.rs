@@ -289,6 +289,8 @@ pub enum Effect {
         colors: Vec<ManaColor>,
         #[serde(default)]
         keywords: Vec<Keyword>,
+        #[serde(default = "default_one")]
+        count: u32,
     },
     GainLife {
         amount: i32,

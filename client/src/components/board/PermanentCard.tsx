@@ -196,7 +196,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       ) : (
         <>
           <div className="relative z-10">
-            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={obj.color} />
+            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={obj.color} isToken={obj.card_id === 0} />
           </div>
 
           {/* P/T box for creatures */}

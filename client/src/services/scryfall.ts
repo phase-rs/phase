@@ -123,6 +123,23 @@ export async function fetchCardImageUrl(
   return getImageUrl(card, size, faceIndex);
 }
 
+export async function fetchTokenImageUrl(
+  tokenName: string,
+  size: ImageSize = "normal",
+): Promise<string> {
+  const query = `t:token !"${tokenName}"`;
+  const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=released&dir=desc`;
+  const response = await rateLimitedFetch(url);
+  if (!response.ok) {
+    throw new Error(`No token image found for "${tokenName}"`);
+  }
+  const data: ScryfallSearchResponse = await response.json();
+  if (data.data.length === 0) {
+    throw new Error(`No token image found for "${tokenName}"`);
+  }
+  return getImageUrl(data.data[0], size, 0);
+}
+
 /**
  * Search Scryfall for cards matching query. Uses rate limiting and handles 429s.
  */

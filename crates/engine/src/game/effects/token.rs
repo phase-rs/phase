@@ -264,14 +264,15 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (script_name, fallback_power, fallback_toughness) = match &ability.effect {
+    let (script_name, fallback_power, fallback_toughness, count) = match &ability.effect {
         Effect::Token {
             name,
             power,
             toughness,
+            count,
             ..
-        } => (name.clone(), Some(*power), Some(*toughness)),
-        _ => ("Token".to_string(), None, None),
+        } => (name.clone(), Some(*power), Some(*toughness), *count),
+        _ => ("Token".to_string(), None, None, 1),
     };
 
     let parsed = parse_token_script(&script_name);
@@ -281,75 +282,77 @@ pub fn resolve(
         .map(|a| a.display_name.clone())
         .unwrap_or_else(|| script_name.clone());
 
-    let proposed = ProposedEvent::CreateToken {
-        owner: ability.controller,
-        name: display_name.clone(),
-        applied: HashSet::new(),
-    };
+    for _ in 0..count {
+        let proposed = ProposedEvent::CreateToken {
+            owner: ability.controller,
+            name: display_name.clone(),
+            applied: HashSet::new(),
+        };
 
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if let ProposedEvent::CreateToken {
-                owner,
-                name: token_name,
-                ..
-            } = event
-            {
-                let obj_id = zones::create_object(
-                    state,
-                    CardId(0),
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::CreateToken {
                     owner,
-                    token_name.clone(),
-                    Zone::Battlefield,
-                );
+                    name: token_name,
+                    ..
+                } = event
+                {
+                    let obj_id = zones::create_object(
+                        state,
+                        CardId(0),
+                        owner,
+                        token_name.clone(),
+                        Zone::Battlefield,
+                    );
 
-                if let Some(obj) = state.objects.get_mut(&obj_id) {
-                    if let Some(attrs) = &parsed {
-                        obj.power = attrs.power;
-                        obj.toughness = attrs.toughness;
-                        obj.base_power = attrs.power;
-                        obj.base_toughness = attrs.toughness;
-                        obj.card_types = CardType {
-                            supertypes: vec![],
-                            core_types: attrs.core_types.clone(),
-                            subtypes: attrs.subtypes.clone(),
-                        };
-                        obj.color = attrs.colors.clone();
-                        obj.base_color = attrs.colors.clone();
-                        obj.keywords = attrs.keywords.clone();
-                        obj.base_keywords = attrs.keywords.clone();
-                    } else {
-                        obj.power = fallback_power;
-                        obj.toughness = fallback_toughness;
-                        if fallback_power.is_some() {
-                            obj.card_types.core_types.push(CoreType::Creature);
+                    if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        if let Some(attrs) = &parsed {
+                            obj.power = attrs.power;
+                            obj.toughness = attrs.toughness;
+                            obj.base_power = attrs.power;
+                            obj.base_toughness = attrs.toughness;
+                            obj.card_types = CardType {
+                                supertypes: vec![],
+                                core_types: attrs.core_types.clone(),
+                                subtypes: attrs.subtypes.clone(),
+                            };
+                            obj.color = attrs.colors.clone();
+                            obj.base_color = attrs.colors.clone();
+                            obj.keywords = attrs.keywords.clone();
+                            obj.base_keywords = attrs.keywords.clone();
+                        } else {
+                            obj.power = fallback_power;
+                            obj.toughness = fallback_toughness;
+                            if fallback_power.is_some() {
+                                obj.card_types.core_types.push(CoreType::Creature);
+                            }
                         }
                     }
+
+                    state.layers_dirty = true;
+
+                    events.push(GameEvent::TokenCreated {
+                        object_id: obj_id,
+                        name: token_name,
+                    });
                 }
-
-                state.layers_dirty = true;
-
-                events.push(GameEvent::TokenCreated {
-                    object_id: obj_id,
-                    name: token_name,
-                });
             }
-        }
-        ReplacementResult::Prevented => {
-            // Token creation was prevented by a replacement effect — no EffectResolved
-            return Ok(());
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            let candidate_count = state
-                .pending_replacement
-                .as_ref()
-                .map(|p| p.candidates.len())
-                .unwrap_or(0);
-            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                player,
-                candidate_count,
-            };
-            return Ok(());
+            ReplacementResult::Prevented => {
+                // This individual token was prevented — continue creating the rest
+                continue;
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                let candidate_count = state
+                    .pending_replacement
+                    .as_ref()
+                    .map(|p| p.candidates.len())
+                    .unwrap_or(0);
+                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                };
+                return Ok(());
+            }
         }
     }
 
@@ -472,6 +475,7 @@ mod tests {
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
+                count: 1,
             },
             vec![],
             ObjectId(100),
@@ -533,6 +537,7 @@ mod tests {
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
+                count: 1,
             },
             vec![],
             ObjectId(100),
@@ -563,5 +568,43 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Token")
         ));
+    }
+
+    #[test]
+    fn creates_multiple_tokens_with_count() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "w_1_1_soldier".to_string(),
+                power: 0,
+                toughness: 0,
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                count: 2,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Two soldiers should be on the battlefield
+        assert_eq!(state.battlefield.len(), 2);
+        for &obj_id in &state.battlefield {
+            let obj = &state.objects[&obj_id];
+            assert_eq!(obj.name, "Soldier");
+            assert_eq!(obj.power, Some(1));
+            assert_eq!(obj.toughness, Some(1));
+            assert_eq!(obj.card_id, CardId(0));
+        }
+
+        // Two TokenCreated events + one EffectResolved
+        let token_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::TokenCreated { .. }))
+            .collect();
+        assert_eq!(token_events.len(), 2);
     }
 }
