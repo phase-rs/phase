@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: executing
-stopped_at: Completed 26-05-PLAN.md
-last_updated: "2026-03-11T02:05:26.000Z"
-last_activity: 2026-03-11 — Completed Plan 26-05 (Embedded Server & Connection UX)
+status: Between phases
+stopped_at: Phase 28 context revised
+last_updated: "2026-03-11T05:10:39.345Z"
+last_activity: 2026-03-10 — Completed Phase 26 (Multiplayer Polish) — 26/26 verification passed
 progress:
-  total_phases: 6
+  total_phases: 8
   completed_phases: 6
   total_plans: 21
   completed_plans: 21
-  percent: 100
+  percent: 88
 ---
 
 # Project State
@@ -21,16 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 26 Polish & Fix Multi-player with Lobby and Embedded Server — In Progress
+**Current focus:** Phase 27 Aura Casting & Triggered Targeting — Pending planning
 
 ## Current Position
 
-Phase: 26 (sixth of 6) — Polish & Fix Multi-player with Lobby and Embedded Server
-Plan: 6/6 complete
-Status: Complete
-Last activity: 2026-03-11 — Completed Plan 26-05 (Embedded Server & Connection UX)
+Phase: 26 complete — Phase 27 next (pending), Phase 28 planned (3 plans, 0 executed)
+Status: Between phases
+Last activity: 2026-03-10 — Completed Phase 26 (Multiplayer Polish) — 26/26 verification passed
 
-Progress: [██████████] 100%
+Progress: [█████████████████░░░] 21/24 plans (88%)
 
 ## Performance Metrics
 
@@ -140,6 +139,7 @@ Recent decisions affecting current work:
 ### Roadmap Evolution
 
 - Phase 26 added: Polish and fix multi-player with lobby and embedded server
+- Phase 28 added: Native Ability Data Model — Eliminate all remaining Forge scripting DSL from card data format and engine runtime
 
 ### Pending Todos
 
@@ -151,6 +151,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T02:05:26Z
-Stopped at: Completed 26-05-PLAN.md
-Resume file: None
+Last session: 2026-03-11T05:10:39.342Z
+Stopped at: Phase 28 context revised
+Resume file: .planning/phases/28-native-ability-data-model/28-CONTEXT.md
