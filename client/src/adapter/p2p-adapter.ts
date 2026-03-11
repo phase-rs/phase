@@ -2,6 +2,7 @@ import type {
   EngineAdapter,
   GameAction,
   GameEvent,
+  GameObject,
   GameState,
   PlayerId,
 } from "./types";
@@ -24,17 +25,46 @@ export type P2PAdapterEvent =
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
+/** Scrub a card object so only its zone/ID remain visible (card back). */
+function scrubObject(obj: GameObject): void {
+  obj.face_down = true;
+  obj.name = "Hidden Card";
+  obj.abilities = [];
+  obj.keywords = [];
+  obj.base_keywords = [];
+  obj.power = null;
+  obj.toughness = null;
+  obj.loyalty = null;
+  obj.color = [];
+  obj.base_color = [];
+  obj.svars = {};
+  obj.trigger_definitions = [];
+  obj.replacement_definitions = [];
+  obj.static_definitions = [];
+}
+
 /**
  * Filter game state for the guest player.
- * Hides the host's private zones (hand, library) from the guest's view.
+ * Matches server-side filter_state_for_player: keeps hand/library arrays
+ * intact (preserving card count) but scrubs object details.
  */
 function filterStateForGuest(state: GameState): GameState {
   const clone = JSON.parse(JSON.stringify(state)) as GameState;
-  // Player 0 is the host; hide their hand and library from guest
-  if (clone.players[0]) {
-    clone.players[0].hand = [];
-    clone.players[0].library = [];
+
+  // Scrub host's hand objects (guest sees card backs, not contents)
+  for (const objId of clone.players[0]?.hand ?? []) {
+    const obj = clone.objects[objId];
+    if (obj) scrubObject(obj);
   }
+
+  // Scrub library objects for both players (hide card order/identity)
+  for (const player of clone.players) {
+    for (const objId of player.library) {
+      const obj = clone.objects[objId];
+      if (obj) scrubObject(obj);
+    }
+  }
+
   return clone;
 }
 
