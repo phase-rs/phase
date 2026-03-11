@@ -53,7 +53,7 @@ export function CompactStrip({ playerId, onClick }: CompactStripProps) {
     >
       {/* Player name and life */}
       <div className="flex flex-col items-start">
-        <span className="text-xs text-gray-400">Opp {playerId}</span>
+        <span className="text-xs text-gray-400">Opp {playerId + 1}</span>
         <span className={`text-lg font-bold tabular-nums ${lifeColor}`}>
           {player.life}
         </span>

@@ -23,7 +23,7 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
 
   const isOpponentTurn = useGameStore((s) => s.gameState?.active_player === opponentId);
 
-  const label = opponentName ?? `Opponent ${opponentId + 1}`;
+  const label = opponentName ?? `Opp ${opponentId + 1}`;
 
   return (
     <div data-player-hud={String(opponentId)} className="flex items-center justify-center py-1">
