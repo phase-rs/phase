@@ -50,6 +50,7 @@
 - [x] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation (completed 2026-03-10)
 - [x] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0 (completed 2026-03-11)
 - [x] **Phase 26: Polish & Fix Multiplayer** - Lobby, P2P, Tauri sidecar, concede/emotes/timers, connection UX (completed 2026-03-11)
+- [x] **Phase 27: Aura Casting & Triggered Targeting** - Aura enchant targeting, triggered ability target selection, exile return tracking (completed 2026-03-11)
 
 ## Phase Details
 

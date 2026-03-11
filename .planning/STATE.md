@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 27-02-PLAN.md
-last_updated: "2026-03-11T08:41:28Z"
-last_activity: 2026-03-11 — Phase 27 Plan 02 complete (Aura casting with enchant target selection and attachment on resolution)
+stopped_at: Completed 27-03-PLAN.md
+last_updated: "2026-03-11T08:49:00Z"
+last_activity: 2026-03-11 — Phase 27 Plan 03 complete (triggered targeting and exile return tracking)
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 30
-  completed_plans: 28
-  percent: 93
+  completed_plans: 29
+  percent: 97
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Executing (Plans 01-02 complete, Plan 03 remaining)
+**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Complete (all 3 plans)
 
 ## Current Position
 
-Phase: 27 executing — Plans 01-02 complete, Plan 03 next
-Status: Executing Phase 27
-Last activity: 2026-03-11 — Phase 27 Plan 02 complete (Aura casting with enchant target selection and attachment on resolution)
+Phase: 27 complete — All 3 plans complete
+Status: Phase 27 Complete
+Last activity: 2026-03-11 — Phase 27 Plan 03 complete (triggered targeting and exile return tracking)
 
-Progress: [██████████████████░░] 28/30 plans (93%)
+Progress: [███████████████████░] 29/30 plans (97%)
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [██████████████████░░] 28/30 p
 | Phase 28 P04 | 8min | 2 tasks | 30127 files |
 | Phase 27 P01 | 11min | 2 tasks | 11 files |
 | Phase 27 P02 | 6min | 2 tasks | 2 files |
+| Phase 27 P03 | 13min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -168,6 +169,10 @@ Recent decisions affecting current work:
 - [27-02]: Aura targeting inserted before has_targeting_requirement -- Auras target via Enchant keyword, not via Effect target field
 - [27-02]: spell_targets cloned before fizzle path in resolve_top to preserve targets for Aura attachment after resolution
 - [27-02]: Re-read obj after evaluate_layers in casting.rs to satisfy Rust borrow checker
+- [27-03]: extract_target_filter_from_effect excludes SelfRef/Controller/None as non-targeting (no player choice needed)
+- [27-03]: Multi-target triggers return early from process_triggers; remaining triggers deferred until after target selection
+- [27-03]: check_exile_returns placed after SBAs and before triggers so returned permanents get ETB triggers
+- [27-03]: Exile return gracefully handles cards already moved from exile (no panic, no-op)
 
 ### Roadmap Evolution
 
@@ -184,6 +189,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T08:41:28Z
-Stopped at: Completed 27-02-PLAN.md
-Resume file: .planning/phases/27-aura-casting-and-triggered-targeting/27-03-PLAN.md
+Last session: 2026-03-11T08:49:00Z
+Stopped at: Completed 27-03-PLAN.md
+Resume file: Phase 27 complete
