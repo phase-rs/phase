@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 28-04-PLAN.md
-last_updated: "2026-03-11T07:05:00Z"
-last_activity: 2026-03-11 — Phase 28 Plan 04 complete (data migration of 30K ability JSON files)
+stopped_at: Completed 27-01-PLAN.md
+last_updated: "2026-03-11T08:32:00Z"
+last_activity: 2026-03-11 — Phase 27 Plan 01 complete (type contracts for aura casting and triggered targeting)
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 27
-  completed_plans: 26
-  percent: 96
+  total_plans: 30
+  completed_plans: 27
+  percent: 90
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-04, 06 complete, Plan 05 remaining)
+**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Executing (Plan 01 complete, Plans 02-03 remaining)
 
 ## Current Position
 
-Phase: 28 executing — Plans 01-04, 06 complete, Plan 05 next
-Status: Executing Phase 28
-Last activity: 2026-03-11 — Phase 28 Plan 04 complete (data migration of 30K ability JSON files)
+Phase: 27 executing — Plan 01 complete, Plans 02-03 next
+Status: Executing Phase 27
+Last activity: 2026-03-11 — Phase 27 Plan 01 complete (type contracts for aura casting and triggered targeting)
 
-Progress: [███████████████████░] 26/27 plans (96%)
+Progress: [█████████████████░░░] 27/30 plans (90%)
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [███████████████████░] 26/27 p
 | Phase 28 P03 | 25min | 3 tasks | 26 files |
 | Phase 28 P06 | 90min | 2 tasks | 35 files |
 | Phase 28 P04 | 8min | 2 tasks | 30127 files |
+| Phase 27 P01 | 11min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -160,6 +161,9 @@ Recent decisions affecting current work:
 - [28-04]: JSON-level migration via serde_json::Value instead of typed deserialization -- avoids old-format/new-type mismatch
 - [28-04]: Unresolvable SVar Execute references logged as warnings (15,930 triggers) -- SVars not available in JSON files
 - [28-04]: Migration binary runs without forge-compat feature -- operates on JSON values, not Forge parser
+- [27-01]: build_resolved_from_def carries duration from AbilityDefinition to ResolvedAbility in both casting.rs and triggers.rs
+- [27-01]: ExileLink tracks exiled_id/source_id as simple struct for exile-return resolution
+- [27-01]: Oblivion Ring LTB trigger left without execute -- handled by ExileLink system in Plan 03
 
 ### Roadmap Evolution
 
@@ -176,6 +180,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T07:05:00Z
-Stopped at: Completed 28-04-PLAN.md
-Resume file: .planning/phases/28-native-ability-data-model/28-05-PLAN.md
+Last session: 2026-03-11T08:32:00Z
+Stopped at: Completed 27-01-PLAN.md
+Resume file: .planning/phases/27-aura-casting-and-triggered-targeting/27-02-PLAN.md
