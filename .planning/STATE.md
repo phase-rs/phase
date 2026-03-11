@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 29-16-PLAN.md
-last_updated: "2026-03-11T18:34:08.444Z"
-last_activity: 2026-03-11 — Phase 29 Plan 16 complete (Effects Modules N-Z PlayerId(1-x) Migration)
+stopped_at: Completed 29-15-PLAN.md
+last_updated: "2026-03-11T18:36:25.968Z"
+last_activity: 2026-03-11 — Phase 29 Plan 15 complete (Remaining PlayerId(1-x) Migration)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 47
-  completed_plans: 37
-  percent: 80
+  completed_plans: 39
+  percent: 81
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 29 — Plan 16 of 16 complete
+Phase: 29 — Plan 15 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 16 complete (Effects Modules N-Z PlayerId(1-x) Migration)
+Last activity: 2026-03-11 — Phase 29 Plan 15 complete (Remaining PlayerId(1-x) Migration)
 
-Progress: [████████████████░░░░] 37/46 plans (80%)
+Progress: [████████████████░░░░] 38/47 plans (81%)
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [████████████████░░░░] 37/46 p
 | Phase 29 P03 | 25min | 2 tasks | 11 files |
 | Phase 29 P05 | 3min | 1 tasks | 3 files |
 | Phase 29 P16 | 2min | 1 tasks | 0 files |
+| Phase 29 P15 | 4min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -199,6 +200,7 @@ Recent decisions affecting current work:
 - [29-05]: engine.rs DeclareBlockers uses WaitingFor player field instead of recomputing defending player
 - [29-05]: opponent() removed from priority.rs (zero external callers in engine crate)
 - [Phase 29]: No code changes needed for Plan 16 — Plan 05 already eliminated all PlayerId(1-x) from effects modules
+- [Phase 29]: FormatConfig::standard() used for N-player scenario constructor (20 life default)
 
 ### Roadmap Evolution
 
@@ -216,6 +218,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:34:06.452Z
-Stopped at: Completed 29-16-PLAN.md
+Last session: 2026-03-11T18:36:25.965Z
+Stopped at: Completed 29-15-PLAN.md
 Resume file: None
