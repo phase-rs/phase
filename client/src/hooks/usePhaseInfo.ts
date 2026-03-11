@@ -1,5 +1,6 @@
 import type { Phase } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
+import { usePlayerId } from "./usePlayerId.ts";
 
 export type PhaseDisplayKey = "draw" | "main1" | "combat" | "main2" | "end";
 
@@ -72,20 +73,23 @@ const COMBAT_PHASES = new Set<Phase>([
   "EndCombat",
 ]);
 
-function getAdvanceLabel(phase: Phase, hasStackItems: boolean): string {
+function getAdvanceLabel(phase: Phase, hasStackItems: boolean, isMyTurn: boolean): string {
   if (hasStackItems) return "Resolve";
-  if (phase === "PreCombatMain") return "To Combat";
+  if (isMyTurn && phase === "PreCombatMain") return "To Combat";
   return "Next";
 }
 
 export function usePhaseInfo(): PhaseInfo {
   const phase = useGameStore((s) => s.gameState?.phase ?? "Untap");
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const activePlayer = useGameStore((s) => s.gameState?.active_player ?? 0);
+  const playerId = usePlayerId();
+  const isMyTurn = activePlayer === playerId;
 
   const displayKey = PHASE_TO_DISPLAY[phase];
   const currentOrder = DISPLAY_ORDER[displayKey];
   const isCombatPhase = COMBAT_PHASES.has(phase);
-  const advanceLabel = getAdvanceLabel(phase, stackLength > 0);
+  const advanceLabel = getAdvanceLabel(phase, stackLength > 0, isMyTurn);
 
   return {
     displayKey,
