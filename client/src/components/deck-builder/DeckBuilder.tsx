@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
+import { deduplicateEntries } from "../../services/deckParser";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
@@ -144,7 +145,7 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
     if (data) {
       const parsed = JSON.parse(data);
-      setDeck({ main: parsed.main ?? [], sideboard: parsed.sideboard ?? [] });
+      setDeck({ main: deduplicateEntries(parsed.main ?? []), sideboard: deduplicateEntries(parsed.sideboard ?? []) });
       setCommanders(parsed.commander ?? []);
       if (parsed.format) onFormatChange(parsed.format);
       setDeckName(name);

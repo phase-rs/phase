@@ -11,6 +11,14 @@ export interface ParsedDeck {
 
 type DeckSection = "main" | "sideboard" | "commander";
 
+export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
+  const map = new Map<string, number>();
+  for (const entry of entries) {
+    map.set(entry.name, (map.get(entry.name) ?? 0) + entry.count);
+  }
+  return Array.from(map, ([name, count]) => ({ count, name }));
+}
+
 /**
  * Parse a .dck/.dec format deck file.
  * Format: "count CardName" per line (or "countx CardName").
@@ -62,6 +70,8 @@ export function parseDeckFile(content: string): ParsedDeck {
     deck.commander = commanderEntries.map((e) => e.name);
   }
 
+  deck.main = deduplicateEntries(deck.main);
+  deck.sideboard = deduplicateEntries(deck.sideboard);
   return deck;
 }
 
@@ -131,6 +141,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
     deck.commander = commanderEntries.map((e) => e.name);
   }
 
+  deck.main = deduplicateEntries(deck.main);
+  deck.sideboard = deduplicateEntries(deck.sideboard);
   return deck;
 }
 
