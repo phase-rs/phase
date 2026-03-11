@@ -26,6 +26,12 @@ impl CardDatabase {
         super::json_loader::load_json(mtgjson_path, abilities_dir)
     }
 
+    /// Build from MTGJSON atomic cards, running the Oracle text parser.
+    /// Used by tests and the oracle_gen binary for library-level access.
+    pub fn from_mtgjson(mtgjson_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        super::oracle_loader::load_from_mtgjson(mtgjson_path)
+    }
+
     /// Load from a pre-processed card-data export (HashMap<String, CardFace> as JSON).
     pub fn from_export(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
