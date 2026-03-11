@@ -58,7 +58,7 @@ function resolveEntries(
 ): Array<{ card: CardFace; count: number }> {
   const entries: Array<{ card: CardFace; count: number }> = [];
   for (const entry of deckCards) {
-    const card = cardDb[entry.name];
+    const card = cardDb[entry.name.toLowerCase()];
     if (card) {
       entries.push({ card, count: entry.count });
     } else {
