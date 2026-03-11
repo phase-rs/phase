@@ -91,9 +91,13 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
                 return if is_combat { 0.9 } else { 0.3 };
             }
 
-            // Counterspells: hold for opponent's turn
+            // Counterspells: only worth casting if there's something on the stack
             if has_counter {
-                return if !is_own_turn { 0.8 } else { 0.1 };
+                return if !is_own_turn && !state.stack.is_empty() {
+                    0.8
+                } else {
+                    0.1
+                };
             }
 
             // Creatures: prefer main phase 1
@@ -256,9 +260,28 @@ mod tests {
     }
 
     #[test]
-    fn counterspells_score_high_on_opponent_turn() {
+    fn counterspells_score_high_on_opponent_turn_with_stack() {
+        use engine::types::ability::ResolvedAbility;
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::ObjectId;
+
         let mut state = make_state();
         state.active_player = PlayerId(1); // Opponent's turn
+        // Put something on the stack so the counterspell has a target
+        state.stack.push(StackEntry {
+            id: ObjectId(999),
+            source_id: ObjectId(998),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(500),
+                ability: ResolvedAbility::new(
+                    Effect::Draw { count: 1 },
+                    Vec::new(),
+                    ObjectId(998),
+                    PlayerId(1),
+                ),
+            },
+        });
         let card_id = add_spell_to_hand(
             &mut state,
             PlayerId(0),
@@ -279,7 +302,35 @@ mod tests {
         );
         assert!(
             score > 0.5,
-            "Counterspell should score high on opponent turn, got {score}"
+            "Counterspell should score high on opponent turn with stack, got {score}"
+        );
+    }
+
+    #[test]
+    fn counterspells_score_low_with_empty_stack() {
+        let mut state = make_state();
+        state.active_player = PlayerId(1); // Opponent's turn, but stack is empty
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            vec![make_ability(Effect::Counter {
+                target: TargetFilter::Any,
+            })],
+        );
+
+        let score = should_play_now(
+            &state,
+            &GameAction::CastSpell {
+                card_id,
+                targets: Vec::new(),
+            },
+            PlayerId(0),
+        );
+        assert!(
+            score <= 0.5,
+            "Counterspell should score low with empty stack, got {score}"
         );
     }
 
