@@ -1,3 +1,4 @@
+use engine::game::combat::AttackTarget;
 use engine::game::players;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -6,15 +7,22 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::eval::evaluate_creature;
+use crate::eval::{evaluate_creature, threat_level};
 
-/// Choose which creatures to attack with.
-/// Evaluates whether each attack is profitable based on creature values
-/// and likely blocker assignments. Aggressive when ahead on life.
-pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+/// Choose which creatures to attack with and assign each to an opponent.
+/// Returns `(ObjectId, AttackTarget)` pairs for per-creature targeting.
+/// Strategy: evaluate threat per opponent, check for lethal on weakest,
+/// then distribute remaining attackers toward highest-threat opponent.
+pub fn choose_attackers_with_targets(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
+    if opponents.is_empty() {
+        return Vec::new();
+    }
+
     let p_life = state.players[player.0 as usize].life;
-    // Compare against the most threatening opponent (lowest life = closest to lethal)
     let min_opp_life = opponents
         .iter()
         .map(|&opp| state.players[opp.0 as usize].life)
@@ -35,7 +43,7 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         })
         .collect();
 
-    // Collect blockers from ALL opponents
+    // Collect blockers per opponent
     let opponent_blockers: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -52,8 +60,8 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         })
         .collect();
 
-    let mut attackers = Vec::new();
-
+    // Determine which creatures should attack (same logic as before)
+    let mut attacking_ids = Vec::new();
     for &id in &candidates {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
@@ -63,23 +71,15 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         let my_value = evaluate_creature(state, id);
         let my_power = obj.power.unwrap_or(0);
 
-        // Always attack with evasion creatures (flying, menace, shadow)
         let has_evasion = obj.has_keyword(&Keyword::Flying)
             || obj.has_keyword(&Keyword::Menace)
             || obj.has_keyword(&Keyword::Shadow);
 
-        if has_evasion {
-            attackers.push(id);
+        if has_evasion || opponent_blockers.is_empty() {
+            attacking_ids.push(id);
             continue;
         }
 
-        // If no blockers exist, always attack
-        if opponent_blockers.is_empty() {
-            attackers.push(id);
-            continue;
-        }
-
-        // Check if attacking is profitable
         let best_blocker_value = opponent_blockers
             .iter()
             .filter(|&&bid| {
@@ -97,24 +97,108 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         match best_blocker_value {
-            None => {
-                // No blocker can block us, safe to attack
-                attackers.push(id);
-            }
+            None => attacking_ids.push(id),
             Some((_blocker_id, blocker_value, blocker_toughness)) => {
-                // Attack if our power kills the blocker and we're worth less or equal
-                if my_power >= blocker_toughness && my_value <= blocker_value {
-                    attackers.push(id);
-                } else if ahead_on_life {
-                    // When ahead, be more aggressive
-                    attackers.push(id);
+                let profitable = my_power >= blocker_toughness && my_value <= blocker_value;
+                if profitable || ahead_on_life {
+                    attacking_ids.push(id);
                 }
-                // Otherwise skip -- unprofitable attack
             }
         }
     }
 
-    attackers
+    // Single opponent: all attackers go to the same target
+    if opponents.len() == 1 {
+        let target = AttackTarget::Player(opponents[0]);
+        return attacking_ids
+            .into_iter()
+            .map(|id| (id, target.clone()))
+            .collect();
+    }
+
+    // Multi-opponent: assign attack targets
+    assign_attack_targets(state, player, &opponents, attacking_ids)
+}
+
+/// Assign each attacker to an opponent based on threat and lethal detection.
+fn assign_attack_targets(
+    state: &GameState,
+    player: PlayerId,
+    opponents: &[PlayerId],
+    attacking_ids: Vec<ObjectId>,
+) -> Vec<(ObjectId, AttackTarget)> {
+    // Sort opponents by threat (descending)
+    let mut threat_ranked: Vec<(PlayerId, f64)> = opponents
+        .iter()
+        .map(|&opp| (opp, threat_level(state, player, opp)))
+        .collect();
+    threat_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total_power: i32 = attacking_ids
+        .iter()
+        .filter_map(|&id| state.objects.get(&id))
+        .map(|obj| obj.power.unwrap_or(0))
+        .sum();
+
+    // Check for alpha-strike: can we eliminate the weakest opponent?
+    let weakest = opponents
+        .iter()
+        .min_by_key(|&&opp| state.players[opp.0 as usize].life)
+        .copied();
+
+    if let Some(weak_opp) = weakest {
+        let weak_life = state.players[weak_opp.0 as usize].life;
+        if weak_life > 0 && total_power >= weak_life {
+            // Send enough to kill the weakest, rest to highest threat
+            let target_weak = AttackTarget::Player(weak_opp);
+            let primary_target = AttackTarget::Player(threat_ranked[0].0);
+            let mut result = Vec::new();
+            let mut allocated_power = 0;
+
+            // Sort attackers by power (ascending) — send smallest first to just-kill threshold
+            let mut sorted_attackers: Vec<(ObjectId, i32)> = attacking_ids
+                .iter()
+                .filter_map(|&id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(|o| (id, o.power.unwrap_or(0)))
+                })
+                .collect();
+            sorted_attackers.sort_by_key(|&(_, p)| p);
+
+            for (id, power) in sorted_attackers {
+                if allocated_power < weak_life {
+                    result.push((id, target_weak.clone()));
+                    allocated_power += power;
+                } else {
+                    // If weakest IS the highest threat, keep sending there
+                    let target = if weak_opp == threat_ranked[0].0 {
+                        target_weak.clone()
+                    } else {
+                        primary_target.clone()
+                    };
+                    result.push((id, target));
+                }
+            }
+            return result;
+        }
+    }
+
+    // Default: send all to highest-threat opponent
+    let primary = AttackTarget::Player(threat_ranked[0].0);
+    attacking_ids
+        .into_iter()
+        .map(|id| (id, primary.clone()))
+        .collect()
+}
+
+/// Backward-compatible wrapper: returns just attacker IDs (all targeting first opponent).
+pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    choose_attackers_with_targets(state, player)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Choose blocker assignments to minimize damage.
@@ -289,6 +373,17 @@ mod tests {
         state
     }
 
+    fn setup_multiplayer(player_count: u8) -> GameState {
+        let mut state = GameState::new(
+            engine::types::format::FormatConfig::free_for_all(),
+            player_count,
+            42,
+        );
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state
+    }
+
     fn add_creature(
         state: &mut GameState,
         owner: PlayerId,
@@ -429,5 +524,90 @@ mod tests {
             vec![Keyword::Defender],
         );
         assert!(!can_attack(&state, id));
+    }
+
+    // --- Multiplayer attack target tests ---
+
+    #[test]
+    fn three_player_attacks_highest_threat() {
+        let mut state = setup_multiplayer(3);
+        // Player 1 has strong board (high threat) but creatures are tapped (can't block)
+        let d = add_creature(&mut state, PlayerId(1), "Dragon", 5, 5, vec![]);
+        state.objects.get_mut(&d).unwrap().tapped = true;
+        let a = add_creature(&mut state, PlayerId(1), "Angel", 4, 4, vec![]);
+        state.objects.get_mut(&a).unwrap().tapped = true;
+        // Player 0 has an attacker
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(!attacks.is_empty(), "Should have attackers");
+
+        // All attacks should target player 1 (highest threat)
+        for (_, target) in &attacks {
+            assert_eq!(
+                *target,
+                AttackTarget::Player(PlayerId(1)),
+                "Should attack highest-threat opponent"
+            );
+        }
+    }
+
+    #[test]
+    fn three_player_splits_to_finish_weak_opponent() {
+        let mut state = setup_multiplayer(3);
+        // Player 1 has strong board, player 2 is nearly dead
+        add_creature(&mut state, PlayerId(1), "Dragon", 5, 5, vec![]);
+        state.players[2].life = 3; // Near death
+
+        // Player 0 has multiple attackers with enough total power
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear2", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear3", 3, 3, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(attacks.len() >= 2, "Should have multiple attackers");
+
+        // Should have some attacks targeting player 2 (weak opponent to finish off)
+        let attacks_on_p2 = attacks
+            .iter()
+            .filter(|(_, t)| *t == AttackTarget::Player(PlayerId(2)))
+            .count();
+        assert!(
+            attacks_on_p2 > 0,
+            "Should allocate attackers to finish off weak opponent"
+        );
+    }
+
+    #[test]
+    fn generates_per_creature_attack_targets() {
+        let mut state = setup_multiplayer(3);
+        add_creature(&mut state, PlayerId(0), "A", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "B", 2, 2, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        // Each attack should have a valid target
+        for (obj_id, target) in &attacks {
+            assert!(state.objects.contains_key(obj_id));
+            match target {
+                AttackTarget::Player(pid) => {
+                    assert_ne!(*pid, PlayerId(0), "Cannot attack self");
+                }
+                AttackTarget::Planeswalker(_) => {} // Valid but unlikely here
+            }
+        }
+    }
+
+    #[test]
+    fn two_player_backward_compat() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(!attacks.is_empty());
+        // In 2-player, all attacks target player 1
+        for (_, target) in &attacks {
+            assert_eq!(*target, AttackTarget::Player(PlayerId(1)));
+        }
     }
 }

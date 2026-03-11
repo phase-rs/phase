@@ -1,6 +1,5 @@
 use rand::Rng;
 
-use engine::game::combat::AttackTarget;
 use engine::game::engine::apply;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -8,7 +7,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::card_hints::should_play_now;
-use crate::combat_ai::{choose_attackers, choose_blockers};
+use crate::combat_ai::{choose_attackers_with_targets, choose_blockers};
 use crate::config::AiConfig;
 use crate::eval::evaluate_state;
 use crate::legal_actions::get_legal_actions;
@@ -111,18 +110,7 @@ pub fn choose_action(
 
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
-        let selected = choose_attackers(state, ai_player);
-        // Default target: first opponent
-        let default_target = engine::game::players::opponents(state, ai_player)
-            .first()
-            .map(|&opp| AttackTarget::Player(opp))
-            .unwrap_or(AttackTarget::Player(
-                engine::game::players::next_player(state, ai_player),
-            ));
-        let attacks: Vec<_> = selected
-            .into_iter()
-            .map(|id| (id, default_target.clone()))
-            .collect();
+        let attacks = choose_attackers_with_targets(state, ai_player);
         return Some(GameAction::DeclareAttackers { attacks });
     }
 
