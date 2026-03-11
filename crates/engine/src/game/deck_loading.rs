@@ -1,6 +1,7 @@
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
+use crate::types::ability::PtValue;
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -8,7 +9,6 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::keywords::parse_keywords;
 use super::zones::create_object;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,9 +98,12 @@ pub(crate) fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColo
     }
 }
 
-/// Parse a power/toughness string to i32. Variable P/T like "*" defaults to 0.
-fn parse_pt(val: &Option<String>) -> Option<i32> {
-    val.as_ref().map(|s| s.parse::<i32>().unwrap_or(0))
+/// Extract i32 from a typed PtValue. Variable P/T defaults to 0 at runtime.
+fn parse_pt(val: &Option<PtValue>) -> Option<i32> {
+    val.as_ref().map(|pt| match pt {
+        PtValue::Fixed(n) => *n,
+        PtValue::Variable(_) => 0,
+    })
 }
 
 /// Create a fully-populated GameObject from a CardFace and place it in the owner's library.
@@ -118,7 +121,7 @@ pub fn create_object_from_card_face(
         .loyalty
         .as_ref()
         .and_then(|s| s.parse::<u32>().ok());
-    let keywords = parse_keywords(&card_face.keywords);
+    let keywords = card_face.keywords.clone();
     let color = card_face
         .color_override
         .clone()
@@ -135,7 +138,6 @@ pub fn create_object_from_card_face(
     obj.keywords = keywords.clone();
     obj.base_keywords = keywords;
     obj.abilities = card_face.abilities.clone();
-    obj.svars = card_face.svars.clone();
     obj.trigger_definitions = card_face.triggers.clone();
     obj.static_definitions = card_face.static_abilities.clone();
     obj.replacement_definitions = card_face.replacements.clone();
@@ -174,11 +176,13 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetSpec};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Effect, PtValue,
+        StaticDefinition, TargetFilter,
+    };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCostShard;
-    use std::collections::HashMap;
 
     fn make_creature_face() -> CardFace {
         CardFace {
@@ -192,29 +196,31 @@ mod tests {
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Bear".to_string()],
             },
-            power: Some("2".to_string()),
-            toughness: Some("2".to_string()),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
             loyalty: None,
             defense: None,
             oracle_text: None,
             non_ability_text: None,
             flavor_name: None,
-            keywords: vec!["Trample".to_string()],
+            keywords: vec![Keyword::Trample],
             abilities: vec![AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Pump {
                     power: 0,
                     toughness: 0,
-                    target: TargetSpec::Any,
+                    target: TargetFilter::Any,
                 },
                 cost: Some(crate::types::ability::AbilityCost::Tap),
                 sub_ability: None,
-                remaining_params: HashMap::new(),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             }],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         }
@@ -244,16 +250,18 @@ mod tests {
                 kind: AbilityKind::Spell,
                 effect: Effect::DealDamage {
                     amount: DamageAmount::Fixed(3),
-                    target: TargetSpec::Any,
+                    target: TargetFilter::Any,
                 },
                 cost: None,
                 sub_ability: None,
-                remaining_params: HashMap::new(),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             }],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         }
@@ -302,8 +310,8 @@ mod tests {
     fn create_object_variable_pt_defaults_to_zero() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.power = Some("*".to_string());
-        face.toughness = Some("*".to_string());
+        face.power = Some(PtValue::Variable("*".to_string()));
+        face.toughness = Some(PtValue::Variable("*".to_string()));
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
@@ -390,10 +398,18 @@ mod tests {
         let mut face = make_creature_face();
         face.triggers = vec![crate::types::ability::TriggerDefinition {
             mode: crate::types::triggers::TriggerMode::ChangesZone,
-            params: HashMap::from([
-                ("Origin".to_string(), "Any".to_string()),
-                ("Destination".to_string(), "Battlefield".to_string()),
-            ]),
+            execute: None,
+            valid_card: None,
+            origin: None,
+            destination: Some(Zone::Battlefield),
+            trigger_zones: vec![],
+            phase: None,
+            optional: false,
+            combat_damage: false,
+            secondary: false,
+            valid_target: None,
+            valid_source: None,
+            description: None,
         }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
@@ -409,12 +425,15 @@ mod tests {
     fn create_object_with_static_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.static_abilities = vec![crate::types::ability::StaticDefinition {
+        face.static_abilities = vec![StaticDefinition {
             mode: crate::types::statics::StaticMode::Continuous,
-            params: HashMap::from([
-                ("Affected".to_string(), "Card.Self".to_string()),
-                ("AddPower".to_string(), "2".to_string()),
-            ]),
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddPower { value: 2 }],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
         }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
@@ -432,10 +451,9 @@ mod tests {
         let mut face = make_creature_face();
         face.replacements = vec![crate::types::ability::ReplacementDefinition {
             event: crate::types::replacements::ReplacementEvent::DamageDone,
-            params: HashMap::from([
-                ("ActiveZones".to_string(), "Battlefield".to_string()),
-                ("ValidSource".to_string(), "Card.Self".to_string()),
-            ]),
+            execute: None,
+            valid_card: Some(TargetFilter::SelfRef),
+            description: None,
         }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
