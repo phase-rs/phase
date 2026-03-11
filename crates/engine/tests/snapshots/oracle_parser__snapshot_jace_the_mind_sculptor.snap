@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 91
 expression: result
 ---
 {
@@ -18,9 +19,12 @@ expression: result
       "sub_ability": {
         "kind": "Activated",
         "effect": {
-          "type": "Unimplemented",
-          "name": "you",
-          "description": "You may put that card on the bottom of that player's library"
+          "type": "ChangeZone",
+          "origin": null,
+          "destination": "Library",
+          "target": {
+            "type": "Any"
+          }
         },
         "cost": null,
         "sub_ability": null,
@@ -47,9 +51,12 @@ expression: result
       "sub_ability": {
         "kind": "Activated",
         "effect": {
-          "type": "Unimplemented",
-          "name": "put",
-          "description": "put two cards from your hand on top of your library in any order"
+          "type": "ChangeZone",
+          "origin": "Hand",
+          "destination": "Library",
+          "target": {
+            "type": "Any"
+          }
         },
         "cost": null,
         "sub_ability": null,
@@ -108,8 +115,8 @@ expression: result
         "kind": "Activated",
         "effect": {
           "type": "Unimplemented",
-          "name": "that",
-          "description": "that player shuffles their hand into their library"
+          "name": "shuffle",
+          "description": "shuffle their hand into their library"
         },
         "cost": null,
         "sub_ability": null,

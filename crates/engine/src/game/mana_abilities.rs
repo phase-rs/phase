@@ -2,9 +2,9 @@ use crate::types::ability::{AbilityDefinition, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaType;
 use crate::types::player::PlayerId;
 
+use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
 use super::mana_payment;
 
@@ -15,8 +15,7 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
 }
 
 /// Resolve a mana ability immediately without using the stack.
-/// Taps the source if the cost includes "T", then produces the mana indicated
-/// by the "Produced$" parameter.
+/// Taps the source if the cost includes "T", then produces typed mana.
 pub fn resolve_mana_ability(
     state: &mut GameState,
     source_id: ObjectId,
@@ -47,29 +46,12 @@ pub fn resolve_mana_ability(
         });
     }
 
-    // Determine produced mana color from the typed Effect
-    let produced_colors = match &ability_def.effect {
-        Effect::Mana { produced } => produced.clone(),
-        _ => vec![],
+    let produced_mana = match &ability_def.effect {
+        Effect::Mana { produced } => resolve_mana_types(produced),
+        _ => Vec::new(),
     };
 
-    // Determine mana type: use first produced color, or Colorless as default
-    let mana_type = produced_colors
-        .first()
-        .map(|color| match color {
-            crate::types::mana::ManaColor::White => ManaType::White,
-            crate::types::mana::ManaColor::Blue => ManaType::Blue,
-            crate::types::mana::ManaColor::Black => ManaType::Black,
-            crate::types::mana::ManaColor::Red => ManaType::Red,
-            crate::types::mana::ManaColor::Green => ManaType::Green,
-        })
-        .unwrap_or(ManaType::Colorless);
-
-    // Amount is always 1 for typed mana abilities
-    // (multi-mana like Sol Ring uses multiple colors in produced vec)
-    let amount: u32 = produced_colors.len().max(1) as u32;
-
-    for _ in 0..amount {
+    for mana_type in produced_mana {
         mana_payment::produce_mana(state, source_id, mana_type, player, events);
     }
 
@@ -80,15 +62,17 @@ pub fn resolve_mana_ability(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityCost, AbilityKind, DamageAmount, Effect, TargetFilter};
+    use crate::types::ability::{
+        AbilityCost, AbilityKind, CountValue, DamageAmount, Effect, ManaProduction, TargetFilter,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaType};
     use crate::types::zones::Zone;
 
-    fn make_mana_ability(colors: Vec<ManaColor>) -> AbilityDefinition {
+    fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
         AbilityDefinition {
             kind: AbilityKind::Activated,
-            effect: Effect::Mana { produced: colors },
+            effect: Effect::Mana { produced },
             cost: Some(AbilityCost::Tap),
             sub_ability: None,
             duration: None,
@@ -100,7 +84,9 @@ mod tests {
 
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
-        let def = make_mana_ability(vec![ManaColor::Green]);
+        let def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+        });
         assert!(is_mana_ability(&def));
     }
 
@@ -148,7 +134,9 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def = make_mana_ability(vec![ManaColor::Green]);
+        let def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+        });
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 
@@ -174,7 +162,9 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
 
-        let def = make_mana_ability(vec![ManaColor::Green]);
+        let def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+        });
         let mut events = Vec::new();
         let result = resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events);
 
@@ -192,10 +182,13 @@ mod tests {
             Zone::Battlefield,
         );
 
-        // Empty produced vec maps to colorless mana (single unit via max(1))
         let def = AbilityDefinition {
             kind: AbilityKind::Activated,
-            effect: Effect::Mana { produced: vec![] },
+            effect: Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: CountValue::Fixed(1),
+                },
+            },
             cost: Some(AbilityCost::Tap),
             sub_ability: None,
             duration: None,
@@ -210,5 +203,27 @@ mod tests {
             state.players[0].mana_pool.count_color(ManaType::Colorless),
             1
         );
+    }
+
+    #[test]
+    fn resolve_mana_ability_fixed_multi_color_produces_each_unit() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hybrid Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::White, ManaColor::Blue],
+        });
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 2);
     }
 }

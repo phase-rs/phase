@@ -8,8 +8,8 @@ use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, Atomi
 use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, TargetFilter,
-    TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction, PtValue,
+    TargetFilter, TypeFilter,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -92,7 +92,9 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
             face.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Mana {
-                    produced: vec![color],
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                    },
                 },
                 cost: Some(AbilityCost::Tap),
                 sub_ability: None,

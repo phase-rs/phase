@@ -151,7 +151,9 @@ impl GameScenario {
         obj.abilities.push(AbilityDefinition {
             kind: AbilityKind::Activated,
             effect: Effect::Mana {
-                produced: vec![color],
+                produced: crate::types::ability::ManaProduction::Fixed {
+                    colors: vec![color],
+                },
             },
             cost: Some(crate::types::ability::AbilityCost::Tap),
             sub_ability: None,

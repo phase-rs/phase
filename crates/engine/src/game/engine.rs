@@ -2151,7 +2151,9 @@ mod tests {
             obj.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Mana {
-                    produced: vec![crate::types::mana::ManaColor::Green],
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![crate::types::mana::ManaColor::Green],
+                    },
                 },
                 cost: Some(AbilityCost::Tap),
                 sub_ability: None,
@@ -2216,7 +2218,9 @@ mod tests {
             obj.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Mana {
-                    produced: vec![crate::types::mana::ManaColor::Green],
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![crate::types::mana::ManaColor::Green],
+                    },
                 },
                 cost: Some(AbilityCost::Tap),
                 sub_ability: None,

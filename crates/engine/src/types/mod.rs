@@ -19,9 +19,9 @@ pub mod zones;
 
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-    DamageAmount, Duration, Effect, EffectError, FilterProp, PtValue, ReplacementDefinition,
-    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
-    TypeFilter,
+    DamageAmount, Duration, Effect, EffectError, FilterProp, ManaProduction, PtValue,
+    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
+    TargetRef, TriggerDefinition, TypeFilter,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};

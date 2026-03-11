@@ -114,6 +114,41 @@ impl<'de> serde::Deserialize<'de> for CountValue {
     }
 }
 
+/// Mana production descriptor for `Effect::Mana`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ManaProduction {
+    /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
+    Fixed {
+        #[serde(default)]
+        colors: Vec<ManaColor>,
+    },
+    /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
+    Colorless {
+        #[serde(default = "default_count_value_one")]
+        count: CountValue,
+    },
+    /// Produce N mana of one chosen color from the provided set.
+    AnyOneColor {
+        #[serde(default = "default_count_value_one")]
+        count: CountValue,
+        #[serde(default = "default_all_mana_colors")]
+        color_options: Vec<ManaColor>,
+    },
+    /// Produce N mana where each unit can be chosen independently from the provided set.
+    AnyCombination {
+        #[serde(default = "default_count_value_one")]
+        count: CountValue,
+        #[serde(default = "default_all_mana_colors")]
+        color_options: Vec<ManaColor>,
+    },
+    /// Produce N mana of a previously chosen color.
+    ChosenColor {
+        #[serde(default = "default_count_value_one")]
+        count: CountValue,
+    },
+}
+
 /// Duration for temporary effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Duration {
@@ -507,8 +542,8 @@ pub enum Effect {
         clear_coin_flips: bool,
     },
     Mana {
-        #[serde(default)]
-        produced: Vec<ManaColor>,
+        #[serde(default = "default_mana_production")]
+        produced: ManaProduction,
     },
     Discard {
         #[serde(default = "default_one")]
@@ -539,6 +574,20 @@ fn default_pt_value_zero() -> PtValue {
 
 fn default_count_value_one() -> CountValue {
     CountValue::Fixed(1)
+}
+
+fn default_mana_production() -> ManaProduction {
+    ManaProduction::Fixed { colors: Vec::new() }
+}
+
+fn default_all_mana_colors() -> Vec<ManaColor> {
+    vec![
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
 }
 
 fn default_two_i32() -> i32 {
@@ -1146,7 +1195,9 @@ mod tests {
     #[test]
     fn effect_mana_typed_roundtrip() {
         let effect = Effect::Mana {
-            produced: vec![ManaColor::Green, ManaColor::Green],
+            produced: ManaProduction::Fixed {
+                colors: vec![ManaColor::Green, ManaColor::Green],
+            },
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

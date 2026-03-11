@@ -999,7 +999,9 @@ mod tests {
             engine::types::ability::AbilityDefinition {
                 kind: engine::types::ability::AbilityKind::Activated,
                 effect: engine::types::ability::Effect::Mana {
-                    produced: vec![engine::types::mana::ManaColor::Green],
+                    produced: engine::types::ability::ManaProduction::Fixed {
+                        colors: vec![engine::types::mana::ManaColor::Green],
+                    },
                 },
                 cost: Some(engine::types::ability::AbilityCost::Tap),
                 sub_ability: None,

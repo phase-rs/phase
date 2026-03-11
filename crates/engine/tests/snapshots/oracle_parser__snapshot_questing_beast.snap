@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 67
 expression: result
 ---
 {
@@ -10,9 +11,18 @@ expression: result
       "execute": {
         "kind": "Spell",
         "effect": {
-          "type": "Unimplemented",
-          "name": "it",
-          "description": "it deals that much damage to target planeswalker that player controls"
+          "type": "DealDamage",
+          "amount": {
+            "type": "Variable",
+            "value": "that much"
+          },
+          "target": {
+            "type": "Typed",
+            "card_type": "Planeswalker",
+            "subtype": null,
+            "controller": null,
+            "properties": []
+          }
         },
         "cost": null,
         "sub_ability": null,
@@ -40,7 +50,9 @@ expression: result
   ],
   "statics": [
     {
-      "mode": "CantBlock",
+      "mode": {
+        "Other": "CantBeBlocked"
+      },
       "affected": {
         "type": "SelfRef"
       },

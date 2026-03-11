@@ -5,7 +5,7 @@ use super::oracle_target::parse_target;
 use super::oracle_util::{parse_mana_production, parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
-    PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -93,18 +93,9 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
 
-    // --- Mana production: "add {G}", "add one mana of any color", "add {C}" ---
-    if lower.starts_with("add ") {
-        if let Some((colors, _)) = parse_mana_production(&text[4..]) {
-            return Effect::Mana { produced: colors };
-        }
-        if lower.contains("mana of any color") || lower.contains("one mana of any color") {
-            return Effect::Mana { produced: vec![] };
-        }
-        // {C} — colorless mana (not in ManaColor, produce empty for "any")
-        if lower[4..].trim().starts_with("{c}") {
-            return Effect::Mana { produced: vec![] };
-        }
+    // --- Mana production ---
+    if let Some(mana_effect) = try_parse_add_mana_effect(text) {
+        return mana_effect;
     }
 
     // --- Damage: "~ deals N damage to {target}" ---
@@ -390,6 +381,298 @@ fn parse_imperative_effect(text: &str) -> Effect {
         name: verb.to_string(),
         description: Some(text.to_string()),
     }
+}
+
+fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+    if !lower.starts_with("add ") {
+        return None;
+    }
+
+    let clause = trimmed[4..].trim();
+    let (without_where_x, where_x_expression) = strip_trailing_where_x(clause);
+    let clause = without_where_x
+        .trim()
+        .trim_end_matches(|c: char| c == '.' || c == '"');
+
+    if let Some(produced) = parse_mana_production_clause(clause) {
+        return Some(Effect::Mana { produced });
+    }
+
+    if let Some((count, rest)) = parse_mana_count_prefix(clause) {
+        let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let rest = rest
+            .trim()
+            .trim_end_matches(|c: char| c == '.' || c == '"')
+            .trim();
+        let rest_lower = rest.to_lowercase();
+
+        if rest_lower.starts_with("mana of any one color")
+            || rest_lower.starts_with("mana of any color")
+        {
+            return Some(Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count,
+                    color_options: all_mana_colors(),
+                },
+            });
+        }
+
+        if rest_lower.starts_with("mana in any combination of colors") {
+            return Some(Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count,
+                    color_options: all_mana_colors(),
+                },
+            });
+        }
+
+        if rest_lower.starts_with("mana of the chosen color")
+            || rest_lower.starts_with("mana of that color")
+        {
+            return Some(Effect::Mana {
+                produced: ManaProduction::ChosenColor { count },
+            });
+        }
+
+        const ANY_COMBINATION_PREFIX: &str = "mana in any combination of ";
+        if rest_lower.starts_with(ANY_COMBINATION_PREFIX) {
+            let color_set_text = rest[ANY_COMBINATION_PREFIX.len()..].trim();
+            if let Some(color_options) = parse_mana_color_set(color_set_text) {
+                return Some(Effect::Mana {
+                    produced: ManaProduction::AnyCombination {
+                        count,
+                        color_options,
+                    },
+                });
+            }
+        }
+    }
+
+    let clause_lower = clause.to_lowercase();
+    let fallback_count = parse_mana_count_prefix(clause)
+        .map(|(count, _)| count)
+        .unwrap_or(CountValue::Fixed(1));
+    let fallback_count =
+        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
+
+    if clause_lower.contains("mana of any one color") || clause_lower.contains("mana of any color")
+    {
+        return Some(Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: fallback_count,
+                color_options: all_mana_colors(),
+            },
+        });
+    }
+
+    if clause_lower.contains("mana in any combination of colors") {
+        return Some(Effect::Mana {
+            produced: ManaProduction::AnyCombination {
+                count: fallback_count,
+                color_options: all_mana_colors(),
+            },
+        });
+    }
+
+    if clause_lower.contains("mana of the chosen color")
+        || clause_lower.contains("mana of that color")
+    {
+        return Some(Effect::Mana {
+            produced: ManaProduction::ChosenColor {
+                count: fallback_count,
+            },
+        });
+    }
+
+    None
+}
+
+fn parse_mana_production_clause(text: &str) -> Option<ManaProduction> {
+    if let Some(color_options) = parse_mana_color_set(text) {
+        if color_options.len() > 1 {
+            return Some(ManaProduction::AnyOneColor {
+                count: CountValue::Fixed(1),
+                color_options,
+            });
+        }
+    }
+
+    if let Some((colors, _)) = parse_mana_production(text) {
+        return Some(ManaProduction::Fixed { colors });
+    }
+
+    if let Some((count, _)) = parse_colorless_mana_production(text) {
+        return Some(ManaProduction::Colorless { count });
+    }
+
+    None
+}
+
+fn parse_colorless_mana_production(text: &str) -> Option<(CountValue, &str)> {
+    let mut rest = text.trim_start();
+    let mut count = 0u32;
+
+    while rest.starts_with('{') {
+        let end = rest.find('}')?;
+        let symbol = &rest[1..end];
+        if !symbol.eq_ignore_ascii_case("C") {
+            break;
+        }
+        count += 1;
+        rest = rest[end + 1..].trim_start();
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    Some((CountValue::Fixed(count), rest))
+}
+
+fn parse_mana_count_prefix(text: &str) -> Option<(CountValue, &str)> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("X ") {
+        return Some((CountValue::Variable("X".to_string()), rest.trim_start()));
+    }
+    if let Some(rest) = trimmed.strip_prefix("x ") {
+        return Some((CountValue::Variable("X".to_string()), rest.trim_start()));
+    }
+    let (count, rest) = parse_number(trimmed)?;
+    Some((CountValue::Fixed(count), rest))
+}
+
+fn apply_where_x_count_expression(
+    count: CountValue,
+    where_x_expression: Option<&str>,
+) -> CountValue {
+    match (count, where_x_expression) {
+        (CountValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
+            CountValue::Variable(expression.to_string())
+        }
+        (count, _) => count,
+    }
+}
+
+fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
+    let mut rest = text
+        .trim()
+        .trim_end_matches(|c: char| c == '.' || c == '"')
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut colors = Vec::new();
+    loop {
+        let (parsed, after_symbol) = parse_mana_color_symbol(rest)?;
+        for color in parsed {
+            if !colors.contains(&color) {
+                colors.push(color);
+            }
+        }
+
+        let next = after_symbol.trim_start();
+        if next.is_empty() {
+            break;
+        }
+
+        if let Some(stripped) = next.strip_prefix("and/or ") {
+            rest = stripped.trim_start();
+            continue;
+        }
+        if let Some(stripped) = next.strip_prefix("or ") {
+            rest = stripped.trim_start();
+            continue;
+        }
+        if let Some(stripped) = next.strip_prefix("and ") {
+            rest = stripped.trim_start();
+            continue;
+        }
+        if let Some(stripped) = next.strip_prefix(',') {
+            let stripped = stripped.trim_start();
+            if let Some(after_or) = stripped.strip_prefix("or ") {
+                rest = after_or.trim_start();
+                continue;
+            }
+            if let Some(after_and_or) = stripped.strip_prefix("and/or ") {
+                rest = after_and_or.trim_start();
+                continue;
+            }
+            if let Some(after_and) = stripped.strip_prefix("and ") {
+                rest = after_and.trim_start();
+                continue;
+            }
+            rest = stripped;
+            continue;
+        }
+        if let Some(stripped) = next.strip_prefix('/') {
+            rest = stripped.trim_start();
+            continue;
+        }
+
+        return None;
+    }
+
+    if colors.is_empty() {
+        None
+    } else {
+        Some(colors)
+    }
+}
+
+fn parse_mana_color_symbol(text: &str) -> Option<(Vec<ManaColor>, &str)> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let end = trimmed.find('}')?;
+    let symbol = &trimmed[1..end];
+    let colors = parse_mana_color_symbol_set(symbol)?;
+    Some((colors, &trimmed[end + 1..]))
+}
+
+fn parse_mana_color_symbol_set(symbol: &str) -> Option<Vec<ManaColor>> {
+    fn parse_single(code: &str) -> Option<ManaColor> {
+        match code {
+            "W" => Some(ManaColor::White),
+            "U" => Some(ManaColor::Blue),
+            "B" => Some(ManaColor::Black),
+            "R" => Some(ManaColor::Red),
+            "G" => Some(ManaColor::Green),
+            _ => None,
+        }
+    }
+
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if let Some(color) = parse_single(&symbol) {
+        return Some(vec![color]);
+    }
+
+    let mut colors = Vec::new();
+    for part in symbol.split('/') {
+        let color = parse_single(part.trim())?;
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+
+    if colors.is_empty() {
+        None
+    } else {
+        Some(colors)
+    }
+}
+
+fn all_mana_colors() -> Vec<ManaColor> {
+    vec![
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
 }
 
 /// Parse a compound effect chain: split on ". " or ".\n" boundaries and ", then ".
@@ -1829,7 +2112,7 @@ fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ContinuousModification, TypeFilter};
+    use crate::types::ability::{ContinuousModification, ManaProduction, TypeFilter};
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -1880,7 +2163,12 @@ mod tests {
     #[test]
     fn effect_mana_production() {
         let e = parse_effect("Add {W}");
-        assert!(matches!(e, Effect::Mana { produced } if produced == vec![ManaColor::White]));
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { ref colors }
+            } if colors == &vec![ManaColor::White]
+        ));
     }
 
     #[test]
@@ -2040,7 +2328,119 @@ mod tests {
     #[test]
     fn effect_add_mana_any_color() {
         let e = parse_effect("Add one mana of any color");
-        assert!(matches!(e, Effect::Mana { ref produced } if produced.is_empty()));
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Fixed(1),
+                    ref color_options,
+                }
+            } if color_options == &vec![
+                ManaColor::White,
+                ManaColor::Blue,
+                ManaColor::Black,
+                ManaColor::Red,
+                ManaColor::Green,
+            ]
+        ));
+    }
+
+    #[test]
+    fn effect_add_three_mana_any_one_color() {
+        let e = parse_effect("Add three mana of any one color");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Fixed(3),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_add_two_mana_in_any_combination_of_colors() {
+        let e = parse_effect("Add two mana in any combination of colors");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: CountValue::Fixed(2),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_add_one_mana_of_the_chosen_color() {
+        let e = parse_effect("Add one mana of the chosen color");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::ChosenColor {
+                    count: CountValue::Fixed(1)
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_add_x_mana_any_one_color_with_where_clause() {
+        let e =
+            parse_effect("Add X mana of any one color, where X is the number of lands you control");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Variable(ref value),
+                    ..
+                }
+            } if value == "the number of lands you control"
+        ));
+    }
+
+    #[test]
+    fn effect_add_x_mana_in_any_combination_of_constrained_colors() {
+        let e = parse_effect("Add X mana in any combination of {U} and/or {R}");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: CountValue::Variable(ref value),
+                    ref color_options,
+                }
+            } if value == "X"
+                && color_options == &vec![ManaColor::Blue, ManaColor::Red]
+        ));
+    }
+
+    #[test]
+    fn effect_add_colorless_mana_symbol() {
+        let e = parse_effect("Add {C}");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: CountValue::Fixed(1)
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_add_color_choice_symbols() {
+        let e = parse_effect("add {r} or {g}");
+        assert!(matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Fixed(1),
+                    ref color_options,
+                }
+            } if color_options == &vec![ManaColor::Red, ManaColor::Green]
+        ));
     }
 
     #[test]

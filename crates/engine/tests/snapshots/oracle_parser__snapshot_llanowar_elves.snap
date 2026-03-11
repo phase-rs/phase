@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 115
 expression: result
 ---
 {
@@ -8,9 +9,12 @@ expression: result
       "kind": "Activated",
       "effect": {
         "type": "Mana",
-        "produced": [
-          "Green"
-        ]
+        "produced": {
+          "type": "Fixed",
+          "colors": [
+            "Green"
+          ]
+        }
       },
       "cost": {
         "type": "Tap"

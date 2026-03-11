@@ -6,8 +6,8 @@ use std::str::FromStr;
 use engine::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, TargetFilter,
-    TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction, PtValue,
+    TargetFilter, TypeFilter,
 };
 use engine::types::card::{CardFace, CardLayout};
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -295,7 +295,9 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
             face.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Mana {
-                    produced: vec![color],
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                    },
                 },
                 cost: Some(AbilityCost::Tap),
                 sub_ability: None,

@@ -9,7 +9,7 @@ use std::path::Path;
 use engine::database::card_db::CardDatabase;
 use engine::game::apply;
 use engine::game::deck_loading::create_object_from_card_face;
-use engine::types::ability::{AbilityCost, AbilityKind, Effect, TargetRef};
+use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card::CardLayout;
 use engine::types::game_state::WaitingFor;
@@ -49,8 +49,12 @@ fn test_forest_has_synthesized_mana_ability() {
         .get_face_by_name("Forest")
         .expect("Forest should be loaded");
     let has_mana_ability = forest.abilities.iter().any(|a| {
-        matches!(&a.effect, Effect::Mana { produced } if *produced == vec![ManaColor::Green])
-            && a.cost == Some(AbilityCost::Tap)
+        matches!(
+            &a.effect,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors }
+            } if *colors == vec![ManaColor::Green]
+        ) && a.cost == Some(AbilityCost::Tap)
     });
     assert!(
         has_mana_ability,
