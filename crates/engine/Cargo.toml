@@ -39,6 +39,10 @@ path = "src/bin/json_export.rs"
 name = "migrate-abilities"
 path = "src/bin/migrate_abilities.rs"
 
+[[bin]]
+name = "oracle-gen"
+path = "src/bin/oracle_gen.rs"
+
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
