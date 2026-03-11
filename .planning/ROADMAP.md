@@ -253,13 +253,13 @@ Plans:
   10. Lobby supports format-aware game creation, ready-up, and spectators
   11. Deck builder supports Commander format with color identity enforcement
   12. Format-first game setup flow with presets and pre-built Commander decks
-**Plans**: 15 plans
+**Plans**: 16 plans
 
 **Execution Order:**
 Wave 1: Plan 01 (foundation types — FormatConfig, player iteration, GameState extensions)
 Wave 2: Plans 02 + 03 + 04 (parallel — priority/turns/elimination + 2HG team turns, combat targeting, commander rules)
 Wave 3: Plans 05 + 06 (parallel — core engine PlayerId(1-x) migration, WASM/server/AI crate migration)
-Wave 4: Plans 09 + 14 + 15 (parallel — AI adaptation, effects migration, remaining game module migration)
+Wave 4: Plans 09 + 14 + 15 + 16 (parallel — AI adaptation, effects migration A-M, remaining game module migration, effects migration N-Z)
 Wave 5: Plan 07 (board UI refactor with PlayerArea/CompactStrip)
 Wave 6: Plans 08 + 10 (parallel — combat UI, lobby/networking format-awareness + P2P enforcement)
 Wave 7: Plan 11 (deck builder commander support)
@@ -280,5 +280,6 @@ Plans:
 - [ ] 29-11-PLAN.md — Deck builder: Commander support, format legality badges, color identity validation
 - [ ] 29-12-PLAN.md — Game setup: format-first flow, FormatPicker, game presets, pre-built Commander decks
 - [ ] 29-13-PLAN.md — Integration verification: WASM rebuild, precon validation, full test suite, gameplay checkpoint
-- [ ] 29-14-PLAN.md — PlayerId(1-x) migration in effects modules (~28 files)
+- [ ] 29-14-PLAN.md — PlayerId(1-x) migration in effects modules A-M (~13 files)
 - [ ] 29-15-PLAN.md — PlayerId(1-x) migration in remaining game modules + tests (~13 files)
+- [ ] 29-16-PLAN.md — PlayerId(1-x) migration in effects modules N-Z (~15 files)
