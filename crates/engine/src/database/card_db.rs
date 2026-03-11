@@ -31,17 +31,27 @@ impl CardDatabase {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
         let faces: HashMap<String, CardFace> = serde_json::from_reader(reader)?;
+        Ok(Self::from_face_map(faces))
+    }
 
+    /// Load from a JSON string containing a HashMap<String, CardFace>.
+    /// Used by the WASM bridge to receive card data from the frontend.
+    pub fn from_json_str(json: &str) -> Result<Self, serde_json::Error> {
+        let faces: HashMap<String, CardFace> = serde_json::from_str(json)?;
+        Ok(Self::from_face_map(faces))
+    }
+
+    fn from_face_map(faces: HashMap<String, CardFace>) -> Self {
         let mut face_index = HashMap::with_capacity(faces.len());
         for (name, face) in faces {
             face_index.insert(name.to_lowercase(), face);
         }
 
-        Ok(Self {
+        Self {
             cards: HashMap::new(),
             face_index,
             errors: Vec::new(),
-        })
+        }
     }
 
     #[cfg(feature = "forge-compat")]

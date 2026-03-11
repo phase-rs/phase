@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
+use engine::database::CardDatabase;
 use engine::game::engine::apply;
-use engine::game::{load_deck_into_state, start_game, DeckPayload};
+use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList};
 use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone};
 
 use phase_ai::choose_action;
@@ -16,6 +17,7 @@ use phase_ai::legal_actions::get_legal_actions;
 
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
+    static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
 }
 
 /// Verify WASM integration works.
@@ -31,18 +33,37 @@ pub fn create_initial_state() -> JsValue {
     serde_wasm_bindgen::to_value(&state).unwrap()
 }
 
+/// Load the card database from a JSON string (card-data.json contents).
+/// Must be called before initialize_game to enable name-based deck resolution.
+#[wasm_bindgen]
+pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
+    let db = CardDatabase::from_json_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
+    let count = db.card_count() as u32;
+    CARD_DB.with(|cell| {
+        *cell.borrow_mut() = Some(db);
+    });
+    Ok(count)
+}
+
 /// Initialize a new game with two players.
-/// Accepts deck_data as a DeckPayload JSON (or null/undefined for empty libraries).
+/// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
+/// Names are resolved against the card database loaded via load_card_database().
 /// Returns the initial ActionResult (events + waiting_for).
 #[wasm_bindgen]
 pub fn initialize_game(deck_data: JsValue, seed: Option<f64>) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
     let mut state = GameState::new_two_player(seed);
 
-    // Load deck data if provided
+    // Load deck data if provided — resolve names via the loaded card database
     if !deck_data.is_null() && !deck_data.is_undefined() {
-        if let Ok(payload) = serde_wasm_bindgen::from_value::<DeckPayload>(deck_data) {
-            load_deck_into_state(&mut state, &payload);
+        if let Ok(deck_list) = serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
+            CARD_DB.with(|cell| {
+                if let Some(db) = cell.borrow().as_ref() {
+                    let payload = resolve_deck_list(db, &deck_list);
+                    load_deck_into_state(&mut state, &payload);
+                }
+            });
         }
     }
 

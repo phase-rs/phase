@@ -42,32 +42,6 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return { main_deck: names, sideboard: sbNames };
 }
 
-interface CardFace {
-  name: string;
-  [key: string]: unknown;
-}
-
-interface DeckPayload {
-  player_deck: Array<{ card: CardFace; count: number }>;
-  opponent_deck: Array<{ card: CardFace; count: number }>;
-}
-
-function resolveEntries(
-  deckCards: Array<{ name: string; count: number }>,
-  cardDb: Record<string, CardFace>,
-): Array<{ card: CardFace; count: number }> {
-  const entries: Array<{ card: CardFace; count: number }> = [];
-  for (const entry of deckCards) {
-    const card = cardDb[entry.name.toLowerCase()];
-    if (card) {
-      entries.push({ card, count: entry.count });
-    } else {
-      console.warn(`Card not found in card-data.json: ${entry.name}`);
-    }
-  }
-  return entries;
-}
-
 function pickOpponentDeck(playerDeck: ParsedDeck): Array<{ name: string; count: number }> {
   const playerNames = new Set(playerDeck.main.map((e) => e.name));
   const candidates = STARTER_DECKS.filter(
@@ -79,24 +53,22 @@ function pickOpponentDeck(playerDeck: ParsedDeck): Array<{ name: string; count: 
   return pick.cards;
 }
 
-async function buildDeckPayload(deck: ParsedDeck): Promise<DeckPayload | null> {
-  try {
-    const resp = await fetch("/card-data.json");
-    if (!resp.ok) {
-      console.warn("card-data.json not available (HTTP", resp.status, "). Starting with empty game.");
-      return null;
+/** Build a DeckList (name-only) for the WASM engine to resolve. */
+function buildDeckList(deck: ParsedDeck): { player_deck: string[]; opponent_deck: string[] } {
+  const playerNames: string[] = [];
+  for (const entry of deck.main) {
+    for (let i = 0; i < entry.count; i++) {
+      playerNames.push(entry.name);
     }
-    const cardDb = (await resp.json()) as Record<string, CardFace>;
-
-    const playerEntries = resolveEntries(deck.main, cardDb);
-    const opponentCards = pickOpponentDeck(deck);
-    const opponentEntries = resolveEntries(opponentCards, cardDb);
-
-    return { player_deck: playerEntries, opponent_deck: opponentEntries };
-  } catch (err) {
-    console.warn("Failed to load card-data.json:", err);
-    return null;
   }
+  const opponentCards = pickOpponentDeck(deck);
+  const opponentNames: string[] = [];
+  for (const entry of opponentCards) {
+    for (let i = 0; i < entry.count; i++) {
+      opponentNames.push(entry.name);
+    }
+  }
+  return { player_deck: playerNames, opponent_deck: opponentNames };
 }
 
 const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>(
@@ -164,12 +136,10 @@ export function GameProvider({
         return;
       }
 
-      buildDeckPayload(parsedDeck).then(async (deckPayload) => {
-        if (cancelled) return;
+      const deckList = buildDeckList(parsedDeck);
 
-        if (deckPayload === null) {
-          onCardDataMissingRef.current?.();
-        }
+      const setupP2P = async () => {
+        if (cancelled) return;
 
         try {
           if (mode === "p2p-host") {
@@ -185,7 +155,7 @@ export function GameProvider({
             onP2PEventRef.current?.({ type: "guestConnected" });
 
             const session = createPeerSession(conn, destroyPeer);
-            const adapter = new P2PHostAdapter(deckPayload, session);
+            const adapter = new P2PHostAdapter(deckList, session);
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
@@ -211,7 +181,7 @@ export function GameProvider({
             if (cancelled) { destroyPeer(); return; }
 
             const session = createPeerSession(conn, destroyPeer);
-            const adapter = new P2PGuestAdapter(deckPayload, session);
+            const adapter = new P2PGuestAdapter(deckList, session);
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
@@ -236,7 +206,9 @@ export function GameProvider({
           const message = err instanceof Error ? err.message : String(err);
           onP2PEventRef.current?.({ type: "error", message });
         }
-      });
+      };
+
+      setupP2P();
 
       return () => {
         cancelled = true;
@@ -370,20 +342,18 @@ export function GameProvider({
       return;
     }
 
-    buildDeckPayload(parsedDeck).then((deckPayload) => {
+    const deckList = buildDeckList(parsedDeck);
+
+    initGame(gameId, adapter, deckList).then(() => {
       if (cancelled) return;
 
-      if (deckPayload === null) {
+      if (!adapter.cardDbLoaded) {
         onCardDataMissingRef.current?.();
       }
 
-      initGame(gameId, adapter, deckPayload).then(() => {
-        if (cancelled) return;
-
-        controller = createGameLoopController({ mode, difficulty });
-        controller.start();
-        audioManager.startMusic();
-      });
+      controller = createGameLoopController({ mode, difficulty });
+      controller.start();
+      audioManager.startMusic();
     });
 
     return () => {

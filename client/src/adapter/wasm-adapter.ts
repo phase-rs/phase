@@ -7,6 +7,7 @@ import init, {
   get_ai_action,
   get_legal_actions_js,
   restore_game_state,
+  load_card_database,
 } from "../wasm/engine_wasm";
 import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
@@ -45,11 +46,27 @@ function convertMapsToRecords(value: unknown): unknown {
 export class WasmAdapter implements EngineAdapter {
   private initialized = false;
   private queue: Promise<void> = Promise.resolve();
+  cardDbLoaded = false;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await init();
     this.initialized = true;
+
+    // Load the card database into WASM for name-based deck resolution
+    try {
+      const resp = await fetch("/card-data.json");
+      if (resp.ok) {
+        const text = await resp.text();
+        const count = load_card_database(text);
+        this.cardDbLoaded = true;
+        console.log(`Card database loaded: ${count} cards`);
+      } else {
+        console.warn("card-data.json not available (HTTP", resp.status, ")");
+      }
+    } catch (err) {
+      console.warn("Failed to load card database:", err);
+    }
   }
 
   async submitAction(action: GameAction): Promise<GameEvent[]> {

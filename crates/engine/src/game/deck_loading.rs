@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
+use crate::database::CardDatabase;
 use crate::types::ability::PtValue;
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
@@ -21,6 +24,42 @@ pub struct DeckEntry {
 pub struct DeckPayload {
     pub player_deck: Vec<DeckEntry>,
     pub opponent_deck: Vec<DeckEntry>,
+}
+
+/// Lightweight deck format using card names only.
+/// Resolved into a DeckPayload via a CardDatabase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckList {
+    pub player_deck: Vec<String>,
+    pub opponent_deck: Vec<String>,
+}
+
+/// Resolve a flat name list into DeckEntry entries using the card database.
+/// Groups duplicate names and skips unresolvable names.
+fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
+    let mut counts: HashMap<&str, u32> = HashMap::new();
+    for name in names {
+        *counts.entry(name.as_str()).or_insert(0) += 1;
+    }
+    let mut entries = Vec::new();
+    for (name, count) in counts {
+        if let Some(face) = db.get_face_by_name(name) {
+            entries.push(DeckEntry {
+                card: face.clone(),
+                count,
+            });
+        }
+    }
+    entries
+}
+
+/// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
+/// using a CardDatabase for lookup. Unresolvable names are silently skipped.
+pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
+    DeckPayload {
+        player_deck: resolve_names(db, &list.player_deck),
+        opponent_deck: resolve_names(db, &list.opponent_deck),
+    }
 }
 
 /// Derive ManaColor values from a ManaCostShard.
