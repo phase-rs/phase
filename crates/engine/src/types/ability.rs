@@ -304,10 +304,10 @@ pub enum Effect {
         count: u32,
     },
     Pump {
-        #[serde(default)]
-        power: i32,
-        #[serde(default)]
-        toughness: i32,
+        #[serde(default = "default_pt_value_zero")]
+        power: PtValue,
+        #[serde(default = "default_pt_value_zero")]
+        toughness: PtValue,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -385,10 +385,10 @@ pub enum Effect {
         count: u32,
     },
     PumpAll {
-        #[serde(default)]
-        power: i32,
-        #[serde(default)]
-        toughness: i32,
+        #[serde(default = "default_pt_value_zero")]
+        power: PtValue,
+        #[serde(default = "default_pt_value_zero")]
+        toughness: PtValue,
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },

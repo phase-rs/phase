@@ -91,8 +91,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
 
                     if is_noncreature {
                         let prowess_effect = Effect::Pump {
-                            power: 1,
-                            toughness: 1,
+                            power: crate::types::ability::PtValue::Fixed(1),
+                            toughness: crate::types::ability::PtValue::Fixed(1),
                             target: TargetFilter::SelfRef,
                         };
                         let prowess_ability = ResolvedAbility {

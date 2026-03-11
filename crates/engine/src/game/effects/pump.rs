@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
+    effect_variant_name, Effect, EffectError, PtValue, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -15,7 +15,7 @@ pub fn resolve(
     let (num_att, num_def) = match &ability.effect {
         Effect::Pump {
             power, toughness, ..
-        } => (*power, *toughness),
+        } => (resolve_pt_value(power), resolve_pt_value(toughness)),
         _ => (0, 0),
     };
 
@@ -54,7 +54,11 @@ pub fn resolve_all(
             power,
             toughness,
             target,
-        } => (*power, *toughness, target.clone()),
+        } => (
+            resolve_pt_value(power),
+            resolve_pt_value(toughness),
+            target.clone(),
+        ),
         _ => (0, 0, TargetFilter::None),
     };
 
@@ -93,11 +97,18 @@ pub fn resolve_all(
     Ok(())
 }
 
+fn resolve_pt_value(value: &PtValue) -> i32 {
+    match value {
+        PtValue::Fixed(n) => *n,
+        PtValue::Variable(_) => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{PtValue, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -118,8 +129,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Pump {
-                power: 3,
-                toughness: 3,
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(obj_id)],
@@ -149,8 +160,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Pump {
-                power: -2,
-                toughness: -2,
+                power: PtValue::Fixed(-2),
+                toughness: PtValue::Fixed(-2),
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(obj_id)],
@@ -223,8 +234,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PumpAll {
-                power: 1,
-                toughness: 1,
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
                 target: TargetFilter::Typed {
                     card_type: Some(crate::types::ability::TypeFilter::Creature),
                     subtype: None,

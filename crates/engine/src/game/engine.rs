@@ -2009,8 +2009,8 @@ mod tests {
             obj.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Spell,
                 effect: Effect::Pump {
-                    power: 3,
-                    toughness: 3,
+                    power: crate::types::ability::PtValue::Fixed(3),
+                    toughness: crate::types::ability::PtValue::Fixed(3),
                     target: TargetFilter::Typed {
                         card_type: Some(crate::types::ability::TypeFilter::Creature),
                         subtype: None,

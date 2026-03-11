@@ -626,6 +626,29 @@ fn build_continuous_clause(
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
+    if let Some((power, toughness, duration)) = parse_pump_clause(&normalized) {
+        let effect = if let Some(target) = application.target.clone() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            }
+        } else if application.affected == TargetFilter::SelfRef {
+            Effect::Pump {
+                power,
+                toughness,
+                target: TargetFilter::SelfRef,
+            }
+        } else {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target: application.affected,
+            }
+        };
+        return Some(ParsedEffectClause { effect, duration });
+    }
+
     let (predicate, duration) = strip_trailing_duration(&normalized);
     let modifications = parse_continuous_modifications(predicate);
     if modifications.is_empty() {
@@ -743,17 +766,17 @@ fn build_restriction_clause(
 
 fn extract_pump_modifiers(
     modifications: &[crate::types::ability::ContinuousModification],
-) -> Option<(i32, i32)> {
+) -> Option<(PtValue, PtValue)> {
     let mut power = None;
     let mut toughness = None;
 
     for modification in modifications {
         match modification {
             crate::types::ability::ContinuousModification::AddPower { value } => {
-                power = Some(*value);
+                power = Some(PtValue::Fixed(*value));
             }
             crate::types::ability::ContinuousModification::AddToughness { value } => {
-                toughness = Some(*value);
+                toughness = Some(PtValue::Fixed(*value));
             }
             _ => return None,
         }
@@ -832,31 +855,122 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
-    // Match "+N/+M" or "+N/-M" pattern
+    // Match "+N/+M", "+X/+0", "-X/-X", etc.
     let re_pos = lower.find("gets ").or_else(|| lower.find("get "))?;
     let offset = if lower[re_pos..].starts_with("gets ") {
         5
     } else {
         4
     };
-    let after = &text[re_pos + offset..].trim();
-    parse_pt_modifier(after).map(|(p, t)| Effect::Pump {
-        power: p,
-        toughness: t,
+    let after = text[re_pos + offset..].trim();
+    let token_end = after
+        .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
+        .unwrap_or(after.len());
+    let token = &after[..token_end];
+    parse_pt_modifier(token).map(|(power, toughness)| Effect::Pump {
+        power,
+        toughness,
         target: TargetFilter::Any,
     })
 }
 
-fn parse_pt_modifier(text: &str) -> Option<(i32, i32)> {
+fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Duration>)> {
+    let (without_where, where_x_expression) = strip_trailing_where_x(predicate);
+    let (without_duration, duration) = strip_trailing_duration(without_where);
+    let lower = without_duration.to_lowercase();
+
+    let after = if lower.starts_with("gets ") {
+        &without_duration[5..]
+    } else if lower.starts_with("get ") {
+        &without_duration[4..]
+    } else {
+        return None;
+    }
+    .trim_start();
+
+    let token_end = after
+        .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
+        .unwrap_or(after.len());
+    let token = &after[..token_end];
+    let trailing = after[token_end..]
+        .trim_start_matches(|c: char| c == ',' || c.is_whitespace())
+        .trim();
+    if !trailing.is_empty() {
+        return None;
+    }
+
+    let (power, toughness) = parse_pt_modifier(token)?;
+    let power = apply_where_x_expression(power, where_x_expression.as_deref());
+    let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref());
+
+    Some((power, toughness, duration))
+}
+
+fn strip_trailing_where_x(text: &str) -> (&str, Option<String>) {
+    let lower = text.to_lowercase();
+    for needle in [", where x is ", " where x is "] {
+        if let Some(pos) = lower.find(needle) {
+            let expression = text[pos + needle.len()..]
+                .trim()
+                .trim_end_matches('.')
+                .trim()
+                .to_string();
+            if expression.is_empty() {
+                return (text, None);
+            }
+            return (
+                text[..pos].trim_end_matches(',').trim_end(),
+                Some(expression),
+            );
+        }
+    }
+    (text, None)
+}
+
+fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> PtValue {
+    match (value, where_x_expression) {
+        (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
+            PtValue::Variable(expression.to_string())
+        }
+        (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("-X") => {
+            PtValue::Variable(format!("-({expression})"))
+        }
+        (value, _) => value,
+    }
+}
+
+fn parse_pt_modifier(text: &str) -> Option<(PtValue, PtValue)> {
+    let token = text.trim();
+    let slash = token.find('/')?;
+    let power = parse_signed_pt_component(token[..slash].trim())?;
+    let toughness = parse_signed_pt_component(token[slash + 1..].trim())?;
+    Some((power, toughness))
+}
+
+fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     let text = text.trim();
-    let slash = text.find('/')?;
-    let power_str = &text[..slash];
-    let rest = &text[slash + 1..];
-    let toughness_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let toughness_str = &rest[..toughness_end];
-    let p = power_str.replace('+', "").parse::<i32>().ok()?;
-    let t = toughness_str.replace('+', "").parse::<i32>().ok()?;
-    Some((p, t))
+    if text.is_empty() {
+        return None;
+    }
+
+    let (sign, body) = if let Some(rest) = text.strip_prefix('+') {
+        (1, rest.trim())
+    } else if let Some(rest) = text.strip_prefix('-') {
+        (-1, rest.trim())
+    } else {
+        (1, text)
+    };
+
+    if body.eq_ignore_ascii_case("x") {
+        return Some(if sign < 0 {
+            PtValue::Variable("-X".to_string())
+        } else {
+            PtValue::Variable("X".to_string())
+        });
+    }
+
+    let value = body.parse::<i32>().ok()?;
+    Some(PtValue::Fixed(sign * value))
 }
 
 fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
@@ -1750,8 +1864,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Pump {
-                power: 3,
-                toughness: 3,
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
                 ..
             }
         ));
@@ -1910,8 +2024,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Pump {
-                power: 2,
-                toughness: 2,
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
                 ..
             }
         ));
@@ -2142,8 +2256,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Pump {
-                power: 1,
-                toughness: 1,
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
                 ..
             }
         ));
@@ -2161,10 +2275,82 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Pump {
-                power: 2,
-                toughness: 2,
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn effect_target_creature_gets_variable_pump() {
+        let e = parse_effect("Target creature gets +X/+0 until end of turn");
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Fixed(0),
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                },
+            } if value == "X"
+        ));
+    }
+
+    #[test]
+    fn effect_target_creature_gets_negative_variable_pump_with_where_clause() {
+        let e = parse_effect(
+            "Target creature gets -X/-X until end of turn, where X is the number of Elves you control",
+        );
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Variable(ref value2),
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                },
+            } if value == "-(the number of Elves you control)"
+                && value2 == "-(the number of Elves you control)"
+        ));
+    }
+
+    #[test]
+    fn effect_creatures_you_control_get_variable_pump() {
+        let e = parse_effect(
+            "Creatures you control get +X/+X until end of turn, where X is the number of cards in your hand",
+        );
+        assert!(matches!(
+            e,
+            Effect::PumpAll {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Variable(ref value2),
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    controller: Some(ControllerRef::You),
+                    ..
+                },
+            } if value == "the number of cards in your hand"
+                && value2 == "the number of cards in your hand"
+        ));
+    }
+
+    #[test]
+    fn effect_chain_variable_pump_preserves_duration() {
+        let def = parse_effect_chain(
+            "Target creature gets +X/+0 until end of turn, where X is the number of creatures you control",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(
+            def.effect,
+            Effect::Pump {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Fixed(0),
+                ..
+            } if value == "the number of creatures you control"
         ));
     }
 

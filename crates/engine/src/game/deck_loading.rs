@@ -307,8 +307,8 @@ mod tests {
             abilities: vec![AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Pump {
-                    power: 0,
-                    toughness: 0,
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(0),
                     target: TargetFilter::Any,
                 },
                 cost: Some(crate::types::ability::AbilityCost::Tap),
