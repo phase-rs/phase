@@ -2312,7 +2312,11 @@ mod tests {
             let top = &state.stack.last().unwrap();
             match &top.kind {
                 crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
-                    assert_eq!(ability.api_type(), "Draw", "trigger should resolve Draw");
+                    assert_eq!(
+                        crate::types::ability::effect_variant_name(&ability.effect),
+                        "Draw",
+                        "trigger should resolve Draw"
+                    );
                 }
                 _ => panic!("expected TriggeredAbility on stack"),
             }

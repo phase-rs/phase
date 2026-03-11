@@ -178,7 +178,10 @@ mod tests {
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(4));
         assert_eq!(obj.keywords, vec![Keyword::Trample]);
-        assert_eq!(obj.abilities[0].api_type(), "BackAbility");
+        assert_eq!(
+            crate::types::ability::effect_variant_name(&obj.abilities[0].effect),
+            "BackAbility"
+        );
         assert_eq!(obj.color, vec![ManaColor::Green, ManaColor::Red]);
         assert!(state.layers_dirty);
         assert_eq!(events.len(), 1);
@@ -202,7 +205,10 @@ mod tests {
         assert_eq!(obj.power, Some(2));
         assert_eq!(obj.toughness, Some(3));
         assert_eq!(obj.keywords, vec![Keyword::Vigilance]);
-        assert_eq!(obj.abilities[0].api_type(), "FrontAbility");
+        assert_eq!(
+            crate::types::ability::effect_variant_name(&obj.abilities[0].effect),
+            "FrontAbility"
+        );
         assert_eq!(obj.color, vec![ManaColor::Green]);
         assert_eq!(events.len(), 2);
     }

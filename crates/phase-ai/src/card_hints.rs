@@ -1,3 +1,4 @@
+use engine::types::ability::effect_variant_name;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -42,13 +43,25 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
 
             // Categorize by abilities/svars
             let has_destroy = obj.svars.values().any(|v| v.contains("Destroy"))
-                || obj.abilities.iter().any(|a| a.api_type() == "Destroy");
+                || obj
+                    .abilities
+                    .iter()
+                    .any(|a| effect_variant_name(&a.effect) == "Destroy");
             let has_damage = obj.svars.values().any(|v| v.contains("DealDamage"))
-                || obj.abilities.iter().any(|a| a.api_type() == "DealDamage");
+                || obj
+                    .abilities
+                    .iter()
+                    .any(|a| effect_variant_name(&a.effect) == "DealDamage");
             let has_pump = obj.svars.values().any(|v| v.contains("Pump"))
-                || obj.abilities.iter().any(|a| a.api_type() == "Pump");
+                || obj
+                    .abilities
+                    .iter()
+                    .any(|a| effect_variant_name(&a.effect) == "Pump");
             let has_counter = obj.svars.values().any(|v| v.contains("Counter"))
-                || obj.abilities.iter().any(|a| a.api_type() == "Counter");
+                || obj
+                    .abilities
+                    .iter()
+                    .any(|a| effect_variant_name(&a.effect) == "Counter");
 
             // Removal: higher priority when opponent has high-value creatures
             if has_destroy || has_damage {

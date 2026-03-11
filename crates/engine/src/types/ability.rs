@@ -289,6 +289,7 @@ fn default_target_spec_all_empty() -> TargetSpec {
 impl Effect {
     /// Returns the Forge api_type string for this effect.
     /// Used as a compatibility bridge during the transition period.
+    #[cfg(feature = "forge-compat")]
     pub fn api_type(&self) -> &str {
         match self {
             Effect::DealDamage { .. } => "DealDamage",
@@ -664,6 +665,7 @@ impl AbilityDefinition {
     /// Returns the Forge api_type string for this ability's effect.
     /// Compatibility bridge -- consumers that still match on api_type strings
     /// can use this until they are migrated to match on Effect variants.
+    #[cfg(feature = "forge-compat")]
     pub fn api_type(&self) -> &str {
         self.effect.api_type()
     }
@@ -672,6 +674,7 @@ impl AbilityDefinition {
     /// merged with any unconsumed parameters from parsing.
     /// Compatibility bridge -- consumers that still read params by string key
     /// can use this until they are migrated to read Effect fields.
+    #[cfg(feature = "forge-compat")]
     pub fn params(&self) -> HashMap<String, String> {
         let mut params = self.remaining_params.clone();
         // Typed effect fields take precedence over remaining params
@@ -693,6 +696,7 @@ pub struct TriggerDefinition {
 impl TriggerDefinition {
     /// Returns the Forge mode string for this trigger.
     /// Compatibility bridge for consumers that still compare mode as a string.
+    #[cfg(feature = "forge-compat")]
     pub fn mode_str(&self) -> String {
         self.mode.to_string()
     }
@@ -710,6 +714,7 @@ pub struct StaticDefinition {
 impl StaticDefinition {
     /// Returns the Forge mode string for this static ability.
     /// Compatibility bridge for consumers that still compare mode as a string.
+    #[cfg(feature = "forge-compat")]
     pub fn mode_str(&self) -> String {
         self.mode.to_string()
     }
@@ -727,6 +732,7 @@ pub struct ReplacementDefinition {
 impl ReplacementDefinition {
     /// Returns the Forge event string for this replacement.
     /// Compatibility bridge for consumers that still compare event as a string.
+    #[cfg(feature = "forge-compat")]
     pub fn event_str(&self) -> String {
         self.event.to_string()
     }
@@ -761,6 +767,7 @@ pub struct ResolvedAbility {
 
 impl ResolvedAbility {
     /// Derive the api_type string from the typed Effect.
+    #[cfg(feature = "forge-compat")]
     pub fn api_type(&self) -> &str {
         self.effect.api_type()
     }
@@ -939,6 +946,7 @@ mod tests {
     // --- New typed enum tests ---
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn effect_api_type_returns_correct_string() {
         assert_eq!(
             Effect::DealDamage {
@@ -1152,6 +1160,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn ability_definition_compat_api_type() {
         let def = AbilityDefinition {
             kind: AbilityKind::Spell,
@@ -1167,6 +1176,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn ability_definition_compat_params() {
         let def = AbilityDefinition {
             kind: AbilityKind::Spell,
@@ -1306,6 +1316,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn static_definition_mode_str_compat() {
         let def = StaticDefinition {
             mode: StaticMode::Continuous,
@@ -1315,6 +1326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn trigger_definition_mode_str_compat() {
         let def = TriggerDefinition {
             mode: TriggerMode::ChangesZone,
@@ -1324,6 +1336,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn replacement_definition_event_str_compat() {
         let def = ReplacementDefinition {
             event: ReplacementEvent::DamageDone,

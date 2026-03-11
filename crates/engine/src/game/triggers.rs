@@ -1636,7 +1636,10 @@ pub mod tests {
         match &entry.kind {
             StackEntryKind::TriggeredAbility { source_id, ability } => {
                 assert_eq!(*source_id, trigger_creature);
-                assert_eq!(ability.api_type(), "Draw");
+                assert_eq!(
+                    crate::types::ability::effect_variant_name(&ability.effect),
+                    "Draw"
+                );
                 assert_eq!(ability.params.get("NumCards").unwrap(), "1");
             }
             _ => panic!("Expected TriggeredAbility on stack"),

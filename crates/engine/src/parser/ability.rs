@@ -675,7 +675,7 @@ pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError>
 
 #[cfg(test)]
 mod tests {
-    use crate::types::ability::AbilityKind;
+    use crate::types::ability::{effect_variant_name, AbilityKind};
 
     use super::*;
 
@@ -683,8 +683,8 @@ mod tests {
     fn parse_spell_ability() {
         let result = parse_ability("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3").unwrap();
         assert_eq!(result.kind, AbilityKind::Spell);
-        assert_eq!(result.api_type(), "DealDamage");
-        let params = result.params();
+        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
+        let params = result.effect.to_params();
         assert_eq!(params.get("ValidTgts").unwrap(), "Any");
         assert_eq!(params.get("NumDmg").unwrap(), "3");
     }
@@ -693,8 +693,8 @@ mod tests {
     fn parse_activated_ability() {
         let result = parse_ability("AB$ Draw | Cost$ T | NumCards$ 1").unwrap();
         assert_eq!(result.kind, AbilityKind::Activated);
-        assert_eq!(result.api_type(), "Draw");
-        let params = result.params();
+        assert_eq!(effect_variant_name(&result.effect), "Draw");
+        let params = result.effect.to_params();
         assert_eq!(params.get("NumCards").unwrap(), "1");
     }
 
@@ -702,8 +702,8 @@ mod tests {
     fn parse_database_ability() {
         let result = parse_ability("DB$ ChangeZone | Origin$ Battlefield").unwrap();
         assert_eq!(result.kind, AbilityKind::Database);
-        assert_eq!(result.api_type(), "ChangeZone");
-        let params = result.params();
+        assert_eq!(effect_variant_name(&result.effect), "ChangeZone");
+        let params = result.effect.to_params();
         assert_eq!(params.get("Origin").unwrap(), "Battlefield");
     }
 
@@ -758,7 +758,7 @@ mod tests {
         // but is NOT in the params compat map because params_to_effect consumed known params
         // and SpellDescription is not part of the DealDamage variant.
         // However, to_params() only reconstructs what the Effect knows about.
-        assert_eq!(result.api_type(), "DealDamage");
+        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
     }
 
     #[test]
@@ -782,13 +782,13 @@ mod tests {
     #[test]
     fn parse_mana_ability() {
         let result = parse_ability("AB$ Mana | Cost$ T | Produced$ G").unwrap();
-        assert_eq!(result.api_type(), "Mana");
+        assert_eq!(effect_variant_name(&result.effect), "Mana");
     }
 
     #[test]
     fn parse_unknown_effect_falls_to_other() {
         let result = parse_ability("SP$ SomeNewEffect | Foo$ Bar").unwrap();
-        assert_eq!(result.api_type(), "SomeNewEffect");
+        assert_eq!(effect_variant_name(&result.effect), "SomeNewEffect");
         assert!(matches!(result.effect, Effect::Other { .. }));
     }
 

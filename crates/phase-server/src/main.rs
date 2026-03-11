@@ -30,8 +30,13 @@ struct SocketIdentity {
 #[tokio::main]
 async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let cards_dir = std::env::var("PHASE_CARDS_DIR").unwrap_or_else(|_| "data/cards".to_string());
-    let card_db = CardDatabase::load(Path::new(&cards_dir)).expect("Failed to load card database");
+    let data_root = std::env::var("PHASE_DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    let data_path = Path::new(&data_root);
+    let card_db = CardDatabase::load_json(
+        &data_path.join("mtgjson/test_fixture.json"),
+        &data_path.join("abilities"),
+    )
+    .expect("Failed to load card database");
     println!("Loaded {} cards", card_db.card_count());
     let db: SharedDb = Arc::new(card_db);
 

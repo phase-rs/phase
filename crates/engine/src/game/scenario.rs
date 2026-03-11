@@ -779,7 +779,10 @@ mod tests {
         assert!(obj.card_types.core_types.contains(&CoreType::Instant));
         assert_eq!(obj.zone, Zone::Hand);
         assert!(!obj.abilities.is_empty());
-        assert_eq!(obj.abilities[0].effect.api_type(), "DealDamage");
+        assert_eq!(
+            crate::types::ability::effect_variant_name(&obj.abilities[0].effect),
+            "DealDamage"
+        );
     }
 
     #[test]

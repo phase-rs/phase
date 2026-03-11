@@ -1840,11 +1840,7 @@ mod tests {
             ReplacementEvent::Other("Planeswalk".into()),
         ];
         for key in &expected {
-            assert!(
-                registry.contains_key(key),
-                "registry missing key: {}",
-                key
-            );
+            assert!(registry.contains_key(key), "registry missing key: {}", key);
         }
     }
 }

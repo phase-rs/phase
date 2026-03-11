@@ -23,11 +23,16 @@ path = "src/bin/coverage_report.rs"
 [[bin]]
 name = "card-data-export"
 path = "src/bin/card_data_export.rs"
+required-features = ["forge-compat"]
 
 [[bin]]
 name = "migrate"
 path = "src/bin/migrate.rs"
+required-features = ["forge-compat"]
 
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
+
+[features]
+forge-compat = []

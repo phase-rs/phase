@@ -242,13 +242,17 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[cfg(feature = "forge-compat")]
     use std::path::Path;
 
+    #[cfg(feature = "forge-compat")]
     fn create_card_file(dir: &Path, name: &str, content: &str) {
         std::fs::write(dir.join(format!("{}.txt", name)), content).unwrap();
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn card_with_supported_effect_is_marked_supported() {
         let tmp = tempfile::tempdir().unwrap();
         // Lightning Bolt uses DealDamage which is in the effect registry
@@ -268,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn card_with_unknown_effect_is_marked_unsupported() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(
@@ -288,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn vanilla_creature_is_supported() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(
@@ -303,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn card_with_unknown_keyword_is_unsupported() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(
@@ -322,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn missing_handler_frequency_sorted_descending() {
         let tmp = tempfile::tempdir().unwrap();
         // Two cards both missing the same effect
@@ -351,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn coverage_percentage_calculated_correctly() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(
@@ -439,6 +448,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn ci_passes_when_all_cards_supported() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(
@@ -458,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forge-compat")]
     fn ci_fails_when_any_card_unsupported() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(

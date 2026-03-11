@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "forge-compat")]
 use walkdir::WalkDir;
 
+#[cfg(feature = "forge-compat")]
 use crate::parser::{parse_card_file, ParseError};
-use crate::types::card::{CardFace, CardLayout, CardRules};
+#[cfg(feature = "forge-compat")]
+use crate::types::card::CardLayout;
+use crate::types::card::{CardFace, CardRules};
 
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
@@ -20,6 +24,7 @@ impl CardDatabase {
         super::json_loader::load_json(mtgjson_path, abilities_dir)
     }
 
+    #[cfg(feature = "forge-compat")]
     pub fn load(root: &Path) -> Result<Self, ParseError> {
         let mut cards = HashMap::new();
         let mut face_index = HashMap::new();
@@ -89,6 +94,7 @@ impl CardDatabase {
     }
 }
 
+#[cfg(feature = "forge-compat")]
 fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
     match layout {
         CardLayout::Single(face) => vec![face],
@@ -107,7 +113,7 @@ fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "forge-compat"))]
 mod tests {
     use super::*;
     use std::fs;

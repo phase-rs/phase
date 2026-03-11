@@ -40,7 +40,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<Vec<DeckEntry>
     Ok(entries)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "forge-compat"))]
 mod tests {
     use super::*;
     use std::fs;

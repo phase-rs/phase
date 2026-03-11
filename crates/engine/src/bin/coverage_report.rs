@@ -11,7 +11,6 @@ use engine::game::coverage::{
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ci_mode = args.iter().any(|a| a == "--ci");
-    let json_mode = args.iter().any(|a| a == "--json");
 
     let path = args
         .iter()
@@ -22,16 +21,13 @@ fn main() {
         .map(PathBuf::from);
 
     let Some(path) = path else {
-        eprintln!("Usage: coverage-report <path> [--ci] [--json]");
+        eprintln!("Usage: coverage-report <data-root> [--ci]");
         eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
-        eprintln!("Modes:");
-        eprintln!("  Text (default):   coverage-report <cards-dir> [--ci]");
-        eprintln!("  JSON:             coverage-report --json <data-root> [--ci]");
+        eprintln!("Loads cards via JSON (mtgjson + abilities) from <data-root>.");
         eprintln!();
         eprintln!("Flags:");
         eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
-        eprintln!("  --json  Load cards via JSON (mtgjson + abilities) instead of .txt files");
         eprintln!();
         eprintln!("Outputting empty coverage summary to stdout.");
         let empty = CoverageSummary {
@@ -45,68 +41,44 @@ fn main() {
         process::exit(0);
     };
 
-    let db = if json_mode {
-        // JSON mode: load via CardDatabase::load_json()
-        // path is the data root directory (e.g., "data/")
-        let mtgjson_path = path.join("mtgjson/test_fixture.json");
-        let abilities_dir = path.join("abilities");
-        match CardDatabase::load_json(&mtgjson_path, &abilities_dir) {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!(
-                    "Error loading JSON card database from {}: {}",
-                    path.display(),
-                    e
-                );
-                let empty = CoverageSummary {
-                    total_cards: 0,
-                    supported_cards: 0,
-                    coverage_pct: 0.0,
-                    cards: vec![],
-                    missing_handler_frequency: vec![],
-                };
-                println!("{}", serde_json::to_string_pretty(&empty).unwrap());
-                process::exit(1);
-            }
-        }
-    } else {
-        // Text mode (unchanged)
-        match CardDatabase::load(&path) {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!("Error loading card database from {}: {}", path.display(), e);
-                let empty = CoverageSummary {
-                    total_cards: 0,
-                    supported_cards: 0,
-                    coverage_pct: 0.0,
-                    cards: vec![],
-                    missing_handler_frequency: vec![],
-                };
-                println!("{}", serde_json::to_string_pretty(&empty).unwrap());
-                process::exit(1);
-            }
+    // Load via CardDatabase::load_json()
+    // path is the data root directory (e.g., "data/")
+    let mtgjson_path = path.join("mtgjson/test_fixture.json");
+    let abilities_dir = path.join("abilities");
+    let db = match CardDatabase::load_json(&mtgjson_path, &abilities_dir) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!(
+                "Error loading JSON card database from {}: {}",
+                path.display(),
+                e
+            );
+            let empty = CoverageSummary {
+                total_cards: 0,
+                supported_cards: 0,
+                coverage_pct: 0.0,
+                cards: vec![],
+                missing_handler_frequency: vec![],
+            };
+            println!("{}", serde_json::to_string_pretty(&empty).unwrap());
+            process::exit(1);
         }
     };
 
     let summary = analyze_standard_coverage(&db);
 
-    // In JSON mode, filter to only Standard manifest cards
-    let summary = if json_mode {
-        let manifest_path = path.join("standard-cards.txt");
-        let manifest_names = match load_manifest(&manifest_path) {
-            Ok(names) => names,
-            Err(e) => {
-                eprintln!(
-                    "Error loading manifest from {}: {}",
-                    manifest_path.display(),
-                    e
-                );
-                process::exit(1);
-            }
-        };
-        filter_to_manifest(summary, &manifest_names)
-    } else {
-        summary
+    // Filter to only Standard manifest cards
+    let manifest_path = path.join("standard-cards.txt");
+    let summary = match load_manifest(&manifest_path) {
+        Ok(manifest_names) => filter_to_manifest(summary, &manifest_names),
+        Err(e) => {
+            eprintln!(
+                "Error loading manifest from {}: {}",
+                manifest_path.display(),
+                e
+            );
+            process::exit(1);
+        }
     };
 
     // Print JSON to stdout
@@ -159,8 +131,8 @@ fn load_manifest(path: &PathBuf) -> Result<HashSet<String>, std::io::Error> {
 }
 
 /// Filter a CoverageSummary to only include cards whose names are in the manifest.
-/// In JSON mode, also strips benign MTGJSON keyword mismatches (bare parameterized
-/// keywords and action keywords like Scry/Mill that MTGJSON tracks but Forge doesn't).
+/// Also strips benign MTGJSON keyword mismatches (bare parameterized keywords and
+/// action keywords like Scry/Mill that MTGJSON tracks but Forge doesn't).
 fn filter_to_manifest(summary: CoverageSummary, manifest: &HashSet<String>) -> CoverageSummary {
     let cards: Vec<_> = summary
         .cards

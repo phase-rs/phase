@@ -1,8 +1,12 @@
 pub mod ability;
+#[cfg(feature = "forge-compat")]
 pub mod card_parser;
+#[cfg(feature = "forge-compat")]
 pub mod card_type;
+#[cfg(feature = "forge-compat")]
 pub mod mana_cost;
 
+#[cfg(feature = "forge-compat")]
 pub use card_parser::parse_card_file;
 
 use thiserror::Error;

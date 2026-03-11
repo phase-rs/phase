@@ -110,7 +110,10 @@ mod tests {
                 },
             ) => {
                 assert_eq!(c1, c2);
-                assert_eq!(a1.api_type(), a2.api_type());
+                assert_eq!(
+                    crate::types::ability::effect_variant_name(&a1.effect),
+                    crate::types::ability::effect_variant_name(&a2.effect)
+                );
             }
             _ => panic!("Expected both entries to be Spells"),
         }
