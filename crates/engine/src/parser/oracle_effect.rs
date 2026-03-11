@@ -80,6 +80,9 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     if let Some(clause) = try_parse_subject_become_clause(text) {
         return clause;
     }
+    if let Some(clause) = try_parse_subject_restriction_clause(text) {
+        return clause;
+    }
     if let Some(stripped) = strip_subject_clause(text) {
         return parse_effect_clause(&stripped);
     }
@@ -513,6 +516,7 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
 fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let lower = text.to_lowercase();
     for (suffix, duration) in [
+        (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
         (" until your next turn", Duration::UntilYourNextTurn),
     ] {
@@ -541,6 +545,19 @@ fn try_parse_subject_become_clause(text: &str) -> Option<ParsedEffectClause> {
     }
     let application = parse_subject_application(subject)?;
     build_become_clause(application, &predicate)
+}
+
+fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (subject, predicate) = if let Some(pos) = lower.find(" can't ") {
+        (text[..pos].trim(), text[pos + 1..].trim())
+    } else if let Some(pos) = lower.find(" cannot ") {
+        (text[..pos].trim(), text[pos + 1..].trim())
+    } else {
+        return None;
+    };
+    let application = parse_subject_application(subject)?;
+    build_restriction_clause(application, predicate)
 }
 
 fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
@@ -676,6 +693,41 @@ fn build_become_clause(
                 mode: StaticMode::Continuous,
                 affected: Some(application.affected),
                 modifications,
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: Some(predicate.to_string()),
+            }],
+            duration: duration.clone(),
+            target: application.target,
+        },
+        duration,
+    })
+}
+
+fn build_restriction_clause(
+    application: SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let normalized = deconjugate_verb(predicate);
+    let (predicate, duration) = strip_trailing_duration(&normalized);
+    let lower = predicate.to_lowercase();
+
+    let mode = if matches!(lower.as_str(), "can't block" | "cannot block") {
+        StaticMode::CantBlock
+    } else if matches!(lower.as_str(), "can't be blocked" | "cannot be blocked") {
+        StaticMode::Other("CantBeBlocked".to_string())
+    } else {
+        return None;
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode,
+                affected: Some(application.affected),
+                modifications: vec![],
                 condition: None,
                 affected_zone: None,
                 effect_zone: None,
@@ -2240,6 +2292,47 @@ mod tests {
                         subtype: "Beast".to_string(),
                     }
                 )
+        ));
+    }
+
+    #[test]
+    fn effect_target_creature_cant_block_uses_rule_static() {
+        let e = parse_effect("Target creature can't block this turn");
+        assert!(matches!(
+            e,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                }),
+                static_abilities,
+                ..
+            } if static_abilities.len() == 1
+                && static_abilities[0].mode == StaticMode::CantBlock
+                && static_abilities[0].affected == Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                })
+        ));
+    }
+
+    #[test]
+    fn effect_target_creature_cant_be_blocked_uses_rule_static() {
+        let e = parse_effect("Target creature can't be blocked this turn");
+        assert!(matches!(
+            e,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                }),
+                static_abilities,
+                ..
+            } if static_abilities.len() == 1
+                && static_abilities[0].mode
+                    == StaticMode::Other("CantBeBlocked".to_string())
         ));
     }
 

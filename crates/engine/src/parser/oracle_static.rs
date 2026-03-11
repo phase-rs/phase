@@ -109,7 +109,10 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "Lands you control have '[type]'" ---
     if lower.starts_with("lands you control have ") {
-        let rest = text[23..].trim().trim_end_matches('.').trim_matches(|c: char| c == '\'' || c == '"');
+        let rest = text[23..]
+            .trim()
+            .trim_end_matches('.')
+            .trim_matches(|c: char| c == '\'' || c == '"');
         return Some(StaticDefinition {
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::Typed {
@@ -158,7 +161,11 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "~ has/gets ..." (self-referential) ---
     // Match lines like "CARDNAME has deathtouch" or "CARDNAME gets +1/+1"
-    if let Some(pos) = lower.find(" has ").or_else(|| lower.find(" gets ")).or_else(|| lower.find(" get ")) {
+    if let Some(pos) = lower
+        .find(" has ")
+        .or_else(|| lower.find(" gets "))
+        .or_else(|| lower.find(" get "))
+    {
         let verb_len = if lower[pos..].starts_with(" has ") {
             5
         } else if lower[pos..].starts_with(" gets ") {
@@ -168,10 +175,23 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         };
         let subject = &lower[..pos];
         // Only match if the subject doesn't look like a known prefix we handle elsewhere
-        if !subject.contains("creature") && !subject.contains("permanent") && !subject.contains("land") && !subject.starts_with("all ") && !subject.starts_with("other ") {
+        if !subject.contains("creature")
+            && !subject.contains("permanent")
+            && !subject.contains("land")
+            && !subject.starts_with("all ")
+            && !subject.starts_with("other ")
+        {
             let after = &text[pos + verb_len..];
             return parse_continuous_gets_has(
-                &format!("{}{}", if lower[pos..].starts_with(" has ") { "has " } else { "gets " }, after),
+                &format!(
+                    "{}{}",
+                    if lower[pos..].starts_with(" has ") {
+                        "has "
+                    } else {
+                        "gets "
+                    },
+                    after
+                ),
                 TargetFilter::SelfRef,
             );
         }
@@ -180,7 +200,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- "~ can't be blocked" ---
     if lower.contains("can't be blocked") {
         return Some(StaticDefinition {
-            mode: StaticMode::CantBlock,
+            mode: StaticMode::Other("CantBeBlocked".to_string()),
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
@@ -194,11 +214,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- "~ can't block" ---
     if lower.contains("can't block") && !lower.contains("can't be blocked") {
         return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
+            mode: StaticMode::CantBlock,
             affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Defender,
-            }],
+            modifications: vec![],
             condition: None,
             affected_zone: None,
             effect_zone: None,
@@ -324,7 +342,11 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "Spells your opponents cast cost {N} more" ---
-    if lower.contains("cost") && lower.contains("more") && lower.contains("spell") && lower.contains("opponent") {
+    if lower.contains("cost")
+        && lower.contains("more")
+        && lower.contains("spell")
+        && lower.contains("opponent")
+    {
         return Some(StaticDefinition {
             mode: StaticMode::RaiseCost,
             affected: Some(TargetFilter::Typed {
@@ -413,33 +435,7 @@ fn is_capitalized_words(s: &str) -> bool {
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
 fn parse_continuous_gets_has(text: &str, affected: TargetFilter) -> Option<StaticDefinition> {
-    let lower = text.to_lowercase();
-    let mut modifications = Vec::new();
-
-    // Check for "gets +N/+M" or "get +N/+M"
-    if lower.starts_with("gets ") || lower.starts_with("get ") {
-        let offset = if lower.starts_with("gets ") { 5 } else { 4 };
-        let after = &text[offset..].trim();
-        if let Some((p, t)) = parse_pt_mod(after) {
-            modifications.push(ContinuousModification::AddPower { value: p });
-            modifications.push(ContinuousModification::AddToughness { value: t });
-        }
-    }
-
-    // Check for "and has {keyword}" or "has {keyword}" or "have {keyword}"
-    let has_pos = lower
-        .find("has ")
-        .or_else(|| lower.find("have "));
-    if let Some(pos) = has_pos {
-        let verb_len = if lower[pos..].starts_with("have ") { 5 } else { 4 };
-        let keyword_text = text[pos + verb_len..].trim();
-        // May contain multiple keywords separated by "and" or ","
-        for part in split_keyword_list(keyword_text) {
-            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
-                modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-            }
-        }
-    }
+    let modifications = parse_continuous_modifications(text);
 
     if modifications.is_empty() {
         return None;
@@ -455,6 +451,30 @@ fn parse_continuous_gets_has(text: &str, affected: TargetFilter) -> Option<Stati
         characteristic_defining: false,
         description: None,
     })
+}
+
+pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
+    let lower = text.to_lowercase();
+    let mut modifications = Vec::new();
+
+    if lower.starts_with("gets ") || lower.starts_with("get ") {
+        let offset = if lower.starts_with("gets ") { 5 } else { 4 };
+        let after = &text[offset..].trim();
+        if let Some((p, t)) = parse_pt_mod(after) {
+            modifications.push(ContinuousModification::AddPower { value: p });
+            modifications.push(ContinuousModification::AddToughness { value: t });
+        }
+    }
+
+    if let Some(keyword_text) = extract_keyword_clause(text) {
+        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
+            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
+                modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+            }
+        }
+    }
+
+    modifications
 }
 
 /// Split a keyword list like "flying and trample" or "flying, trample, and haste".
@@ -475,6 +495,33 @@ fn split_keyword_list(text: &str) -> Vec<&str> {
     parts
 }
 
+fn extract_keyword_clause(text: &str) -> Option<&str> {
+    let lower = text.to_lowercase();
+
+    for needle in [
+        " and gains ",
+        " and gain ",
+        " and has ",
+        " and have ",
+        " gains ",
+        " gain ",
+        " has ",
+        " have ",
+    ] {
+        if let Some(pos) = lower.find(needle) {
+            return Some(&text[pos + needle.len()..]);
+        }
+    }
+
+    for prefix in ["gains ", "gain ", "has ", "have "] {
+        if lower.starts_with(prefix) {
+            return Some(&text[prefix.len()..]);
+        }
+    }
+
+    None
+}
+
 fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     let text = text.trim();
     let slash = text.find('/')?;
@@ -492,10 +539,7 @@ fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
 /// Map a keyword text to a Keyword enum variant using the FromStr impl.
 /// Returns None only for `Keyword::Unknown`.
 fn map_keyword(text: &str) -> Option<Keyword> {
-    let word = text
-        .trim()
-        .trim_end_matches('.')
-        .trim();
+    let word = text.trim().trim_end_matches('.').trim();
     if word.is_empty() {
         return None;
     }
@@ -550,7 +594,7 @@ mod tests {
         let def =
             parse_static_line("Questing Beast can't be blocked by creatures with power 2 or less.")
                 .unwrap();
-        assert!(matches!(def.mode, StaticMode::CantBlock));
+        assert_eq!(def.mode, StaticMode::Other("CantBeBlocked".to_string()));
     }
 
     #[test]
@@ -639,12 +683,8 @@ mod tests {
     #[test]
     fn static_cant_block() {
         let def = parse_static_line("Ragavan can't block.").unwrap();
-        assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::AddKeyword {
-                keyword: Keyword::Defender,
-            }));
+        assert_eq!(def.mode, StaticMode::CantBlock);
+        assert!(def.modifications.is_empty());
         assert!(def.description.is_some());
     }
 
@@ -671,8 +711,7 @@ mod tests {
 
     #[test]
     fn static_opponent_spells_cost_more() {
-        let def =
-            parse_static_line("Spells your opponents cast cost {1} more to cast.").unwrap();
+        let def = parse_static_line("Spells your opponents cast cost {1} more to cast.").unwrap();
         assert_eq!(def.mode, StaticMode::RaiseCost);
     }
 
@@ -693,22 +732,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(matches!(def.condition, Some(StaticCondition::CheckSVar { .. })));
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::CheckSVar { .. })
+        ));
     }
 
     #[test]
     fn static_has_keyword_as_long_as() {
-        let def = parse_static_line(
-            "Tarmogoyf has trample as long as a land card is in a graveyard.",
-        )
-        .unwrap();
+        let def =
+            parse_static_line("Tarmogoyf has trample as long as a land card is in a graveyard.")
+                .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
             }));
-        assert!(matches!(def.condition, Some(StaticCondition::CheckSVar { .. })));
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::CheckSVar { .. })
+        ));
     }
 
     #[test]
@@ -733,8 +777,7 @@ mod tests {
 
     #[test]
     fn static_cant_be_sacrificed() {
-        let def =
-            parse_static_line("Sigarda, Host of Herons can't be sacrificed.").unwrap();
+        let def = parse_static_line("Sigarda, Host of Herons can't be sacrificed.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(def.description.is_some());
     }
@@ -768,8 +811,7 @@ mod tests {
 
     #[test]
     fn static_multiple_keywords() {
-        let def =
-            parse_static_line("Enchanted creature has flying, trample, and haste.").unwrap();
+        let def = parse_static_line("Enchanted creature has flying, trample, and haste.").unwrap();
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddKeyword {

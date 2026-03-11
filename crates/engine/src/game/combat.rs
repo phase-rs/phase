@@ -161,6 +161,13 @@ pub fn validate_blockers(
         if blocker.tapped {
             return Err(format!("{:?} is tapped", blocker_id));
         }
+        if blocker
+            .static_definitions
+            .iter()
+            .any(|sd| sd.mode == StaticMode::CantBlock)
+        {
+            return Err(format!("{:?} can't block", blocker_id));
+        }
 
         // Check attacker exists and is actually attacking
         let attacker = state
@@ -451,6 +458,13 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
 /// Check if a specific blocker can legally block a specific attacker (per-pair restrictions only).
 /// Does NOT check menace (which is a multi-blocker constraint).
 fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
+    if blocker
+        .static_definitions
+        .iter()
+        .any(|sd| sd.mode == StaticMode::CantBlock)
+    {
+        return false;
+    }
     if attacker
         .static_definitions
         .iter()
@@ -981,6 +995,32 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn cant_block_static_prevents_creature_from_blocking() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition {
+                mode: StaticMode::CantBlock,
+                affected: None,
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            });
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
     }
 
     #[test]
