@@ -1,11 +1,13 @@
 import { motion, AnimatePresence } from "framer-motion";
 import type { ScryfallCard } from "../../services/scryfall";
+import { LegalityBadge } from "./LegalityBadge";
 
 interface CardGridProps {
   cards: ScryfallCard[];
   onAddCard: (card: ScryfallCard) => void;
   onCardHover?: (cardName: string | null) => void;
   cardCounts?: Map<string, number>;
+  format?: string;
 }
 
 function getArtCropUrl(card: ScryfallCard): string {
@@ -16,8 +18,8 @@ function getArtCropUrl(card: ScryfallCard): string {
   );
 }
 
-function isStandardLegal(card: ScryfallCard): boolean {
-  return card.legalities?.standard === "legal";
+function isFormatLegal(card: ScryfallCard, format: string): boolean {
+  return card.legalities?.[format] === "legal";
 }
 
 export function CardGrid({
@@ -25,14 +27,16 @@ export function CardGrid({
   onAddCard,
   onCardHover,
   cardCounts,
+  format = "standard",
 }: CardGridProps) {
   return (
     <div className="grid auto-rows-min grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-2 overflow-y-auto p-2">
       <AnimatePresence mode="popLayout">
         {cards.map((card) => {
           const imageUrl = getArtCropUrl(card);
-          const legal = isStandardLegal(card);
+          const legal = isFormatLegal(card, format);
           const count = cardCounts?.get(card.name);
+          const formatLabel = format.charAt(0).toUpperCase() + format.slice(1);
 
           return (
             <motion.button
@@ -46,7 +50,7 @@ export function CardGrid({
               onMouseEnter={() => onCardHover?.(card.name)}
               onMouseLeave={() => onCardHover?.(null)}
               disabled={!legal}
-              title={legal ? `Add ${card.name}` : `${card.name} - Not Standard legal`}
+              title={legal ? `Add ${card.name}` : `${card.name} - Not ${formatLabel} legal`}
               className={`group relative cursor-pointer overflow-hidden rounded-lg transition-transform hover:scale-105 ${
                 legal
                   ? "ring-2 ring-transparent hover:ring-green-500"
@@ -69,10 +73,15 @@ export function CardGrid({
               {!legal && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/50">
                   <span className="rounded bg-red-700 px-2 py-0.5 text-[10px] font-bold text-white">
-                    Not Standard
+                    Not {formatLabel}
                   </span>
                 </div>
               )}
+
+              {/* Legality badge */}
+              <div className="absolute left-1 top-1">
+                <LegalityBadge legalities={card.legalities} format={format} />
+              </div>
 
               {/* Card count badge */}
               {count !== undefined && count > 0 && (

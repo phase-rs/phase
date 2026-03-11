@@ -6,6 +6,7 @@ export interface DeckEntry {
 export interface ParsedDeck {
   main: DeckEntry[];
   sideboard: DeckEntry[];
+  commander?: string[];
 }
 
 /**

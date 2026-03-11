@@ -7,6 +7,14 @@ import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
 import { DeckList } from "./DeckList";
 import { ManaCurve } from "./ManaCurve";
+import { FormatFilter, type DeckFormat } from "./FormatFilter";
+import {
+  CommanderPanel,
+  getColorIdentityViolations,
+  getSingletonViolations,
+  canBeCommander,
+  canAddPartner,
+} from "./CommanderPanel";
 
 function listSavedDecks(): string[] {
   const keys: string[] = [];
@@ -21,19 +29,33 @@ function listSavedDecks(): string[] {
 
 interface DeckBuilderProps {
   onCardHover?: (cardName: string | null) => void;
+  format: DeckFormat;
+  onFormatChange: (format: DeckFormat) => void;
 }
 
-export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
+const BASIC_LANDS = new Set([
+  "Plains",
+  "Island",
+  "Swamp",
+  "Mountain",
+  "Forest",
+]);
+
+export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilderProps) {
   const navigate = useNavigate();
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
+  const [commanders, setCommanders] = useState<string[]>([]);
 
   // Track Scryfall card data for CMC/color stats
   const [cardDataCache, setCardDataCache] = useState<Map<string, ScryfallCard>>(
     new Map(),
   );
+
+  const isCommander = format === "commander";
+  const maxCopies = isCommander ? 1 : 4;
 
   const handleSearchResults = useCallback(
     (cards: ScryfallCard[], _total: number) => {
@@ -56,15 +78,7 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
-      // Enforce 4-copy limit for non-basic-lands
-      const basicLands = new Set([
-        "Plains",
-        "Island",
-        "Swamp",
-        "Mountain",
-        "Forest",
-      ]);
-      if (existing && existing.count >= 4 && !basicLands.has(card.name)) {
+      if (existing && existing.count >= maxCopies && !BASIC_LANDS.has(card.name)) {
         return prev;
       }
 
@@ -81,7 +95,7 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
         main: [...prev.main, { count: 1, name: card.name }],
       };
     });
-  }, []);
+  }, [maxCopies]);
 
   const handleRemoveCard = useCallback(
     (name: string, section: "main" | "sideboard") => {
@@ -109,6 +123,10 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
 
   const handleImport = useCallback((imported: ParsedDeck) => {
     setDeck(imported);
+    // Auto-detect commanders from sideboard in commander format
+    if (imported.commander) {
+      setCommanders(imported.commander);
+    }
   }, []);
 
   const handleExport = useCallback(() => {
@@ -117,7 +135,7 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
 
   const handleSave = () => {
     if (!deckName.trim()) return;
-    const data = JSON.stringify(deck);
+    const data = JSON.stringify({ ...deck, commander: commanders, format });
     localStorage.setItem(STORAGE_KEY_PREFIX + deckName.trim(), data);
     setSavedDecks(listSavedDecks());
   };
@@ -125,10 +143,40 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
   const handleLoad = (name: string) => {
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
     if (data) {
-      setDeck(JSON.parse(data) as ParsedDeck);
+      const parsed = JSON.parse(data);
+      setDeck({ main: parsed.main ?? [], sideboard: parsed.sideboard ?? [] });
+      setCommanders(parsed.commander ?? []);
+      if (parsed.format) onFormatChange(parsed.format);
       setDeckName(name);
     }
   };
+
+  const handleSetCommander = useCallback(
+    (cardName: string) => {
+      setCommanders((prev) => {
+        if (prev.includes(cardName)) return prev;
+        const card = cardDataCache.get(cardName);
+        if (!card || !canBeCommander(card)) return prev;
+        if (!canAddPartner(prev, card, cardDataCache)) return prev;
+        return [...prev, cardName];
+      });
+      // Remove from main deck
+      setDeck((prev) => ({
+        ...prev,
+        main: prev.main.filter((e) => e.name !== cardName),
+      }));
+    },
+    [cardDataCache],
+  );
+
+  const handleRemoveCommander = useCallback((cardName: string) => {
+    setCommanders((prev) => prev.filter((n) => n !== cardName));
+    // Add back to main deck
+    setDeck((prev) => ({
+      ...prev,
+      main: [...prev.main, { count: 1, name: cardName }],
+    }));
+  }, []);
 
   // Compute CMC and color arrays for ManaCurve
   const cmcValues: number[] = [];
@@ -143,6 +191,31 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
     }
   }
 
+  // Compute validation warnings
+  const warnings: string[] = [];
+  if (isCommander) {
+    const totalCards = deck.main.reduce((s, e) => s + e.count, 0) + commanders.length;
+    if (totalCards > 0 && totalCards !== 100) {
+      warnings.push(`Deck has ${totalCards} cards (need exactly 100)`);
+    }
+    for (const name of getSingletonViolations(deck.main)) {
+      warnings.push(`${name}: multiple copies (singleton format)`);
+    }
+    for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
+      warnings.push(`${name}: outside commander color identity`);
+    }
+  } else {
+    const mainTotal = deck.main.reduce((s, e) => s + e.count, 0);
+    if (mainTotal > 0 && mainTotal < 60) {
+      warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
+    }
+    for (const entry of deck.main) {
+      if (entry.count > 4 && !BASIC_LANDS.has(entry.name)) {
+        warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
+      }
+    }
+  }
+
   return (
     <div className="flex h-screen flex-col bg-gray-950">
       {/* Top bar */}
@@ -153,6 +226,7 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
         >
           &larr; Menu
         </button>
+        <FormatFilter selected={format} onChange={onFormatChange} />
         <div className="flex items-center gap-2">
           <input
             type="text"
@@ -189,7 +263,7 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
       <div className="flex min-h-0 flex-1">
         {/* Left: Search & Filters */}
         <div className="w-56 shrink-0 overflow-y-auto border-r border-gray-800">
-          <CardSearch onResults={handleSearchResults} />
+          <CardSearch onResults={handleSearchResults} format={format} />
         </div>
 
         {/* Center: Card Grid */}
@@ -198,17 +272,31 @@ export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
             cards={searchResults}
             onAddCard={handleAddCard}
             onCardHover={onCardHover}
+            format={format}
           />
         </div>
 
         {/* Right: Deck List + Stats */}
         <div className="w-64 shrink-0 overflow-y-auto border-l border-gray-800 p-3">
+          {isCommander && (
+            <div className="mb-3 border-b border-gray-700 pb-3">
+              <CommanderPanel
+                commanders={commanders}
+                deck={deck.main}
+                cardDataCache={cardDataCache}
+                onSetCommander={handleSetCommander}
+                onRemoveCommander={handleRemoveCommander}
+              />
+            </div>
+          )}
           <DeckList
             deck={deck}
             onRemoveCard={handleRemoveCard}
             onImport={handleImport}
             onExport={handleExport}
             onCardHover={onCardHover}
+            warnings={warnings}
+            format={format}
           />
           <div className="mt-3 border-t border-gray-700 pt-3">
             <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />

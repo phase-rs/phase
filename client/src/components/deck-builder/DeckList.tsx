@@ -8,6 +8,8 @@ interface DeckListProps {
   onImport: (deck: ParsedDeck) => void;
   onExport: () => void;
   onCardHover?: (cardName: string | null) => void;
+  warnings?: string[];
+  format?: string;
 }
 
 /** Categorize a type_line string into a group for display. */
@@ -106,25 +108,21 @@ function SectionList({
   );
 }
 
-export function DeckList({ deck, onRemoveCard, onImport, onExport, onCardHover }: DeckListProps) {
+export function DeckList({
+  deck,
+  onRemoveCard,
+  onImport,
+  onExport,
+  onCardHover,
+  warnings = [],
+  format: _format,
+}: DeckListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
   const mainGroups = groupByType(deck.main);
-
-  const warnings: string[] = [];
-  if (mainTotal > 0 && mainTotal < 60) {
-    warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
-  }
-  // Check for >4 copies of non-basic-land cards
-  const basicLands = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
-  for (const entry of deck.main) {
-    if (entry.count > 4 && !basicLands.has(entry.name)) {
-      warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
-    }
-  }
 
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

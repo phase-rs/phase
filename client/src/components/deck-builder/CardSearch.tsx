@@ -33,9 +33,10 @@ const CARD_TYPES = [
 
 interface CardSearchProps {
   onResults: (cards: ScryfallCard[], total: number) => void;
+  format?: string;
 }
 
-export function CardSearch({ onResults }: CardSearchProps) {
+export function CardSearch({ onResults, format = "standard" }: CardSearchProps) {
   const [text, setText] = useState("");
   const [selectedColors, setSelectedColors] = useState<string[]>([]);
   const [selectedType, setSelectedType] = useState("");
@@ -61,10 +62,10 @@ export function CardSearch({ onResults }: CardSearchProps) {
         colors: colors.length > 0 ? colors : undefined,
         type: type || undefined,
         cmcMax: cmc,
-        format: "standard",
+        format,
       });
 
-      if (!query || query === "f:standard") {
+      if (!query || query === `f:${format}`) {
         onResults([], 0);
         setResultCount(null);
         return;
