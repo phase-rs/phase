@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 29-10-PLAN.md
-last_updated: "2026-03-11T19:20:00.000Z"
-last_activity: 2026-03-11 — Phase 29 Plan 10 complete (Format-Aware Lobby and N-Player Networking)
+stopped_at: Completed 29-12-PLAN.md
+last_updated: "2026-03-11T19:44:02.724Z"
+last_activity: 2026-03-11 — Phase 29 Plan 11 complete (Commander Deck Builder and Format Legality)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 47
-  completed_plans: 43
+  completed_plans: 45
   percent: 85
 ---
 
@@ -74,6 +74,7 @@ Progress: [████████████████░░░░] 43/47 p
 | Phase 29 P08 | 6min | 2 tasks | 6 files |
 | Phase 29 P10 | 5min | 2 tasks | 11 files |
 | Phase 29 P11 | 7min | 2 tasks | 12 files |
+| Phase 29 P12 | 15min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -226,6 +227,7 @@ Recent decisions affecting current work:
 - [29-11]: Validation warnings computed centrally in DeckBuilder, passed to DeckList (format-aware, avoids duplication)
 - [29-11]: Commander stored as string[] on ParsedDeck; LegalityBadge reads Scryfall legalities directly
 - [29-11]: MTGJSON legalities HashMap<String, String> with serde(default) for backward compat
+- [Phase 29]: LobbyView accepts connectionMode prop to show mode-specific UI (server vs P2P)
 
 ### Roadmap Evolution
 
@@ -243,6 +245,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T19:29:00.000Z
-Stopped at: Completed 29-11-PLAN.md
+Last session: 2026-03-11T19:44:02.721Z
+Stopped at: Completed 29-12-PLAN.md
 Resume file: None
