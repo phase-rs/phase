@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 28-03-PLAN.md
-last_updated: "2026-03-11T06:19:01Z"
-last_activity: 2026-03-11 — Phase 28 Plan 03 complete (trigger/effects pipeline rewrite)
+stopped_at: Completed 28-06-PLAN.md
+last_updated: "2026-03-11T06:51:06Z"
+last_activity: 2026-03-11 — Phase 28 Plan 06 complete (bulk effect handler migration)
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 27
-  completed_plans: 24
-  percent: 89
+  completed_plans: 25
+  percent: 93
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-02 complete, Plans 03-06 remaining)
+**Current focus:** Phase 28 Native Ability Data Model — Executing (Plans 01-03, 06 complete, Plans 04-05 remaining)
 
 ## Current Position
 
-Phase: 28 executing — Plans 01-03 complete, Plan 04 next
+Phase: 28 executing — Plans 01-03, 06 complete, Plan 04 next
 Status: Executing Phase 28
-Last activity: 2026-03-11 — Phase 28 Plan 03 complete (trigger/effects pipeline rewrite)
+Last activity: 2026-03-11 — Phase 28 Plan 06 complete (bulk effect handler migration)
 
-Progress: [██████████████████░░] 24/27 plans (89%)
+Progress: [██████████████████░░] 25/27 plans (93%)
 
 ## Performance Metrics
 
@@ -48,7 +48,7 @@ Progress: [██████████████████░░] 24/27 p
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
 | 26 | 6/6 | 36min | 6min |
-| 28 | 3/6 | 48min | 16min |
+| 28 | 4/6 | 138min | 35min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
@@ -57,6 +57,7 @@ Progress: [██████████████████░░] 24/27 p
 | Phase 28 P01 | 10min | 2 tasks | 10 files |
 | Phase 28 P02 | 13min | 3 tasks | 5 files |
 | Phase 28 P03 | 25min | 3 tasks | 26 files |
+| Phase 28 P06 | 90min | 2 tasks | 35 files |
 
 ## Accumulated Context
 
@@ -151,6 +152,10 @@ Recent decisions affecting current work:
 - [28-03]: extract_target_filter_string() and get_valid_tgts_string() bridge typed TargetFilter to string-based targeting system (temporary until targeting is fully typed)
 - [28-03]: parse_cost() kept always-available (not forge-compat gated) -- used by JSON ability loading path
 - [28-03]: target_filter_matches_object() in triggers.rs handles runtime TargetFilter matching for trigger validation
+- [28-06]: Forge-compat gating for test modules using parse_ability() -- tests remain functional when feature enabled
+- [28-06]: Effect::Unimplemented { name, description: None } for test dummy effects -- semantically clear placeholders
+- [28-06]: json_smoke_test made tolerant of old-schema ability JSON files during migration period
+- [28-06]: CardFace.svars removed, power/toughness use PtValue, keywords use Keyword enum (matching Plan 01 types)
 
 ### Roadmap Evolution
 
@@ -167,6 +172,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T06:19:01Z
-Stopped at: Completed 28-03-PLAN.md
+Last session: 2026-03-11T06:51:06Z
+Stopped at: Completed 28-06-PLAN.md
 Resume file: .planning/phases/28-native-ability-data-model/28-04-PLAN.md
