@@ -17,6 +17,7 @@ pub mod mana_payment;
 pub mod morph;
 pub mod mulligan;
 pub mod planeswalker;
+pub mod players;
 pub mod priority;
 pub mod replacement;
 pub mod sba;
