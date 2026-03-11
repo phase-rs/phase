@@ -97,6 +97,11 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub has_summoning_sickness: bool,
 
+    // Derived field: devotion count for cards that reference devotion.
+    // Computed before serialization based on DevotionColors in static params.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Option::is_none")]
+    pub devotion: Option<u32>,
+
     // Planeswalker: whether a loyalty ability has been activated this turn
     #[serde(skip_deserializing, default)]
     pub loyalty_activated_this_turn: bool,
@@ -141,6 +146,7 @@ impl GameObject {
             entered_battlefield_turn: None,
             has_unimplemented_mechanics: false,
             has_summoning_sickness: false,
+            devotion: None,
             loyalty_activated_this_turn: false,
         }
     }

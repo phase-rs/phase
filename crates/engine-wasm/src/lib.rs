@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
+use engine::game::devotion::count_devotion;
 use engine::game::engine::apply;
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
@@ -94,6 +95,31 @@ pub fn get_game_state() -> JsValue {
                         engine::game::coverage::has_unimplemented_mechanics(obj);
                     obj.has_summoning_sickness =
                         engine::game::combat::has_summoning_sickness(obj, turn);
+                }
+
+                // Compute per-card devotion for cards with CheckSVar in their statics
+                // (Theros gods pattern — derive colors from the card's own base_color)
+                let devotion_cards: Vec<_> = state
+                    .objects
+                    .iter()
+                    .filter_map(|(&id, obj)| {
+                        let has_devotion_static = obj.static_definitions.iter().any(|def| {
+                            def.params.contains_key("CheckSVar")
+                                && def.params.contains_key("SVarCompare")
+                        });
+                        if has_devotion_static && !obj.base_color.is_empty() {
+                            let devotion =
+                                count_devotion(state, obj.controller, &obj.base_color);
+                            Some((id, devotion))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (id, devotion) in devotion_cards {
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        obj.devotion = Some(devotion);
+                    }
                 }
 
                 // Compute per-player derived fields (separate pass to avoid borrow conflict)

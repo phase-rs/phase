@@ -2,6 +2,7 @@ use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 
+use crate::game::devotion::count_devotion;
 use crate::game::filter::object_matches_filter;
 use crate::game::game_object::CounterType;
 use crate::types::card_type::CoreType;
@@ -103,6 +104,20 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                 continue;
             }
 
+            // Evaluate devotion-based conditions (Theros gods pattern):
+            // CheckSVar + SVarCompare on a self-targeting static → devotion check
+            // using the card's own base colors.
+            if def.params.contains_key("CheckSVar") {
+                if let Some(compare) = def.params.get("SVarCompare") {
+                    if !obj.base_color.is_empty() {
+                        let devotion = count_devotion(state, obj.controller, &obj.base_color);
+                        if !evaluate_compare(compare, devotion) {
+                            continue; // Condition not met, skip this effect
+                        }
+                    }
+                }
+            }
+
             let affected = def.params.get("Affected").cloned().unwrap_or_default();
 
             // Determine which layer(s) this effect targets based on params
@@ -123,6 +138,27 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
     }
 
     effects
+}
+
+/// Evaluate a comparison string like "LT5", "GE7" against a value.
+fn evaluate_compare(compare_str: &str, count: u32) -> bool {
+    if compare_str.len() < 3 {
+        return true;
+    }
+    let (op, num_str) = (&compare_str[..2], &compare_str[2..]);
+    let threshold: u32 = match num_str.parse() {
+        Ok(n) => n,
+        Err(_) => return true,
+    };
+    match op {
+        "GE" => count >= threshold,
+        "LE" => count <= threshold,
+        "EQ" => count == threshold,
+        "NE" => count != threshold,
+        "GT" => count > threshold,
+        "LT" => count < threshold,
+        _ => true,
+    }
 }
 
 /// Determine which layer(s) a continuous effect targets based on its params.

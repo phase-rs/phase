@@ -90,6 +90,92 @@ pub enum ManaCostShard {
     ColorlessGreen,
 }
 
+impl ManaCostShard {
+    /// Returns true if this shard contributes to devotion for the given color.
+    /// Per MTG rule 700.5, each mana symbol that is or contains the color counts.
+    /// Hybrid symbols count toward each of their colors. A single hybrid symbol
+    /// contributes 1 to multi-color devotion (not once per color).
+    pub fn contributes_to(&self, color: ManaColor) -> bool {
+        match color {
+            ManaColor::White => matches!(
+                self,
+                Self::White
+                    | Self::WhiteBlue
+                    | Self::WhiteBlack
+                    | Self::RedWhite
+                    | Self::GreenWhite
+                    | Self::TwoWhite
+                    | Self::PhyrexianWhite
+                    | Self::PhyrexianWhiteBlue
+                    | Self::PhyrexianWhiteBlack
+                    | Self::PhyrexianRedWhite
+                    | Self::PhyrexianGreenWhite
+                    | Self::ColorlessWhite
+            ),
+            ManaColor::Blue => matches!(
+                self,
+                Self::Blue
+                    | Self::WhiteBlue
+                    | Self::BlueBlack
+                    | Self::BlueRed
+                    | Self::GreenBlue
+                    | Self::TwoBlue
+                    | Self::PhyrexianBlue
+                    | Self::PhyrexianWhiteBlue
+                    | Self::PhyrexianBlueBlack
+                    | Self::PhyrexianBlueRed
+                    | Self::PhyrexianGreenBlue
+                    | Self::ColorlessBlue
+            ),
+            ManaColor::Black => matches!(
+                self,
+                Self::Black
+                    | Self::WhiteBlack
+                    | Self::BlueBlack
+                    | Self::BlackRed
+                    | Self::BlackGreen
+                    | Self::TwoBlack
+                    | Self::PhyrexianBlack
+                    | Self::PhyrexianWhiteBlack
+                    | Self::PhyrexianBlueBlack
+                    | Self::PhyrexianBlackRed
+                    | Self::PhyrexianBlackGreen
+                    | Self::ColorlessBlack
+            ),
+            ManaColor::Red => matches!(
+                self,
+                Self::Red
+                    | Self::BlueRed
+                    | Self::BlackRed
+                    | Self::RedWhite
+                    | Self::RedGreen
+                    | Self::TwoRed
+                    | Self::PhyrexianRed
+                    | Self::PhyrexianBlueRed
+                    | Self::PhyrexianBlackRed
+                    | Self::PhyrexianRedWhite
+                    | Self::PhyrexianRedGreen
+                    | Self::ColorlessRed
+            ),
+            ManaColor::Green => matches!(
+                self,
+                Self::Green
+                    | Self::BlackGreen
+                    | Self::RedGreen
+                    | Self::GreenWhite
+                    | Self::GreenBlue
+                    | Self::TwoGreen
+                    | Self::PhyrexianGreen
+                    | Self::PhyrexianBlackGreen
+                    | Self::PhyrexianRedGreen
+                    | Self::PhyrexianGreenWhite
+                    | Self::PhyrexianGreenBlue
+                    | Self::ColorlessGreen
+            ),
+        }
+    }
+}
+
 impl FromStr for ManaCostShard {
     type Err = String;
 

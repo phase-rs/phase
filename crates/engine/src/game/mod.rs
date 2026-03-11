@@ -4,6 +4,7 @@ pub mod combat_damage;
 pub mod coverage;
 pub mod day_night;
 pub mod deck_loading;
+pub mod devotion;
 pub mod effects;
 pub mod engine;
 pub mod filter;
