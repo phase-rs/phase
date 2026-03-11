@@ -27,6 +27,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::TriggeredAbility { ability, .. } => (ability.clone(), false),
     };
 
+    // Capture targets for Aura attachment after resolution
+    let spell_targets = ability.targets.clone();
+
     // Run fizzle check if the ability has targets
     if !ability.targets.is_empty() {
         let valid_tgts = extract_target_filter_string(&ability.effect);
@@ -63,6 +66,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Zone::Graveyard
         };
         zones::move_to_zone(state, entry.id, dest, events);
+
+        // Aura attachment: if the permanent is an Aura with targets, attach to the first target
+        if dest == Zone::Battlefield {
+            let is_aura = state
+                .objects
+                .get(&entry.id)
+                .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
+                .unwrap_or(false);
+            if is_aura {
+                if let Some(crate::types::ability::TargetRef::Object(target_id)) =
+                    spell_targets.first()
+                {
+                    // Verify target is still on the battlefield
+                    if state.battlefield.contains(target_id) {
+                        effects::attach::attach_to(state, entry.id, *target_id);
+                    }
+                    // If target is gone, SBA check_unattached_auras will handle cleanup
+                }
+            }
+        }
     }
     // Activated abilities: source stays where it is, no zone movement
 
