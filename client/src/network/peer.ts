@@ -31,9 +31,14 @@ export function createPeerSession(conn: DataConnection, destroyPeer: () => void)
   const trySend = (msg: P2PMessage): boolean => {
     if (closed || !conn.open) return false;
     try {
+      if (msg.type !== "ping" && msg.type !== "pong") {
+        const size = JSON.stringify(msg).length;
+        console.log(`[PeerSession] sending "${msg.type}" (${(size / 1024).toFixed(1)} KB)`);
+      }
       conn.send(msg);
       return true;
-    } catch {
+    } catch (err) {
+      console.warn("[PeerSession] send failed:", err);
       return false;
     }
   };

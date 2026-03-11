@@ -125,7 +125,7 @@ export function joinRoom(code: string): Promise<{ conn: DataConnection; destroyP
 
     peer.on("open", () => {
       console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
-      const conn = peer.connect(peerId, { serialization: "json" });
+      const conn = peer.connect(peerId);
 
       const timeout = setTimeout(() => {
         reject(new Error("Connection timed out. Check the room code and try again."));
