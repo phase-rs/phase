@@ -48,7 +48,7 @@
 - [x] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated (completed 2026-03-10)
 - [x] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards (completed 2026-03-10)
 - [x] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation (completed 2026-03-10)
-- [ ] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0
+- [x] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0 (completed 2026-03-11)
 
 ## Phase Details
 
@@ -153,14 +153,14 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
 | 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
-| 25. Forge Removal & Relicensing | 2/3 | In Progress|  | - |
+| 25. Forge Removal & Relicensing | 3/3 | Complete   | 2026-03-11 | - |
 
 ### Phase 26: Polish and fix multi-player with lobby and embedded server
 
 **Goal:** [To be planned]
 **Requirements**: TBD
 **Depends on:** Phase 25
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [ ] TBD (run /gsd:plan-phase 26 to break down)
