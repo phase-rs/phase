@@ -35,6 +35,57 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 - [x] **LICN-02**: PROJECT.md constraints and key decisions updated to reflect MTGJSON + own ability format (removing Forge format dependency)
 - [x] **LICN-03**: Coverage report (coverage.rs) reads JSON format and CI gate (100% Standard coverage) is preserved
 
+## Phase 26 Requirements
+
+Requirements for multiplayer polish phase. Maps to Phase 26.
+
+### Bug Fixes
+
+- [ ] **MP-BUG-A**: Starting a new online game clears stale session data, preventing reconnect to dead sessions
+- [ ] **MP-BUG-B**: Deck selection is validated before entering an online game (same guard as AI path)
+- [ ] **MP-BUG-C**: Opponent actions are visible in real-time — StateUpdate without pendingResolve updates game store directly
+- [ ] **MP-BUG-D**: WebSocketAdapter.getAiAction() returns null instead of throwing in multiplayer
+- [ ] **MP-BUG-E**: Player ID is dynamic from server's GameStarted message, not hardcoded to 0
+
+### Player Identity
+
+- [ ] **MP-IDENT**: Player has a persistent UUID identity and display name stored in localStorage, with a Zustand multiplayerStore
+
+### Server Lobby
+
+- [ ] **MP-LOBBY-SRV**: Server manages a browseable game lobby with create/list/join/subscribe/unsubscribe protocol, public/private toggle, password protection, and auto-expiry of stale games
+- [ ] **MP-CONCEDE-SRV**: Server handles Concede message and broadcasts game over to both players
+- [ ] **MP-EMOTE-SRV**: Server forwards Emote messages between players
+- [ ] **MP-TIMER-SRV**: Server supports per-turn timer configuration and enforcement with TimerUpdate messages
+
+### Frontend Lobby
+
+- [ ] **MP-LOBBY-UI**: Frontend displays a browseable game list with real-time updates, manual code entry, and player count
+- [ ] **MP-MENU-FLOW**: Menu state machine follows mode-select -> deck-gallery-online -> lobby -> host-setup -> waiting
+- [ ] **MP-HOST-SETUP**: Host setup screen captures display name, public/private, password, format, and timer settings
+- [ ] **MP-WAITING**: Waiting screen shows game code, LAN IP, listed-in-lobby status, and cancel button
+- [ ] **MP-SETTINGS**: Dedicated Multiplayer section in settings for server address and display name
+
+### P2P WebRTC
+
+- [ ] **MP-P2P**: PeerJS-based WebRTC networking layer ported from Alchemy project with TURN/signaling support
+- [ ] **MP-P2P-HOST**: P2PHostAdapter runs WASM engine locally and sends filtered state to guest via DataChannel
+- [ ] **MP-P2P-GUEST**: P2PGuestAdapter receives state from host and sends actions, code-only (no lobby listing)
+
+### Desktop Hosting
+
+- [ ] **MP-SIDECAR**: phase-server embedded as Tauri sidecar binary, spawned on Host Game, auto-stops when game ends
+- [ ] **MP-CONNECT-UX**: Connection status dot (green/yellow/red) visible throughout multiplayer, toast on failure with Retry/Settings
+- [ ] **MP-SERVER-DETECT**: Smart server detection: (1) Tauri sidecar localhost, (2) last-used server, (3) manual entry; CODE@IP:PORT join syntax
+
+### In-Game UX
+
+- [ ] **MP-CONCEDE**: Player can concede via game menu with confirmation dialog
+- [ ] **MP-EMOTE**: Quick emotes (MTGA-style pre-set messages) can be sent and received with temporary overlay display
+- [ ] **MP-TIMER-UI**: Per-turn timer countdown displayed near active player HUD when timer is configured
+- [ ] **MP-GAMEOVER**: Game over screen shows correct winner for both players, total turns, duration, and Back to Lobby button
+- [ ] **MP-OPPONENT-NAME**: Opponent display name shown near their life total during gameplay
+
 ## Future Requirements
 
 Deferred to v2+. Tracked but not in current roadmap.
@@ -56,6 +107,12 @@ Deferred to v2+. Tracked but not in current roadmap.
 | Runtime migration to Vec\<AbilityDefinition\> on GameObject | Research identified as cleaner long-term, but v1.2 can emit Forge-compatible strings from JSON loader — defer refactor to avoid touching ~13 source files |
 | Full git history rewrite to remove GPL files | git filter-branch is destructive; .gitignore + deletion sufficient for licensing purposes |
 | Manual ability authoring for unsupported cards | Migration tool handles supported cards; adding new handler coverage is separate work |
+| Cross-device player identity / accounts | Requires auth infrastructure, separate phase |
+| Friends list / friend invites | Requires persistent accounts, separate phase |
+| Spectator mode | Requires spectator state filter, separate phase |
+| Rematch button | Requires protocol extension, future enhancement |
+| Detailed game statistics | Future enhancement |
+| Turn timer with time bank | Alternative timer model, future enhancement |
 
 ## Traceability
 
@@ -79,12 +136,38 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LICN-01 | Phase 25 | Complete |
 | LICN-02 | Phase 25 | Complete |
 | LICN-03 | Phase 25 | Complete |
+| MP-BUG-A | Phase 26 | Planned |
+| MP-BUG-B | Phase 26 | Planned |
+| MP-BUG-C | Phase 26 | Planned |
+| MP-BUG-D | Phase 26 | Planned |
+| MP-BUG-E | Phase 26 | Planned |
+| MP-IDENT | Phase 26 | Planned |
+| MP-LOBBY-SRV | Phase 26 | Planned |
+| MP-CONCEDE-SRV | Phase 26 | Planned |
+| MP-EMOTE-SRV | Phase 26 | Planned |
+| MP-TIMER-SRV | Phase 26 | Planned |
+| MP-LOBBY-UI | Phase 26 | Planned |
+| MP-MENU-FLOW | Phase 26 | Planned |
+| MP-HOST-SETUP | Phase 26 | Planned |
+| MP-WAITING | Phase 26 | Planned |
+| MP-SETTINGS | Phase 26 | Planned |
+| MP-P2P | Phase 26 | Planned |
+| MP-P2P-HOST | Phase 26 | Planned |
+| MP-P2P-GUEST | Phase 26 | Planned |
+| MP-SIDECAR | Phase 26 | Planned |
+| MP-CONNECT-UX | Phase 26 | Planned |
+| MP-SERVER-DETECT | Phase 26 | Planned |
+| MP-CONCEDE | Phase 26 | Planned |
+| MP-EMOTE | Phase 26 | Planned |
+| MP-TIMER-UI | Phase 26 | Planned |
+| MP-GAMEOVER | Phase 26 | Planned |
+| MP-OPPONENT-NAME | Phase 26 | Planned |
 
 **Coverage:**
-- v1.2 requirements: 16 total
-- Mapped to phases: 16
+- v1.2 requirements: 16 total (all complete)
+- Phase 26 requirements: 25 total
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-10*
-*Last updated: 2026-03-10 after roadmap creation*
+*Last updated: 2026-03-10 after Phase 26 planning*

@@ -136,14 +136,40 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 25-01-PLAN.md — Refactor all dispatch from string-based to typed pattern matching on enums
-- [ ] 25-02-PLAN.md — Feature-gate Forge code, delete Forge data, simplify coverage binary and CI
-- [ ] 25-03-PLAN.md — License files, Cargo.toml updates, and documentation scrub
+- [x] 25-01-PLAN.md — Refactor all dispatch from string-based to typed pattern matching on enums — completed 2026-03-11
+- [x] 25-02-PLAN.md — Feature-gate Forge code, delete Forge data, simplify coverage binary and CI — completed 2026-03-11
+- [x] 25-03-PLAN.md — License files, Cargo.toml updates, and documentation scrub — completed 2026-03-11
+
+### Phase 26: Polish and Fix Multiplayer with Lobby and Embedded Server
+**Goal**: Two players can discover and join games via a real-time lobby, host games from desktop (Tauri sidecar) or browser (P2P WebRTC), and enjoy a polished multiplayer experience with concede, emotes, timers, and proper connection UX
+**Depends on**: Phase 25
+**Requirements**: MP-BUG-A, MP-BUG-B, MP-BUG-C, MP-BUG-D, MP-BUG-E, MP-IDENT, MP-LOBBY-SRV, MP-CONCEDE-SRV, MP-EMOTE-SRV, MP-TIMER-SRV, MP-LOBBY-UI, MP-MENU-FLOW, MP-HOST-SETUP, MP-WAITING, MP-SETTINGS, MP-P2P, MP-P2P-HOST, MP-P2P-GUEST, MP-SIDECAR, MP-CONNECT-UX, MP-SERVER-DETECT, MP-CONCEDE, MP-EMOTE, MP-TIMER-UI, MP-GAMEOVER, MP-OPPONENT-NAME
+**Success Criteria** (what must be TRUE):
+  1. All 5 multiplayer bugs (A-E) are fixed: stale session cleared, deck validated, opponent actions visible, getAiAction safe, dynamic player ID
+  2. A real-time game lobby shows waiting public games, player count, and supports join by click or code entry with optional password
+  3. Host setup screen configures display name, visibility, password, and per-turn timer
+  4. Browser/PWA users can host P2P games via WebRTC (PeerJS) with host-authoritative engine
+  5. Tauri desktop users can host games via embedded sidecar server
+  6. Players can concede, send MTGA-style emotes, see opponent name, and return to lobby after game over
+**Plans**: 6 plans
+
+**Execution Order:**
+Wave 1: Plans 01 + 02 (parallel — bug fixes + player identity, server lobby protocol)
+Wave 2: Plans 03 + 04 (parallel — frontend lobby UI, P2P adapter)
+Wave 3: Plans 05 + 06 (parallel — Tauri sidecar + connection UX, in-game multiplayer UX)
+
+Plans:
+- [ ] 26-01-PLAN.md — Fix bugs A-E, create multiplayerStore, replace hardcoded PLAYER_ID
+- [ ] 26-02-PLAN.md — Extend server protocol with lobby, concede, emote, timer; create LobbyManager; wire into phase-server
+- [ ] 26-03-PLAN.md — Frontend lobby UI (LobbyView, HostSetup, WaitingScreen), menu flow, multiplayer settings
+- [ ] 26-04-PLAN.md — Port Alchemy P2P network layer, implement P2PHostAdapter/P2PGuestAdapter
+- [ ] 26-05-PLAN.md — Tauri sidecar configuration, smart server detection, CODE@IP parsing, connection dot
+- [ ] 26-06-PLAN.md — Concede dialog, emotes, opponent name, timer UI, enhanced game over with lobby return
 
 ## Progress
 
 **Execution Order:**
-Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 requires 22 + 23. Phase 25 requires 24.
+Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 requires 22 + 23. Phase 25 requires 24. Phase 26 requires 25.
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -153,14 +179,5 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
 | 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
-| 25. Forge Removal & Relicensing | 3/3 | Complete    | 2026-03-11 | - |
-
-### Phase 26: Polish and fix multi-player with lobby and embedded server
-
-**Goal:** [To be planned]
-**Requirements**: TBD
-**Depends on:** Phase 25
-**Plans:** 3/3 plans complete
-
-Plans:
-- [ ] TBD (run /gsd:plan-phase 26 to break down)
+| 25. Forge Removal & Relicensing | 3/3 | Complete   | 2026-03-11 | - |
+| 26. Multiplayer Polish | 0/6 | In Progress | - | - |
