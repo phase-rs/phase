@@ -2,12 +2,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef } from "react";
 
 import type { ObjectId, TargetRef } from "../../adapter/types.ts";
-import { PLAYER_ID } from "../../constants/game.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { TargetArrow } from "./TargetArrow.tsx";
 
 export function TargetingOverlay() {
+  const playerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -76,7 +77,7 @@ export function TargetingOverlay() {
   if (!targetingMode || !isTargetSelection) return null;
 
   // Only show targeting UI for the human player
-  if (waitingFor.data.player !== PLAYER_ID) return null;
+  if (waitingFor.data.player !== playerId) return null;
 
   return (
     <AnimatePresence>

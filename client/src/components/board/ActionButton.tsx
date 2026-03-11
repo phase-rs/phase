@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
-import { PLAYER_ID } from "../../constants/game.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -19,24 +19,25 @@ type ActionButtonMode =
 function getActionButtonMode(
   waitingFor: WaitingFor | null | undefined,
   stackLength: number,
+  currentPlayerId: number,
 ): ActionButtonMode {
   if (!waitingFor) return "hidden";
 
   if (
     waitingFor.type === "DeclareAttackers" &&
-    waitingFor.data.player === PLAYER_ID
+    waitingFor.data.player === currentPlayerId
   ) {
     return "combat-attackers";
   }
   if (
     waitingFor.type === "DeclareBlockers" &&
-    waitingFor.data.player === PLAYER_ID
+    waitingFor.data.player === currentPlayerId
   ) {
     return "combat-blockers";
   }
   if (
     waitingFor.type === "Priority" &&
-    waitingFor.data.player === PLAYER_ID
+    waitingFor.data.player === currentPlayerId
   ) {
     return stackLength > 0 ? "priority-stack" : "priority-empty";
   }
@@ -45,6 +46,7 @@ function getActionButtonMode(
 }
 
 export function ActionButton() {
+  const playerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
   const combatAttackers = useGameStore(
@@ -66,7 +68,7 @@ export function ActionButton() {
 
   const { advanceLabel } = usePhaseInfo();
 
-  const mode = getActionButtonMode(waitingFor, stackLength);
+  const mode = getActionButtonMode(waitingFor, stackLength, playerId);
 
   // Skip-confirm state for No Attacks / No Blocks
   const [skipArmed, setSkipArmed] = useState<"attackers" | "blockers" | null>(null);
@@ -226,7 +228,7 @@ export function ActionButton() {
       return;
     }
 
-    if (!waitingFor || waitingFor.data.player !== PLAYER_ID) return;
+    if (!waitingFor || waitingFor.data.player !== playerId) return;
 
     if (waitingFor.type === "Priority") {
       dispatchAction({ type: "PassPriority" });
@@ -235,7 +237,7 @@ export function ActionButton() {
     } else if (waitingFor.type === "DeclareBlockers") {
       dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
     }
-  }, [endTurnMode, waitingFor, turnNumber, endTurnSinceTurn, clearEndTurnMode]);
+  }, [endTurnMode, waitingFor, turnNumber, endTurnSinceTurn, clearEndTurnMode, playerId]);
 
   async function resolveAll() {
     resolveAllRef.current = true;
@@ -248,7 +250,7 @@ export function ActionButton() {
       if (currentStack === 0) break;
       if (currentStack > initialStackLength - i) break;
       if (current.waitingFor?.type !== "Priority") break;
-      if (current.waitingFor.data.player !== PLAYER_ID) break;
+      if (current.waitingFor.data.player !== playerId) break;
       await dispatchAction({ type: "PassPriority" });
     }
     resolveAllRef.current = false;

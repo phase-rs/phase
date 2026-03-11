@@ -38,7 +38,7 @@ import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
-import { PLAYER_ID } from "../constants/game.ts";
+import { usePlayerId } from "../hooks/usePlayerId.ts";
 
 export function GamePage() {
   const navigate = useNavigate();
@@ -177,6 +177,7 @@ function GamePageContent({
   } | null>(null);
   const [showPreferences, setShowPreferences] = useState(false);
 
+  const playerId = usePlayerId();
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const inspectedObj =
@@ -396,14 +397,14 @@ function GamePageContent({
       <CardPreview cardName={inspectedCardName} />
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
-      {waitingFor?.type === "TargetSelection" && waitingFor.data.player === PLAYER_ID && <TargetingOverlay />}
-      {waitingFor?.type === "ManaPayment" && waitingFor.data.player === PLAYER_ID && <ManaPaymentUI />}
-      {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === PLAYER_ID && <ReplacementModal />}
+      {waitingFor?.type === "TargetSelection" && waitingFor.data.player === playerId && <TargetingOverlay />}
+      {waitingFor?.type === "ManaPayment" && waitingFor.data.player === playerId && <ManaPaymentUI />}
+      {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === playerId && <ReplacementModal />}
 
       {/* Scry/Dig/Surveil card choice modal */}
       <CardChoiceModal />
 
-      {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === PLAYER_ID && (
+      {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === playerId && (
         <MulliganDecisionPrompt
           playerId={waitingFor.data.player}
           mulliganCount={waitingFor.data.mulligan_count}
@@ -411,7 +412,7 @@ function GamePageContent({
         />
       )}
 
-      {waitingFor?.type === "MulliganBottomCards" && waitingFor.data.player === PLAYER_ID && (
+      {waitingFor?.type === "MulliganBottomCards" && waitingFor.data.player === playerId && (
         <MulliganBottomCardsPrompt
           playerId={waitingFor.data.player}
           count={waitingFor.data.count}

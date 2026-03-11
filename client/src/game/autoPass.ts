@@ -1,5 +1,5 @@
 import type { GameAction, GameState, Phase, WaitingFor } from "../adapter/types";
-import { PLAYER_ID } from "../constants/game";
+import { getPlayerId } from "../hooks/usePlayerId";
 
 /**
  * Determines whether the current priority window should be auto-passed.
@@ -21,7 +21,7 @@ export function shouldAutoPass(
 ): boolean {
   if (fullControl) return false;
   if (waitingFor.type !== "Priority") return false;
-  if (waitingFor.data.player !== PLAYER_ID) return false;
+  if (waitingFor.data.player !== getPlayerId()) return false;
 
   // Phase stops only gate initial priority (empty stack)
   if (state.stack.length === 0 && phaseStops.includes(state.phase)) return false;
@@ -37,7 +37,7 @@ export function shouldAutoPass(
   // their own creature). Full control mode disables this (checked above).
   if (state.stack.length > 0) {
     const topEntry = state.stack[state.stack.length - 1];
-    if (topEntry.controller === PLAYER_ID) return true;
+    if (topEntry.controller === getPlayerId()) return true;
   }
 
   return false;

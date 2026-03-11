@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { useCallback } from "react";
 
-import { PLAYER_ID } from "../../constants/game.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
@@ -25,6 +25,7 @@ const COUNTER_COLORS: Record<string, string> = {
 const ATTACHMENT_OFFSET_PX = 15;
 
 export function PermanentCard({ objectId }: PermanentCardProps) {
+  const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
@@ -48,7 +49,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const isActivatable = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (!wf || wf.type !== "Priority" || wf.data.player !== PLAYER_ID) return false;
+    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return false;
     return s.legalActions.some((a) =>
       (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
       (a.type === "TapLandForMana" && a.data.object_id === objectId),

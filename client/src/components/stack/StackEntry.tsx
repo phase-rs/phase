@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
-import { PLAYER_ID } from "../../constants/game.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
@@ -18,6 +18,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: StackEntryProps) {
+  const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
@@ -29,7 +30,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: 
   const isSpell = entry.kind.type === "Spell";
   const abilityLabel =
     entry.kind.type === "ActivatedAbility" ? "Activated" : "Triggered";
-  const controllerLabel = entry.controller === PLAYER_ID ? "You" : "Opp";
+  const controllerLabel = entry.controller === playerId ? "You" : "Opp";
 
   return (
     <motion.div

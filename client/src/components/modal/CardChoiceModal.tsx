@@ -7,7 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
-import { PLAYER_ID } from "../../constants/game.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
@@ -21,19 +21,20 @@ type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
  * - SurveilChoice: per-card Keep/Graveyard toggles
  */
 export function CardChoiceModal() {
+  const playerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (!waitingFor) return null;
 
   switch (waitingFor.type) {
     case "ScryChoice":
-      if (waitingFor.data.player !== PLAYER_ID) return null;
+      if (waitingFor.data.player !== playerId) return null;
       return <ScryModal data={waitingFor.data} />;
     case "DigChoice":
-      if (waitingFor.data.player !== PLAYER_ID) return null;
+      if (waitingFor.data.player !== playerId) return null;
       return <DigModal data={waitingFor.data} />;
     case "SurveilChoice":
-      if (waitingFor.data.player !== PLAYER_ID) return null;
+      if (waitingFor.data.player !== playerId) return null;
       return <SurveilModal data={waitingFor.data} />;
     default:
       return null;

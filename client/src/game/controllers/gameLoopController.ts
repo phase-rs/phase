@@ -1,4 +1,4 @@
-import { PLAYER_ID } from "../../constants/game";
+import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -34,7 +34,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     // Only auto-pass Priority prompts for the human player
     if (waitingFor.type !== "Priority") return;
-    if (!("data" in waitingFor) || waitingFor.data.player !== PLAYER_ID) return;
+    if (!("data" in waitingFor) || waitingFor.data.player !== getPlayerId()) return;
 
     const { fullControl } = useUiStore.getState();
     const { phaseStops } = usePreferencesStore.getState();
