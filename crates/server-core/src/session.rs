@@ -27,7 +27,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::EquipTarget { player, .. }
         | WaitingFor::ScryChoice { player, .. }
         | WaitingFor::DigChoice { player, .. }
-        | WaitingFor::SurveilChoice { player, .. } => Some(*player),
+        | WaitingFor::SurveilChoice { player, .. }
+        | WaitingFor::TriggerTargetSelection { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -239,6 +240,7 @@ impl SessionManager {
             WaitingFor::ScryChoice { player, .. } => *player,
             WaitingFor::DigChoice { player, .. } => *player,
             WaitingFor::SurveilChoice { player, .. } => *player,
+            WaitingFor::TriggerTargetSelection { player, .. } => *player,
             WaitingFor::GameOver { .. } => {
                 return Err("Game is over".to_string());
             }

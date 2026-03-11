@@ -23,7 +23,7 @@ pub type TriggerMatcher = fn(
 ) -> bool;
 
 /// A trigger that matched an event and is waiting to be placed on the stack.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingTrigger {
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -100,6 +100,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             source_id: obj_id,
                             controller,
                             sub_ability: None,
+                            duration: None,
                         };
                         let prowess_trig_def = TriggerDefinition {
                             mode: TriggerMode::SpellCast,
@@ -186,6 +187,7 @@ fn build_triggered_ability(
             source_id,
             controller,
             sub_ability: None,
+            duration: None,
         }
     }
 }
@@ -205,6 +207,7 @@ fn build_resolved_from_def(
             .sub_ability
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
+        duration: def.duration.clone(),
     }
 }
 

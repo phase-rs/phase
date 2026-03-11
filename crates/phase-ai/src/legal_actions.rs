@@ -78,6 +78,14 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             }
             actions
         }
+        WaitingFor::TriggerTargetSelection {
+            legal_targets, ..
+        } => legal_targets
+            .iter()
+            .map(|t| GameAction::SelectTargets {
+                targets: vec![t.clone()],
+            })
+            .collect(),
     }
 }
 

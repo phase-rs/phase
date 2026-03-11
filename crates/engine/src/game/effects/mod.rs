@@ -283,6 +283,7 @@ mod tests {
             source_id: ObjectId(100),
             controller: PlayerId(0),
             sub_ability: Some(Box::new(sub)),
+            duration: None,
         };
         let mut events = Vec::new();
 

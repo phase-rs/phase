@@ -101,6 +101,7 @@ pub fn handle_cast_spell(
             .sub_ability
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, object_id, player))),
+        duration: None,
     };
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
@@ -231,6 +232,7 @@ fn build_resolved_from_def(
             .sub_ability
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
+        duration: def.duration.clone(),
     }
 }
 
@@ -337,6 +339,7 @@ pub fn handle_activate_ability(
             .sub_ability
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, player))),
+        duration: None,
     };
 
     // Handle targeting

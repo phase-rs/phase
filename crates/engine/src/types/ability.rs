@@ -658,6 +658,8 @@ pub struct ResolvedAbility {
     pub controller: PlayerId,
     #[serde(default)]
     pub sub_ability: Option<Box<ResolvedAbility>>,
+    #[serde(default)]
+    pub duration: Option<Duration>,
 }
 
 impl ResolvedAbility {
@@ -674,6 +676,7 @@ impl ResolvedAbility {
             source_id,
             controller,
             sub_ability: None,
+            duration: None,
         }
     }
 }
@@ -739,6 +742,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: None,
+            duration: None,
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -753,6 +757,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: None,
+            duration: None,
         };
         let ability = ResolvedAbility {
             effect: Effect::DealDamage {
@@ -763,6 +768,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             sub_ability: Some(Box::new(sub)),
+            duration: None,
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -1167,5 +1173,25 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn resolved_ability_duration_roundtrips() {
+        let ability = ResolvedAbility {
+            effect: Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            targets: vec![TargetRef::Object(ObjectId(10))],
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            sub_ability: None,
+            duration: Some(Duration::UntilHostLeavesPlay),
+        };
+        let json = serde_json::to_string(&ability).unwrap();
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
+        assert_eq!(ability, deserialized);
+        assert_eq!(deserialized.duration, Some(Duration::UntilHostLeavesPlay));
     }
 }
