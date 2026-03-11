@@ -48,7 +48,7 @@ export function MenuLogo() {
       <motion.img
         src="/logo.webp"
         alt="phase.rs"
-        className="relative w-80 max-w-[70vw]"
+        className="relative w-64 max-w-[60vw]"
         style={{
           filter: "drop-shadow(0 0 25px rgba(251, 146, 60, 0.5)) drop-shadow(0 0 50px rgba(251, 146, 60, 0.2))",
         }}

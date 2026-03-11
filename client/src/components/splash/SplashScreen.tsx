@@ -29,7 +29,7 @@ export function SplashScreen({ progress, onComplete }: SplashScreenProps) {
           <motion.img
             src="/logo.webp"
             alt="phase.rs"
-            className="mb-4 w-[200px]"
+            className="mb-4 w-[160px]"
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.6, ease: "easeOut" }}
