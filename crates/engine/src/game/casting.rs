@@ -3,7 +3,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::mana::ManaCostShard;
+use crate::types::mana::{ManaCostShard, ManaType};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -254,6 +254,13 @@ fn has_targeting_requirement(def: &AbilityDefinition) -> bool {
             target,
             TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
         ),
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => !matches!(
+            target,
+            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+        ),
         _ => false,
     }
 }
@@ -275,6 +282,10 @@ fn get_valid_tgts_string(def: &AbilityDefinition) -> String {
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::CopySpell { target, .. } => target,
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => target,
         _ => return "Any".to_string(),
     };
     match target {
@@ -601,6 +612,28 @@ fn pay_and_push(
     Ok(WaitingFor::Priority { player })
 }
 
+/// Find and mark the first unused land producing `needed` color. Returns true if found.
+fn tap_matching_land(
+    available: &[(ObjectId, ManaType)],
+    used: &mut [bool],
+    to_tap: &mut Vec<(ObjectId, ManaType)>,
+    needed: ManaType,
+) -> bool {
+    if let Some(idx) = available.iter().enumerate().find_map(|(i, (_, color))| {
+        if !used[i] && *color == needed {
+            Some(i)
+        } else {
+            None
+        }
+    }) {
+        used[idx] = true;
+        to_tap.push(available[idx]);
+        true
+    } else {
+        false
+    }
+}
+
 /// Auto-tap untapped lands controlled by `player` to produce enough mana for `cost`.
 ///
 /// Strategy: tap lands producing colors required by the cost first (colored shards),
@@ -611,16 +644,12 @@ fn auto_tap_lands(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::mana::{ManaCost, ManaType};
+    use crate::types::mana::ManaCost;
 
     let (shards, generic) = match cost {
-        ManaCost::NoCost | ManaCost::Cost { generic: 0, .. }
-            if matches!(cost, ManaCost::NoCost) =>
-        {
-            return
-        }
+        ManaCost::NoCost => return,
+        ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
         ManaCost::Cost { shards, generic } => (shards, *generic),
-        _ => return,
     };
 
     // Build list of (object_id, mana_color) for untapped lands this player controls
@@ -652,32 +681,43 @@ fn auto_tap_lands(
     let mut to_tap: Vec<(ObjectId, ManaType)> = Vec::new();
     let mut used: Vec<bool> = vec![false; available.len()];
 
-    // Phase 1: satisfy colored shards by tapping matching lands
+    // Phase 1: satisfy colored and hybrid shards by tapping matching lands
+    let mut deferred_generic: usize = 0;
     for shard in shards {
-        let needed_color = match shard {
-            ManaCostShard::White => Some(ManaType::White),
-            ManaCostShard::Blue => Some(ManaType::Blue),
-            ManaCostShard::Black => Some(ManaType::Black),
-            ManaCostShard::Red => Some(ManaType::Red),
-            ManaCostShard::Green => Some(ManaType::Green),
-            _ => None, // Generic, hybrid, phyrexian -- handled by phase 2 or pool
-        };
-        if let Some(needed) = needed_color {
-            if let Some(idx) = available.iter().enumerate().find_map(|(i, (_, color))| {
-                if !used[i] && *color == needed {
-                    Some(i)
-                } else {
-                    None
+        use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
+        match shard_to_mana_type(*shard) {
+            ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
+                tap_matching_land(&available, &mut used, &mut to_tap, color);
+            }
+            ShardRequirement::Hybrid(a, b) => {
+                if !tap_matching_land(&available, &mut used, &mut to_tap, a) {
+                    tap_matching_land(&available, &mut used, &mut to_tap, b);
                 }
-            }) {
-                used[idx] = true;
-                to_tap.push(available[idx]);
+            }
+            ShardRequirement::TwoGenericHybrid(color) => {
+                // Prefer 1 matching-color land over 2 generic lands
+                if !tap_matching_land(&available, &mut used, &mut to_tap, color) {
+                    deferred_generic += 2;
+                }
+            }
+            ShardRequirement::ColorlessHybrid(color) => {
+                if !tap_matching_land(&available, &mut used, &mut to_tap, ManaType::Colorless) {
+                    tap_matching_land(&available, &mut used, &mut to_tap, color);
+                }
+            }
+            ShardRequirement::HybridPhyrexian(a, b) => {
+                if !tap_matching_land(&available, &mut used, &mut to_tap, a) {
+                    tap_matching_land(&available, &mut used, &mut to_tap, b);
+                }
+            }
+            ShardRequirement::Snow | ShardRequirement::X => {
+                deferred_generic += 1;
             }
         }
     }
 
-    // Phase 2: satisfy generic cost with any remaining untapped lands
-    let mut remaining_generic = generic;
+    // Phase 2: satisfy generic cost + deferred shards with any remaining untapped lands
+    let mut remaining_generic = generic as usize + deferred_generic;
     for (i, &(oid, color)) in available.iter().enumerate() {
         if remaining_generic == 0 {
             break;

@@ -221,7 +221,7 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 
 // --- Internal helpers ---
 
-enum ShardRequirement {
+pub(crate) enum ShardRequirement {
     Single(ManaType),
     Hybrid(ManaType, ManaType),
     Phyrexian(ManaType),
@@ -232,7 +232,7 @@ enum ShardRequirement {
     HybridPhyrexian(ManaType, ManaType),
 }
 
-fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
+pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
     match shard {
         ManaCostShard::White => ShardRequirement::Single(ManaType::White),
         ManaCostShard::Blue => ShardRequirement::Single(ManaType::Blue),
