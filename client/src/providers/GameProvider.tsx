@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 
 import type { GameAction } from "../adapter/types";
+import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
+import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
@@ -9,6 +11,8 @@ import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction } from "../game/dispatch";
+import { hostRoom, joinRoom } from "../network/connection";
+import { createPeerSession } from "../network/peer";
 import type { ParsedDeck } from "../services/deckParser";
 import { useGameStore, loadGame } from "../stores/gameStore";
 
@@ -107,10 +111,11 @@ const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join";
   difficulty?: string;
   joinCode?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
+  onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
   onCardDataMissing?: () => void;
   onNoDeck?: () => void;
@@ -123,6 +128,7 @@ export function GameProvider({
   difficulty,
   joinCode,
   onWsEvent,
+  onP2PEvent,
   onReady,
   onCardDataMissing,
   onNoDeck,
@@ -131,10 +137,12 @@ export function GameProvider({
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
   const onWsEventRef = useRef(onWsEvent);
+  const onP2PEventRef = useRef(onP2PEvent);
   const onReadyRef = useRef(onReady);
   const onCardDataMissingRef = useRef(onCardDataMissing);
   const onNoDeckRef = useRef(onNoDeck);
   onWsEventRef.current = onWsEvent;
+  onP2PEventRef.current = onP2PEvent;
   onReadyRef.current = onReady;
   onCardDataMissingRef.current = onCardDataMissing;
   onNoDeckRef.current = onNoDeck;
@@ -143,12 +151,97 @@ export function GameProvider({
     const { initGame, resumeGame, reset } = useGameStore.getState();
 
     const isOnline = mode === "online";
+    const isP2P = mode === "p2p-host" || mode === "p2p-join";
     const hasSession = sessionStorage.getItem("phase-ws-session") !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
 
     let cancelled = false;
     let wsUnsubscribe: (() => void) | null = null;
+    let p2pUnsubscribe: (() => void) | null = null;
+    let p2pHostDestroy: (() => void) | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
+
+    if (isP2P) {
+      const parsedDeck = loadActiveDeck();
+      if (!parsedDeck) {
+        onNoDeckRef.current?.();
+        return;
+      }
+
+      buildDeckPayload(parsedDeck).then(async (deckPayload) => {
+        if (cancelled) return;
+
+        if (deckPayload === null) {
+          onCardDataMissingRef.current?.();
+        }
+
+        try {
+          if (mode === "p2p-host") {
+            const host = hostRoom();
+            p2pHostDestroy = host.destroy;
+
+            onP2PEventRef.current?.({ type: "roomCreated", roomCode: host.roomCode });
+            onP2PEventRef.current?.({ type: "waitingForGuest" });
+
+            const { conn, destroyPeer } = await host.waitForGuest();
+            if (cancelled) { destroyPeer(); return; }
+
+            onP2PEventRef.current?.({ type: "guestConnected" });
+
+            const session = createPeerSession(conn, destroyPeer);
+            const adapter = new P2PHostAdapter(deckPayload, session);
+
+            p2pUnsubscribe = adapter.onEvent((event) => {
+              if (event.type === "stateChanged") {
+                const store = useGameStore.getState();
+                store.setGameState(event.state);
+                store.setWaitingFor(event.state.waiting_for);
+              }
+              onP2PEventRef.current?.(event);
+            });
+
+            await initGame(gameId, adapter);
+            if (cancelled) return;
+            onReadyRef.current?.();
+            audioManager.startMusic();
+          } else {
+            // p2p-join
+            const code = joinCode!;
+            const { conn, destroyPeer } = await joinRoom(code);
+            if (cancelled) { destroyPeer(); return; }
+
+            const session = createPeerSession(conn, destroyPeer);
+            const adapter = new P2PGuestAdapter(deckPayload, session);
+
+            p2pUnsubscribe = adapter.onEvent((event) => {
+              if (event.type === "stateChanged") {
+                const store = useGameStore.getState();
+                store.setGameState(event.state);
+                store.setWaitingFor(event.state.waiting_for);
+              }
+              onP2PEventRef.current?.(event);
+            });
+
+            await initGame(gameId, adapter);
+            if (cancelled) return;
+            onReadyRef.current?.();
+            audioManager.startMusic();
+          }
+        } catch (err) {
+          if (cancelled) return;
+          const message = err instanceof Error ? err.message : String(err);
+          onP2PEventRef.current?.({ type: "error", message });
+        }
+      });
+
+      return () => {
+        cancelled = true;
+        if (p2pUnsubscribe) p2pUnsubscribe();
+        if (p2pHostDestroy) p2pHostDestroy();
+        audioManager.stopMusic(0);
+        reset();
+      };
+    }
 
     if (isOnline || isReconnect) {
       const parsedDeck = loadActiveDeck();

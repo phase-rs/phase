@@ -1,10 +1,11 @@
 import { WasmAdapter } from "./wasm-adapter";
-import type { EngineAdapter } from "./types";
 
 export { WasmAdapter } from "./wasm-adapter";
+export { P2PHostAdapter, P2PGuestAdapter } from "./p2p-adapter";
 export { AdapterError, AdapterErrorCode } from "./types";
 export type { EngineAdapter, GameAction, GameEvent, GameState, GameObject, WaitingFor, ActionResult } from "./types";
 export type { ObjectId, CardId, PlayerId, Phase, Zone, Player, StackEntry } from "./types";
+export type { P2PAdapterEvent } from "./p2p-adapter";
 
 /** Tauri v2 detection: present when running inside a Tauri webview. */
 declare global {

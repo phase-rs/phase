@@ -31,6 +31,7 @@ import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
+import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
@@ -49,8 +50,12 @@ export function GamePage() {
   const joinCode = searchParams.get("code") ?? "";
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" =
-    rawMode === "host" || rawMode === "join" ? "online" : rawMode === "ai" ? "ai" : "local";
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
+    rawMode === "p2p-host" ? "p2p-host"
+    : rawMode === "p2p-join" ? "p2p-join"
+    : rawMode === "host" || rawMode === "join" ? "online"
+    : rawMode === "ai" ? "ai"
+    : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -96,6 +101,26 @@ export function GamePage() {
     }
   }, []);
 
+  const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
+    switch (event.type) {
+      case "roomCreated":
+        setHostGameCode(event.roomCode);
+        break;
+      case "waitingForGuest":
+        setWaitingForOpponent(true);
+        break;
+      case "guestConnected":
+        // Guest connected, game init will follow
+        break;
+      case "opponentDisconnected":
+        setOpponentDisconnected(true);
+        break;
+      case "error":
+        setReconnectState({ status: "failed" });
+        break;
+    }
+  }, []);
+
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
   }, []);
@@ -117,7 +142,8 @@ export function GamePage() {
       difficulty={difficulty}
       joinCode={joinCode || undefined}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
-      onReady={mode === "online" ? handleReady : undefined}
+      onP2PEvent={mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined}
+      onReady={mode === "online" || mode === "p2p-host" || mode === "p2p-join" ? handleReady : undefined}
       onCardDataMissing={handleCardDataMissing}
       onNoDeck={handleNoDeck}
     >

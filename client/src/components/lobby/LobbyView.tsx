@@ -7,6 +7,7 @@ import type { LobbyGame } from "./GameListItem";
 
 interface LobbyViewProps {
   onHostGame: () => void;
+  onHostP2P: () => void;
   onJoinGame: (code: string, password?: string) => void;
   activeDeckName: string | null;
   onChangeDeck: () => void;
@@ -14,6 +15,7 @@ interface LobbyViewProps {
 
 export function LobbyView({
   onHostGame,
+  onHostP2P,
   onJoinGame,
   activeDeckName,
   onChangeDeck,
@@ -174,13 +176,21 @@ export function LobbyView({
         </button>
       </div>
 
-      {/* Host Game button */}
-      <button
-        onClick={onHostGame}
-        className={menuButtonClass({ tone: "emerald", size: "md" })}
-      >
-        Host Game
-      </button>
+      {/* Host Game buttons */}
+      <div className="flex gap-3">
+        <button
+          onClick={onHostGame}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          Host (Server)
+        </button>
+        <button
+          onClick={onHostP2P}
+          className={menuButtonClass({ tone: "cyan", size: "md" })}
+        >
+          Host (P2P)
+        </button>
+      </div>
 
       {/* Password modal */}
       {passwordModal && (

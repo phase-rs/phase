@@ -13,6 +13,7 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
+import { parseRoomCode } from "../network/connection";
 import type { ParsedDeck } from "../services/deckParser";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
@@ -211,12 +212,32 @@ export function MenuPage() {
     [activeDeckName, serverAddress, navigate],
   );
 
+  const handleHostP2P = useCallback(() => {
+    if (!activeDeckName) {
+      setMenuView("deck-gallery-online");
+      return;
+    }
+    const gameId = crypto.randomUUID();
+    useGameStore.setState({ gameId });
+    navigate(`/game/${gameId}?mode=p2p-host`);
+  }, [activeDeckName, navigate]);
+
   const handleJoinWithPassword = useCallback(
     (code: string, password?: string) => {
       if (!activeDeckName) {
         setMenuView("deck-gallery-online");
         return;
       }
+
+      // Detect P2P codes (5-char unambiguous alphabet) vs server codes
+      const p2pCode = parseRoomCode(code);
+      if (p2pCode && code.trim().length === 5) {
+        const gameId = crypto.randomUUID();
+        useGameStore.setState({ gameId });
+        navigate(`/game/${gameId}?mode=p2p-join&code=${p2pCode}`);
+        return;
+      }
+
       sessionStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
       useGameStore.setState({ gameId });
@@ -332,6 +353,7 @@ export function MenuPage() {
       {menuView === "lobby" && (
         <LobbyView
           onHostGame={() => setMenuView("host-setup")}
+          onHostP2P={handleHostP2P}
           onJoinGame={handleJoinWithPassword}
           activeDeckName={activeDeckName}
           onChangeDeck={() => setMenuView("deck-gallery-online")}
