@@ -315,9 +315,7 @@ fn build_mtgjson_indexes(
         let key_lower = key.to_lowercase();
         lowercase_map.entry(key_lower.clone()).or_insert(val);
         let key_normalized = normalize_for_match(key);
-        normalized_map
-            .entry(key_normalized.clone())
-            .or_insert(val);
+        normalized_map.entry(key_normalized.clone()).or_insert(val);
 
         // Multi-face prefix: "name a // name b" → index by "name a"
         if let Some(idx) = key_lower.find(" // ") {
@@ -478,6 +476,7 @@ mod tests {
             side: None,
             face_name: None,
             mana_value: 2.0,
+            legalities: HashMap::new(),
             identifiers: AtomicIdentifiers {
                 scryfall_oracle_id: Some("test-oracle-id-123".to_string()),
             },

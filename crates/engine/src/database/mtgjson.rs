@@ -47,6 +47,8 @@ pub struct AtomicCard {
     #[serde(default)]
     pub face_name: Option<String>,
     pub mana_value: f64,
+    #[serde(default)]
+    pub legalities: HashMap<String, String>,
     pub identifiers: AtomicIdentifiers,
 }
 

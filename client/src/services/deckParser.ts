@@ -9,16 +9,22 @@ export interface ParsedDeck {
   commander?: string[];
 }
 
+type DeckSection = "main" | "sideboard" | "commander";
+
 /**
  * Parse a .dck/.dec format deck file.
  * Format: "count CardName" per line (or "countx CardName").
- * Sections: [Main], [Sideboard] (case-insensitive).
+ * Sections: [Main], [Sideboard], [Commander] (case-insensitive).
  * Lines starting with # are comments, empty lines are skipped.
+ *
+ * Commander auto-detection: cards in [Commander] or [Sideboard] sections
+ * of 100-card singleton decks are treated as potential commanders.
  */
 export function parseDeckFile(content: string): ParsedDeck {
   const lines = content.split(/\r?\n/);
   const deck: ParsedDeck = { main: [], sideboard: [] };
-  let currentSection: "main" | "sideboard" = "main";
+  const commanderEntries: DeckEntry[] = [];
+  let currentSection: DeckSection = "main";
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -26,18 +32,34 @@ export function parseDeckFile(content: string): ParsedDeck {
 
     const sectionMatch = line.match(/^\[(\w+)\]$/i);
     if (sectionMatch) {
-      currentSection =
-        sectionMatch[1].toLowerCase() === "sideboard" ? "sideboard" : "main";
+      const sectionName = sectionMatch[1].toLowerCase();
+      if (sectionName === "sideboard") {
+        currentSection = "sideboard";
+      } else if (sectionName === "commander") {
+        currentSection = "commander";
+      } else {
+        currentSection = "main";
+      }
       continue;
     }
 
     const cardMatch = line.match(/^(\d+)x?\s+(.+)$/);
     if (cardMatch) {
-      deck[currentSection].push({
+      const entry = {
         count: parseInt(cardMatch[1], 10),
         name: cardMatch[2].trim(),
-      });
+      };
+      if (currentSection === "commander") {
+        commanderEntries.push(entry);
+      } else {
+        deck[currentSection].push(entry);
+      }
     }
+  }
+
+  // If explicit [Commander] section found, extract commander names
+  if (commanderEntries.length > 0) {
+    deck.commander = commanderEntries.map((e) => e.name);
   }
 
   return deck;
@@ -49,12 +71,14 @@ const MTGA_LINE_PATTERN = /^\d+\s+.+\s+\([A-Z0-9]+\)\s+\d+$/;
  * Parse an MTGA text format deck.
  * Format: "count CardName (SET) CollectorNumber" per line.
  * A blank line or "Sideboard" header switches to sideboard section.
+ * "Commander" header switches to commander section.
  * Header labels like "Deck", "Companion" are skipped.
  */
 export function parseMtgaDeck(content: string): ParsedDeck {
   const lines = content.split(/\r?\n/);
   const deck: ParsedDeck = { main: [], sideboard: [] };
-  let currentSection: "main" | "sideboard" = "main";
+  const commanderEntries: DeckEntry[] = [];
+  let currentSection: DeckSection = "main";
   let seenCards = false;
 
   for (const raw of lines) {
@@ -64,6 +88,11 @@ export function parseMtgaDeck(content: string): ParsedDeck {
 
     if (line.toLowerCase() === "sideboard") {
       currentSection = "sideboard";
+      continue;
+    }
+
+    if (line.toLowerCase() === "commander") {
+      currentSection = "commander";
       continue;
     }
 
@@ -85,12 +114,21 @@ export function parseMtgaDeck(content: string): ParsedDeck {
 
     const match = line.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]+\)\s+\d+$/);
     if (match) {
-      deck[currentSection].push({
+      const entry = {
         count: parseInt(match[1], 10),
         name: match[2].trim(),
-      });
+      };
+      if (currentSection === "commander") {
+        commanderEntries.push(entry);
+      } else {
+        deck[currentSection].push(entry);
+      }
       seenCards = true;
     }
+  }
+
+  if (commanderEntries.length > 0) {
+    deck.commander = commanderEntries.map((e) => e.name);
   }
 
   return deck;
@@ -116,6 +154,13 @@ export function detectAndParseDeck(content: string): ParsedDeck {
  */
 export function exportDeckFile(deck: ParsedDeck): string {
   const lines: string[] = [];
+
+  if (deck.commander && deck.commander.length > 0) {
+    lines.push("[Commander]");
+    for (const name of deck.commander) {
+      lines.push(`1 ${name}`);
+    }
+  }
 
   if (deck.main.length > 0) {
     lines.push("[Main]");
