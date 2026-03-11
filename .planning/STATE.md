@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Completed 25-03-PLAN.md
-last_updated: "2026-03-11T00:47:29.832Z"
-last_activity: 2026-03-11 — Completed Plan 25-03 (Relicensing & Documentation Scrub)
+status: in-progress
+stopped_at: Completed 26-02-PLAN.md
+last_updated: "2026-03-11T01:16:27Z"
+last_activity: 2026-03-11 — Completed Plan 26-02 (Server Protocol & Lobby)
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 19
-  completed_plans: 15
-  percent: 100
+  total_plans: 22
+  completed_plans: 17
+  percent: 77
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 25 Forge Removal & Relicensing — Complete
+**Current focus:** Phase 26 Polish & Fix Multi-player with Lobby and Embedded Server — In Progress
 
 ## Current Position
 
-Phase: 25 (fifth of 5 in v1.2) — Forge Removal & Relicensing
-Plan: 3/3 complete
-Status: Phase 25 Complete
-Last activity: 2026-03-11 — Completed Plan 25-03 (Relicensing & Documentation Scrub)
+Phase: 26 (sixth of 6) — Polish & Fix Multi-player with Lobby and Embedded Server
+Plan: 2/6 complete
+Status: In Progress
+Last activity: 2026-03-11 — Completed Plan 26-02 (Server Protocol & Lobby)
 
-Progress: [██████████] 100%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 16 (v1.2)
-- Average duration: 13min
-- Total execution time: 3.3 hours
+- Total plans completed: 17 (v1.2)
+- Average duration: 12min
+- Total execution time: 3.4 hours
 
 **By Phase:**
 
@@ -48,6 +48,7 @@ Progress: [██████████] 100%
 | 23 | 2/2 | 18min | 9min |
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
+| 26 | 1/6 | 5min | 5min |
 
 ## Accumulated Context
 
@@ -108,6 +109,10 @@ Recent decisions affecting current work:
 - [25-02]: Test assertions migrated from api_type() to effect_variant_name() (preferred over feature-gating)
 - [25-03]: MIT/Apache-2.0 dual license following Rust ecosystem convention
 - [25-03]: forge-compat feature gate name retained as technical identifier in documentation
+- [26-02]: Direct string comparison for game passwords (no bcrypt -- appropriate for game lobby passwords)
+- [26-02]: AtomicU32 for player count tracking (lock-free vs Mutex<u32>)
+- [26-02]: Lobby subscribers tracked as Vec<UnboundedSender> with closed-channel cleanup
+- [26-02]: password_required sentinel triggers PasswordRequired message vs generic Error
 
 ### Roadmap Evolution
 
@@ -123,6 +128,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T00:40:04Z
-Stopped at: Completed 25-03-PLAN.md
-Resume file: .planning/phases/25-forge-removal-relicensing/25-03-SUMMARY.md
+Last session: 2026-03-11T01:16:27Z
+Stopped at: Completed 26-02-PLAN.md
+Resume file: .planning/phases/26-polish-and-fix-multi-player-with-lobby-and-embedded-server/26-02-SUMMARY.md

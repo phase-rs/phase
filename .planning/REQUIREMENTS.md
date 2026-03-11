@@ -53,10 +53,10 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### Server Lobby
 
-- [ ] **MP-LOBBY-SRV**: Server manages a browseable game lobby with create/list/join/subscribe/unsubscribe protocol, public/private toggle, password protection, and auto-expiry of stale games
-- [ ] **MP-CONCEDE-SRV**: Server handles Concede message and broadcasts game over to both players
-- [ ] **MP-EMOTE-SRV**: Server forwards Emote messages between players
-- [ ] **MP-TIMER-SRV**: Server supports per-turn timer configuration and enforcement with TimerUpdate messages
+- [x] **MP-LOBBY-SRV**: Server manages a browseable game lobby with create/list/join/subscribe/unsubscribe protocol, public/private toggle, password protection, and auto-expiry of stale games
+- [x] **MP-CONCEDE-SRV**: Server handles Concede message and broadcasts game over to both players
+- [x] **MP-EMOTE-SRV**: Server forwards Emote messages between players
+- [x] **MP-TIMER-SRV**: Server supports per-turn timer configuration and enforcement with TimerUpdate messages
 
 ### Frontend Lobby
 
@@ -84,7 +84,7 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 - [ ] **MP-EMOTE**: Quick emotes (MTGA-style pre-set messages) can be sent and received with temporary overlay display
 - [ ] **MP-TIMER-UI**: Per-turn timer countdown displayed near active player HUD when timer is configured
 - [ ] **MP-GAMEOVER**: Game over screen shows correct winner for both players, total turns, duration, and Back to Lobby button
-- [ ] **MP-OPPONENT-NAME**: Opponent display name shown near their life total during gameplay
+- [x] **MP-OPPONENT-NAME**: Opponent display name shown near their life total during gameplay
 
 ## Future Requirements
 
