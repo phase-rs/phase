@@ -1,38 +1,12 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
-import type { GameObject } from "../../adapter/types.ts";
+import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
-import { BattlefieldRow } from "./BattlefieldRow.tsx";
-
-/** Scale for land column (left) */
-const LAND_SCALE = 0.65;
-
-const LAND_COL_STYLE = {
-  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE})`,
-  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 0.75)`,
-  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2})`,
-  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2} * 1.4)`,
-  width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`,
-} as React.CSSProperties;
-
-const LAND_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`;
-
-/** Scale for enchantment/artifact column (right) — larger than lands */
-const OTHER_SCALE = 0.85;
-
-const OTHER_COL_STYLE = {
-  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
-  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} * 0.75)`,
-  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
-  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE} * 1.4)`,
-  width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`,
-} as React.CSSProperties;
-
-const OTHER_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`;
+import { PlayerArea } from "./PlayerArea.tsx";
 
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
@@ -40,49 +14,46 @@ export function GameBoard() {
   const undo = useGameStore((s) => s.undo);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const myId = usePlayerId();
-  const opponentId = myId === 0 ? 1 : 0;
 
-  const { opponent, player } = useMemo(() => {
-    if (!gameState) return { opponent: null, player: null };
+  // Track which opponent is focused (expanded) in multiplayer
+  const [focusedOpponent, setFocusedOpponent] = useState<PlayerId | null>(null);
+
+  // Compute live opponents from seat order
+  const opponents = useMemo(() => {
+    if (!gameState) return [];
+    const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
+    const eliminated = gameState.eliminated_players ?? [];
+    return seatOrder.filter((id) => id !== myId && !eliminated.includes(id));
+  }, [gameState, myId]);
+
+  // For blocker sorting: compute grouped creatures for the focused/single opponent
+  const focusedId = focusedOpponent ?? (opponents.length === 1 ? opponents[0] : null);
+
+  const sortedPlayerCreatures = useMemo(() => {
+    if (!gameState || focusedId == null) return undefined;
 
     const battlefieldObjects = gameState.battlefield
       .map((id) => gameState.objects[id])
       .filter(Boolean);
-
-    const playerObjects = battlefieldObjects.filter(
-      (obj) => obj.controller === myId,
-    );
-    const opponentObjects = battlefieldObjects.filter(
-      (obj) => obj.controller === opponentId,
-    );
 
     const partitionAndGroup = (objects: GameObject[]) => {
       const partition = partitionByType(objects);
       const objectMap = new Map(objects.map((o) => [o.id, o]));
       const resolveObjects = (ids: number[]) =>
         ids.map((id) => objectMap.get(id)).filter(Boolean) as GameObject[];
-
       return {
         creatures: groupByName(resolveObjects(partition.creatures)),
-        lands: groupByName(resolveObjects(partition.lands)),
-        other: groupByName(resolveObjects(partition.other)),
       };
     };
 
-    return {
-      player: partitionAndGroup(playerObjects),
-      opponent: partitionAndGroup(opponentObjects),
-    };
-  }, [gameState, myId, opponentId]);
+    const playerObjects = battlefieldObjects.filter((obj) => obj.controller === myId);
+    const opponentObjects = battlefieldObjects.filter((obj) => obj.controller === focusedId);
 
-  // Reorder player creatures so assigned blockers align with their target attackers
-  const sortedPlayerCreatures = useMemo(
-    () =>
-      player && opponent
-        ? sortCreaturesForBlockers(player.creatures, opponent.creatures, blockerAssignments)
-        : player?.creatures ?? [],
-    [player, opponent, blockerAssignments],
-  );
+    const playerGroups = partitionAndGroup(playerObjects);
+    const opponentGroups = partitionAndGroup(opponentObjects);
+
+    return sortCreaturesForBlockers(playerGroups.creatures, opponentGroups.creatures, blockerAssignments);
+  }, [gameState, myId, focusedId, blockerAssignments]);
 
   if (!gameState) {
     return (
@@ -92,83 +63,66 @@ export function GameBoard() {
     );
   }
 
+  const is1v1 = opponents.length === 1;
+
+  // Undo button for the player's land column
+  const undoButton = canUndo ? (
+    <button
+      onClick={undo}
+      className="mt-auto mx-auto flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
+        <path fillRule="evenodd" d="M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0ZM7.72 4.22a.75.75 0 0 0-1.06 0L4.97 5.91a.75.75 0 0 0 0 1.06l1.69 1.69a.75.75 0 1 0 1.06-1.06l-.47-.47h1.63a1.25 1.25 0 0 1 0 2.5H7.5a.75.75 0 0 0 0 1.5h1.38a2.75 2.75 0 0 0 0-5.5H7.25l.47-.47a.75.75 0 0 0 0-1.06Z" clipRule="evenodd" />
+      </svg>
+      Undo
+    </button>
+  ) : null;
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-visible">
-      {/* Opponent's battlefield */}
-      <div className="relative flex flex-1">
-        {/* Opponent lands — left column */}
-        <div
-          className="absolute left-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
-          style={LAND_COL_STYLE}
-        >
-          {opponent && (
-            <BattlefieldRow groups={opponent.lands} rowType="lands" />
+      {/* Opponent area */}
+      {is1v1 ? (
+        // 1v1: single opponent in focused mode (identical to original layout)
+        <PlayerArea
+          playerId={opponents[0]}
+          mode="focused"
+        />
+      ) : (
+        // Multiplayer: compact strips for opponents, with optional focused view
+        <div className="flex flex-col">
+          {/* Compact strips row */}
+          <div className="flex gap-2 overflow-x-auto px-2 py-1">
+            {opponents.map((opId) => (
+              <PlayerArea
+                key={opId}
+                playerId={opId}
+                mode={focusedOpponent === opId ? "focused" : "compact"}
+                onFocus={() =>
+                  setFocusedOpponent((prev) => (prev === opId ? null : opId))
+                }
+              />
+            ))}
+          </div>
+          {/* Focused opponent expanded view */}
+          {focusedOpponent != null && opponents.includes(focusedOpponent) && (
+            <PlayerArea
+              playerId={focusedOpponent}
+              mode="focused"
+            />
           )}
         </div>
-        {/* Opponent creatures — center area */}
-        <div
-          className="flex flex-1 flex-col justify-end gap-1 py-2"
-          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: OTHER_COL_WIDTH }}
-        >
-          {opponent && (
-            <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
-          )}
-        </div>
-        {/* Opponent enchantments/artifacts — right column */}
-        <div
-          className="absolute right-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
-          style={OTHER_COL_STYLE}
-        >
-          {opponent && (
-            <BattlefieldRow groups={opponent.other} rowType="other" />
-          )}
-        </div>
-      </div>
+      )}
 
       {/* Minimal center gap */}
       <div className="h-1" />
 
       {/* Player's battlefield */}
-      <div className="relative flex flex-1">
-        {/* Player lands — left column */}
-        <div
-          className="absolute left-0 top-0 bottom-0 z-10 flex flex-col overflow-visible px-1 py-2"
-          style={LAND_COL_STYLE}
-        >
-          {player && (
-            <BattlefieldRow groups={player.lands} rowType="lands" />
-          )}
-          {canUndo && (
-            <button
-              onClick={undo}
-              className="mt-auto mx-auto flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
-                <path fillRule="evenodd" d="M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0ZM7.72 4.22a.75.75 0 0 0-1.06 0L4.97 5.91a.75.75 0 0 0 0 1.06l1.69 1.69a.75.75 0 1 0 1.06-1.06l-.47-.47h1.63a1.25 1.25 0 0 1 0 2.5H7.5a.75.75 0 0 0 0 1.5h1.38a2.75 2.75 0 0 0 0-5.5H7.25l.47-.47a.75.75 0 0 0 0-1.06Z" clipRule="evenodd" />
-              </svg>
-              Undo
-            </button>
-          )}
-        </div>
-        {/* Player creatures — center area */}
-        <div
-          className="flex flex-1 flex-col gap-1 pt-2 pb-4"
-          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: OTHER_COL_WIDTH }}
-        >
-          {player && (
-            <BattlefieldRow groups={sortedPlayerCreatures} rowType="creatures" />
-          )}
-        </div>
-        {/* Player enchantments/artifacts — right column */}
-        <div
-          className="absolute right-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
-          style={OTHER_COL_STYLE}
-        >
-          {player && (
-            <BattlefieldRow groups={player.other} rowType="other" />
-          )}
-        </div>
-      </div>
+      <PlayerArea
+        playerId={myId}
+        mode="full"
+        landColumnExtra={undoButton}
+        creatureOverride={sortedPlayerCreatures}
+      />
     </div>
   );
 }
