@@ -1,20 +1,29 @@
-# phase.rs
+<p align="center">
+  <img src="client/public/logo.webp" alt="phase.rs" width="280" />
+</p>
 
-An open-source Magic: The Gathering rules engine and game client.
+<p align="center">
+  <strong>An open-source Magic: The Gathering rules engine and game client</strong>
+</p>
 
-The Rust engine compiles to both native and WASM, supporting a Tauri desktop app, browser PWA, and WebSocket multiplayer. It implements MTG comprehensive rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#architecture">Architecture</a> · <a href="#development">Development</a>
+</p>
+
+---
+
+A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop app, browser PWA, and WebSocket multiplayer. Implements comprehensive MTG rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
 
 ## Features
 
-- Full MTG rules engine (turns, priority, stack, combat, state-based actions)
-- 32,300+ card definitions parsed from Forge's .txt format
-- AI opponent with per-card decision logic and game tree search
-- React game UI with battlefield, hand, stack, targeting, mana payment
-- WebSocket multiplayer with hidden information
-- Deck builder with card search and .dck/.dec import
-- Desktop app via Tauri (Windows, macOS, Linux)
-- PWA/WASM for browser and tablet
-- Card images from Scryfall with IndexedDB caching
+- **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects
+- **32,300+ cards** — Parsed from Forge's card definitions with typed ability JSON
+- **AI opponent** — Per-card decision logic, game tree search, and evaluation heuristics
+- **Game UI** — Battlefield, hand, stack, targeting overlays, mana payment, and animations
+- **Multiplayer** — WebSocket server with hidden information and lobby system
+- **Deck builder** — Card search, visual builder, and `.dck`/`.dec` import
+- **Cross-platform** — Tauri desktop (Windows, macOS, Linux), browser PWA, and tablet
+- **Card images** — Scryfall integration with IndexedDB caching
 
 ## Quick Start
 
@@ -65,12 +74,12 @@ Transport-agnostic `EngineAdapter` interface with three implementations:
 - **TauriAdapter** -- Tauri IPC (desktop)
 - **WsAdapter** -- WebSocket (multiplayer)
 
-### Key Design Decisions
+### Design Principles
 
-- Pure `apply(state, action) -> ActionResult` reducer pattern (no mutation)
-- Discriminated unions across WASM boundary via serde + tsify
-- Immutable state with structural sharing (rpds)
-- Forge's .txt card format as upstream compatibility surface
+- **Pure reducers** — `apply(state, action) -> ActionResult` with no mutation
+- **Discriminated unions** — Rust enums serialize to tagged TS unions via serde + tsify
+- **Structural sharing** — Immutable state via rpds persistent data structures
+- **Forge compatibility** — Card definitions parsed from Forge's upstream format
 
 ## Development
 
@@ -123,4 +132,4 @@ data/                 Downloaded Forge card files (gitignored)
 
 ## License
 
-TBD
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
