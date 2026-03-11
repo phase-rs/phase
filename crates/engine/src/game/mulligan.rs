@@ -21,14 +21,16 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         player.library.shuffle(&mut state.rng);
     }
 
-    // Draw 7 for each player
-    for player_idx in 0..state.players.len() {
-        let player_id = state.players[player_idx].id;
+    // Draw 7 for each player in seat order
+    let seat_order = state.seat_order.clone();
+    for &player_id in &seat_order {
         draw_n(state, player_id, STARTING_HAND_SIZE, events);
     }
 
+    // First player in seat order gets the first mulligan decision
+    let first_player = state.seat_order.first().copied().unwrap_or(PlayerId(0));
     WaitingFor::MulliganDecision {
-        player: PlayerId(0),
+        player: first_player,
         mulligan_count: 0,
     }
 }
@@ -112,14 +114,22 @@ pub fn handle_mulligan_bottom(
     advance_mulligan(state, player, events).pipe(Ok)
 }
 
-/// Move to the next player's mulligan, or finish mulligans if all done.
+/// Move to the next player's mulligan in seat order, or finish mulligans if all done.
 fn advance_mulligan(
     state: &mut GameState,
     current_player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let next_player = PlayerId(current_player.0 + 1);
-    if (next_player.0 as usize) < state.players.len() {
+    // Find the next player in seat_order after current_player
+    let seat_order = &state.seat_order;
+    let current_idx = seat_order
+        .iter()
+        .position(|&id| id == current_player)
+        .unwrap_or(0);
+
+    // Check if there's another player after current in seat order
+    if current_idx + 1 < seat_order.len() {
+        let next_player = seat_order[current_idx + 1];
         WaitingFor::MulliganDecision {
             player: next_player,
             mulligan_count: 0,
@@ -129,7 +139,7 @@ fn advance_mulligan(
     }
 }
 
-/// Both players have kept. Start the game properly.
+/// All players have kept. Start the game properly.
 fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     turns::auto_advance(state, events)
 }

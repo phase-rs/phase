@@ -12,6 +12,14 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
+/// Represents who a creature is attacking: a player or a planeswalker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AttackTarget {
+    Player(PlayerId),
+    Planeswalker(ObjectId),
+}
+
 /// Tracks the state of the current combat phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
@@ -108,10 +116,6 @@ pub fn validate_blockers(
     state: &GameState,
     assignments: &[(ObjectId, ObjectId)],
 ) -> Result<(), String> {
-    let active = state.active_player;
-    // Defending player is the non-active player
-    let defending = PlayerId(1 - active.0);
-
     // Group assignments by attacker for menace validation
     let mut blockers_per_attacker: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
 
@@ -129,12 +133,27 @@ pub fn validate_blockers(
             return Err(format!("{:?} is not a creature", blocker_id));
         }
 
-        // Must be controlled by defending player
-        if blocker.controller != defending {
+        // Must not be controlled by the active (attacking) player
+        if blocker.controller == state.active_player {
             return Err(format!(
                 "{:?} is not controlled by defending player",
                 blocker_id
             ));
+        }
+
+        // In multiplayer, blocker must be blocking an attacker that is attacking
+        // the blocker's controller
+        if let Some(combat) = &state.combat {
+            if let Some(attacker_info) =
+                combat.attackers.iter().find(|a| a.object_id == attacker_id)
+            {
+                if attacker_info.defending_player != blocker.controller {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (not attacking this player)",
+                        blocker_id, attacker_id
+                    ));
+                }
+            }
         }
 
         // Must not be tapped
@@ -269,17 +288,55 @@ pub fn validate_blockers(
 }
 
 /// Declare attackers: validate, tap (unless vigilance), populate CombatState, emit event.
+/// Accepts per-creature attack targets as (attacker_id, target) pairs.
 pub fn declare_attackers(
     state: &mut GameState,
-    attacker_ids: &[ObjectId],
+    attacks: &[(ObjectId, AttackTarget)],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
-    validate_attackers(state, attacker_ids)?;
+    let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
+    validate_attackers(state, &attacker_ids)?;
 
-    let defending_player = PlayerId(1 - state.active_player.0);
+    // Validate attack targets
+    for (attacker_id, target) in attacks {
+        match target {
+            AttackTarget::Player(pid) => {
+                if !state.players.iter().any(|p| p.id == *pid)
+                    || state.eliminated_players.contains(pid)
+                    || *pid == state.active_player
+                {
+                    return Err(format!(
+                        "{:?} cannot attack player {:?}",
+                        attacker_id, pid
+                    ));
+                }
+            }
+            AttackTarget::Planeswalker(pw_id) => {
+                let pw = state
+                    .objects
+                    .get(pw_id)
+                    .ok_or_else(|| format!("Planeswalker {:?} not found", pw_id))?;
+                if pw.zone != crate::types::zones::Zone::Battlefield
+                    || !pw
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Planeswalker)
+                {
+                    return Err(format!("{:?} is not a planeswalker on the battlefield", pw_id));
+                }
+                // Can't attack your own planeswalker
+                if pw.controller == state.active_player {
+                    return Err(format!(
+                        "Cannot attack your own planeswalker {:?}",
+                        pw_id
+                    ));
+                }
+            }
+        }
+    }
 
     // Tap attackers (unless they have Vigilance)
-    for &id in attacker_ids {
+    for &id in &attacker_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             if !obj.has_keyword(&Keyword::Vigilance) {
                 obj.tapped = true;
@@ -288,18 +345,35 @@ pub fn declare_attackers(
         }
     }
 
-    // Populate CombatState
+    // Populate CombatState with per-creature defending players
     let combat = state.combat.get_or_insert_with(CombatState::default);
-    combat.attackers = attacker_ids
+    combat.attackers = attacks
         .iter()
-        .map(|&object_id| AttackerInfo {
-            object_id,
-            defending_player,
+        .map(|(object_id, target)| {
+            let defending_player = match target {
+                AttackTarget::Player(pid) => *pid,
+                AttackTarget::Planeswalker(pw_id) => state
+                    .objects
+                    .get(pw_id)
+                    .map(|pw| pw.controller)
+                    .unwrap_or(PlayerId(0)),
+            };
+            AttackerInfo {
+                object_id: *object_id,
+                defending_player,
+            }
         })
         .collect();
 
+    // Use the first attacker's defending player for the event (backward compat for 2-player)
+    let defending_player = combat
+        .attackers
+        .first()
+        .map(|a| a.defending_player)
+        .unwrap_or(PlayerId(1 - state.active_player.0));
+
     events.push(GameEvent::AttackersDeclared {
-        attacker_ids: attacker_ids.to_vec(),
+        attacker_ids,
         defending_player,
     });
 
@@ -432,13 +506,13 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
 }
 
 /// For each valid blocker, compute which attackers it can legally block.
+/// In multiplayer, blockers can only block creatures attacking them (their controller).
 pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<ObjectId>> {
     let valid_blockers = get_valid_blocker_ids(state);
-    let attacker_ids: Vec<ObjectId> = state
-        .combat
-        .as_ref()
-        .map(|c| c.attackers.iter().map(|a| a.object_id).collect())
-        .unwrap_or_default();
+    let combat = match state.combat.as_ref() {
+        Some(c) => c,
+        None => return HashMap::new(),
+    };
 
     let mut result = HashMap::new();
     for &blocker_id in &valid_blockers {
@@ -446,16 +520,20 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
             Some(obj) => obj,
             None => continue,
         };
-        let valid_targets: Vec<ObjectId> = attacker_ids
+        let blocker_controller = blocker.controller;
+        // Filter attackers to only those attacking this blocker's controller
+        let valid_targets: Vec<ObjectId> = combat
+            .attackers
             .iter()
-            .filter(|&&attacker_id| {
+            .filter(|a| a.defending_player == blocker_controller)
+            .filter(|a| {
                 state
                     .objects
-                    .get(&attacker_id)
+                    .get(&a.object_id)
                     .map(|attacker| can_block_pair(blocker, attacker))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|a| a.object_id)
             .collect();
         if !valid_targets.is_empty() {
             result.insert(blocker_id, valid_targets);
@@ -464,18 +542,37 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
     result
 }
 
-/// Return the IDs of all creatures the defending player could legally assign as blockers.
-/// A creature is a valid blocker if it's an untapped creature controlled by the defending player.
-/// (Per-attacker blocking restrictions like Flying are checked during validate_blockers.)
+/// Return the IDs of all creatures that could legally be assigned as blockers.
+/// A creature is a valid blocker if it's an untapped creature controlled by a defending player
+/// (any player being attacked in the current combat).
 pub fn get_valid_blocker_ids(state: &GameState) -> Vec<ObjectId> {
-    let defending = PlayerId(1 - state.active_player.0);
+    // Collect all defending players from combat state
+    let defending_players: Vec<PlayerId> = state
+        .combat
+        .as_ref()
+        .map(|c| {
+            let mut players: Vec<PlayerId> =
+                c.attackers.iter().map(|a| a.defending_player).collect();
+            players.sort();
+            players.dedup();
+            players
+        })
+        .unwrap_or_else(|| {
+            // Fallback for pre-combat: all non-active players
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != state.active_player)
+                .map(|p| p.id)
+                .collect()
+        });
 
     state
         .battlefield
         .iter()
         .filter_map(|id| {
             let obj = state.objects.get(id)?;
-            if obj.controller == defending
+            if defending_players.contains(&obj.controller)
                 && obj.card_types.core_types.contains(&CoreType::Creature)
                 && !obj.tapped
             {
@@ -485,6 +582,36 @@ pub fn get_valid_blocker_ids(state: &GameState) -> Vec<ObjectId> {
             }
         })
         .collect()
+}
+
+/// Return all valid attack targets for the active player: opposing players and their planeswalkers.
+pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
+    let active = state.active_player;
+    let mut targets = Vec::new();
+
+    // All non-eliminated opponents
+    for player in &state.players {
+        if player.id != active && !state.eliminated_players.contains(&player.id) {
+            targets.push(AttackTarget::Player(player.id));
+        }
+    }
+
+    // All planeswalkers controlled by opponents
+    for &id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&id) {
+            if obj.controller != active
+                && obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Planeswalker)
+                && !state.eliminated_players.contains(&obj.controller)
+            {
+                targets.push(AttackTarget::Planeswalker(id));
+            }
+        }
+    }
+
+    targets
 }
 
 /// Check if the active player controls any creatures that could legally attack.
@@ -663,7 +790,7 @@ mod tests {
             .push(Keyword::Vigilance);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[id], &mut events).unwrap();
+        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
 
         assert!(!state.objects[&id].tapped);
     }
@@ -675,7 +802,7 @@ mod tests {
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[id], &mut events).unwrap();
+        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
 
         assert!(state.objects[&id].tapped);
     }
@@ -687,7 +814,7 @@ mod tests {
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[id], &mut events).unwrap();
+        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
 
         assert!(events.iter().any(|e| matches!(
             e,

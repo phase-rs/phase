@@ -2,13 +2,34 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 
+use super::players;
 use super::turns;
 
+/// Handle a priority pass from the current priority player.
+///
+/// Uses a BTreeSet (priority_passes) to track which players have passed consecutively.
+/// The stack resolves (or phase advances) only when ALL living players have passed.
+/// Any non-pass action clears the set (handled by callers via `reset_priority`).
 pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+    // Record this player's pass
+    let current = state.priority_player;
+    state.priority_passes.insert(current);
+
+    // Also maintain legacy counter for transition period
     state.priority_pass_count += 1;
 
-    if state.priority_pass_count >= 2 {
-        // Both players have passed consecutively
+    // Count living players
+    let living_count = state
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated)
+        .count();
+
+    if state.priority_passes.len() >= living_count {
+        // All living players have passed consecutively
+        state.priority_passes.clear();
+        state.priority_pass_count = 0;
+
         if state.stack.is_empty() {
             // Empty stack: advance to next phase
             turns::advance_phase(state, events);
@@ -22,31 +43,66 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
             }
         }
     } else {
-        // Only one player passed, give priority to opponent
-        let opp = opponent(state.priority_player, state);
-        state.priority_player = opp;
+        // Not all players have passed yet — advance to next living player
+        let next = next_priority_player(state);
+        state.priority_player = next;
 
         events.push(GameEvent::PriorityPassed {
-            player_id: state.priority_player,
+            player_id: next,
         });
 
-        WaitingFor::Priority { player: opp }
+        WaitingFor::Priority { player: next }
     }
 }
 
+/// Determine the next player to receive priority, using APNAP order.
+///
+/// For non-team formats: next living player in seat order after current priority player.
+/// For team-based formats (2HG): APNAP within teams — active team members first,
+/// then opponent team members.
+fn next_priority_player(state: &GameState) -> PlayerId {
+    if state.format_config.team_based {
+        // 2HG: APNAP order within teams
+        // Build the full APNAP order and find the next player who hasn't passed
+        let order = players::apnap_order(state);
+        let current_idx = order
+            .iter()
+            .position(|&id| id == state.priority_player)
+            .unwrap_or(0);
+        for offset in 1..=order.len() {
+            let idx = (current_idx + offset) % order.len();
+            let candidate = order[idx];
+            if !state.priority_passes.contains(&candidate) {
+                return candidate;
+            }
+        }
+        // Fallback (shouldn't reach here if called before all have passed)
+        players::next_player(state, state.priority_player)
+    } else {
+        // Non-team: simple clockwise in seat order
+        players::next_player(state, state.priority_player)
+    }
+}
+
+/// Reset priority state: clear passes, set priority to active player.
 pub fn reset_priority(state: &mut GameState) {
     state.priority_player = state.active_player;
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 }
 
-pub fn opponent(player: PlayerId, _state: &GameState) -> PlayerId {
-    PlayerId(1 - player.0)
+/// Deprecated wrapper for backward compatibility during migration.
+/// Returns the next living player after `player` in seat order.
+/// Plan 05 removes this function.
+pub fn opponent(player: PlayerId, state: &GameState) -> PlayerId {
+    players::next_player(state, player)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::ResolvedAbility;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::StackEntry;
     use crate::types::identifiers::CardId;
 
@@ -57,11 +113,24 @@ mod tests {
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
         state.priority_pass_count = 0;
+        state.priority_passes.clear();
         state
     }
 
+    fn setup_three_player() -> GameState {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.priority_passes.clear();
+        state
+    }
+
+    // --- 2-player backward compatibility ---
+
     #[test]
-    fn single_pass_gives_priority_to_opponent() {
+    fn two_player_single_pass_gives_priority_to_opponent() {
         let mut state = setup();
         let mut events = Vec::new();
 
@@ -74,13 +143,14 @@ mod tests {
             }
         ));
         assert_eq!(state.priority_player, PlayerId(1));
-        assert_eq!(state.priority_pass_count, 1);
+        assert!(state.priority_passes.contains(&PlayerId(0)));
     }
 
     #[test]
-    fn both_pass_empty_stack_advances_phase() {
+    fn two_player_both_pass_empty_stack_advances_phase() {
         let mut state = setup();
-        state.priority_pass_count = 1; // First player already passed
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_pass_count = 1;
         state.priority_player = PlayerId(1);
 
         let mut events = Vec::new();
@@ -91,12 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn both_pass_non_empty_stack_resolves_top() {
+    fn two_player_both_pass_non_empty_stack_resolves_top() {
         let mut state = setup();
+        state.priority_passes.insert(PlayerId(0));
         state.priority_pass_count = 1;
         state.priority_player = PlayerId(1);
 
-        // Create the object in state so resolve_top can find it
         use crate::game::zones::create_object;
         use crate::types::zones::Zone;
         let created_id = create_object(
@@ -107,7 +177,6 @@ mod tests {
             Zone::Stack,
         );
 
-        // Add a stack entry matching the created object
         state.stack.push(StackEntry {
             id: created_id,
             source_id: created_id,
@@ -126,7 +195,6 @@ mod tests {
             },
         });
 
-        // Mark as instant/sorcery so it goes to graveyard
         state
             .objects
             .get_mut(&created_id)
@@ -138,14 +206,13 @@ mod tests {
         let mut events = Vec::new();
         let result = handle_priority_pass(&mut state, &mut events);
 
-        // Priority should reset to active player
         assert!(matches!(
             result,
             WaitingFor::Priority {
                 player: PlayerId(0)
             }
         ));
-        assert_eq!(state.priority_pass_count, 0);
+        assert!(state.priority_passes.is_empty());
         assert!(state.stack.is_empty());
     }
 
@@ -153,18 +220,173 @@ mod tests {
     fn priority_resets_to_active_player() {
         let mut state = setup();
         state.priority_player = PlayerId(1);
-        state.priority_pass_count = 3;
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_passes.insert(PlayerId(1));
 
         reset_priority(&mut state);
 
         assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.is_empty());
         assert_eq!(state.priority_pass_count, 0);
     }
 
     #[test]
-    fn opponent_returns_other_player() {
+    fn opponent_returns_next_player_in_seat_order() {
         let state = setup();
         assert_eq!(opponent(PlayerId(0), &state), PlayerId(1));
         assert_eq!(opponent(PlayerId(1), &state), PlayerId(0));
+    }
+
+    // --- 3-player N-player priority ---
+
+    #[test]
+    fn three_player_first_pass_does_not_resolve_stack() {
+        let mut state = setup_three_player();
+        let mut events = Vec::new();
+
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // P0 passes, priority goes to P1
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+        assert_eq!(state.priority_player, PlayerId(1));
+        assert_eq!(state.priority_passes.len(), 1);
+    }
+
+    #[test]
+    fn three_player_two_passes_does_not_resolve_stack() {
+        let mut state = setup_three_player();
+        let mut events = Vec::new();
+
+        // P0 passes
+        handle_priority_pass(&mut state, &mut events);
+        // P1 passes
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // Still not all 3 have passed, priority goes to P2
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        ));
+        assert_eq!(state.priority_passes.len(), 2);
+    }
+
+    #[test]
+    fn three_player_all_pass_advances_phase() {
+        let mut state = setup_three_player();
+        let mut events = Vec::new();
+
+        // P0 passes
+        handle_priority_pass(&mut state, &mut events);
+        // P1 passes
+        handle_priority_pass(&mut state, &mut events);
+        // P2 passes - all 3 have passed
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // Should advance phase (empty stack)
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert!(state.priority_passes.is_empty());
+    }
+
+    #[test]
+    fn three_player_action_clears_priority_passes() {
+        let mut state = setup_three_player();
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_passes.insert(PlayerId(1));
+
+        // Simulate an action resetting priority
+        reset_priority(&mut state);
+
+        assert!(state.priority_passes.is_empty());
+        assert_eq!(state.priority_player, PlayerId(0));
+    }
+
+    #[test]
+    fn three_player_skips_eliminated_player() {
+        let mut state = setup_three_player();
+        // Eliminate P1
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+        let mut events = Vec::new();
+
+        // P0 passes
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // Should skip P1 and go to P2
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        ));
+    }
+
+    #[test]
+    fn three_player_two_living_all_pass_resolves() {
+        let mut state = setup_three_player();
+        // Eliminate P1
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+        let mut events = Vec::new();
+
+        // P0 passes -> P2
+        handle_priority_pass(&mut state, &mut events);
+        // P2 passes -> both living players passed
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // Should advance phase (2 living players both passed)
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+    }
+
+    // --- 2HG team-based priority ---
+
+    #[test]
+    fn two_hg_priority_uses_apnap_order() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.priority_passes.clear();
+        let mut events = Vec::new();
+
+        // P0 (active team member) passes
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // In APNAP order with P0 active: P0, P1 (teammate), P2, P3
+        // Next should be P1 (teammate on active team)
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn two_hg_all_four_pass_resolves() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.priority_passes.clear();
+        let mut events = Vec::new();
+
+        // All 4 pass in APNAP order
+        handle_priority_pass(&mut state, &mut events); // P0
+        handle_priority_pass(&mut state, &mut events); // P1
+        handle_priority_pass(&mut state, &mut events); // P2
+        let result = handle_priority_pass(&mut state, &mut events); // P3
+
+        // All passed, should advance
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert!(state.priority_passes.is_empty());
     }
 }

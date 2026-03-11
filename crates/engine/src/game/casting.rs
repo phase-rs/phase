@@ -415,6 +415,7 @@ pub fn handle_activate_ability(
             );
 
             events.push(GameEvent::AbilityActivated { source_id });
+            state.priority_passes.clear();
             state.priority_pass_count = 0;
             return Ok(WaitingFor::Priority { player });
         } else {
@@ -453,6 +454,7 @@ pub fn handle_activate_ability(
 
     events.push(GameEvent::AbilityActivated { source_id });
 
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     Ok(WaitingFor::Priority { player })
@@ -528,6 +530,7 @@ fn pay_and_push(
         events,
     );
 
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     events.push(GameEvent::SpellCast {

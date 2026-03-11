@@ -134,6 +134,7 @@ pub fn handle_activate_loyalty(
     );
 
     events.push(GameEvent::AbilityActivated { source_id: pw_id });
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     Ok(WaitingFor::Priority { player })

@@ -50,6 +50,7 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // Reset priority to active player at start of each phase
     state.priority_player = state.active_player;
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     events.push(GameEvent::PhaseChanged { phase: next });
@@ -58,11 +59,12 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
 pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.turn_number += 1;
 
-    // Swap active player (toggle between 0 and 1)
-    state.active_player = PlayerId(1 - state.active_player.0);
+    // Advance to next living player in seat order (N-player aware)
+    state.active_player = super::players::next_player(state, state.active_player);
 
     // Reset priority
     state.priority_player = state.active_player;
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     // Reset per-turn counters
@@ -232,6 +234,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     state.combat = None;
                     state.phase = Phase::PostCombatMain;
                     state.priority_player = state.active_player;
+                    state.priority_passes.clear();
                     state.priority_pass_count = 0;
                     events.push(GameEvent::PhaseChanged {
                         phase: Phase::PostCombatMain,
@@ -243,9 +246,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::DeclareAttackers => {
                 let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
+                let valid_attack_targets = super::combat::get_valid_attack_targets(state);
                 return WaitingFor::DeclareAttackers {
                     player: state.active_player,
                     valid_attacker_ids,
+                    valid_attack_targets,
                 };
             }
             Phase::DeclareBlockers => {
@@ -255,7 +260,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     .as_ref()
                     .is_some_and(|c| !c.attackers.is_empty());
                 if has_attackers {
-                    let defending = PlayerId(1 - state.active_player.0);
+                    let defending = super::players::next_player(state, state.active_player);
                     let valid_blocker_ids = super::combat::get_valid_blocker_ids(state);
                     let valid_block_targets = super::combat::get_valid_block_targets(state);
                     return WaitingFor::DeclareBlockers {

@@ -191,18 +191,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
         (
             WaitingFor::DeclareAttackers { player, .. },
-            GameAction::DeclareAttackers { attacker_ids },
+            GameAction::DeclareAttackers { attacks },
         ) => {
             if state.active_player != *player {
                 return Err(EngineError::WrongPlayer);
             }
-            super::combat::declare_attackers(state, &attacker_ids, &mut events)
+            super::combat::declare_attackers(state, &attacks, &mut events)
                 .map_err(EngineError::InvalidAction)?;
 
             // Process triggers for AttackersDeclared
             triggers::process_triggers(state, &events);
 
-            if attacker_ids.is_empty() {
+            if attacks.is_empty() {
                 // No attackers: skip to EndCombat
                 state.phase = Phase::EndCombat;
                 events.push(GameEvent::PhaseChanged {
@@ -452,6 +452,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 },
             };
             super::stack::push_to_stack(state, entry, &mut events);
+            state.priority_passes.clear();
             state.priority_pass_count = 0;
             WaitingFor::Priority { player: *player }
         }
@@ -610,7 +611,8 @@ fn handle_play_land(
         .expect("priority player exists");
     player.lands_played_this_turn += 1;
 
-    // Reset priority pass count (action was taken)
+    // Reset priority passes (action was taken)
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
 
     events.push(GameEvent::LandPlayed {
@@ -763,10 +765,12 @@ fn handle_equip_activation(
             api_type: "Equip".to_string(),
             source_id: equipment_id,
         });
+        state.priority_passes.clear();
         state.priority_pass_count = 0;
         return Ok(WaitingFor::Priority { player });
     }
 
+    state.priority_passes.clear();
     state.priority_pass_count = 0;
     Ok(WaitingFor::EquipTarget {
         player,
