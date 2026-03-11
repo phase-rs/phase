@@ -290,6 +290,8 @@ pub enum Effect {
         colors: Vec<ManaColor>,
         #[serde(default)]
         keywords: Vec<Keyword>,
+        #[serde(default)]
+        tapped: bool,
         #[serde(default = "default_one")]
         count: u32,
     },
@@ -442,6 +444,8 @@ pub enum Effect {
         static_abilities: Vec<StaticDefinition>,
         #[serde(default)]
         duration: Option<Duration>,
+        #[serde(default)]
+        target: Option<TargetFilter>,
     },
     Cleanup {
         #[serde(default)]
@@ -1114,6 +1118,7 @@ mod tests {
                 description: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
+            target: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

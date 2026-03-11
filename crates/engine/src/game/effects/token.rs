@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
@@ -264,18 +265,48 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (script_name, fallback_power, fallback_toughness, count) = match &ability.effect {
+    let (
+        script_name,
+        fallback_power,
+        fallback_toughness,
+        fallback_types,
+        fallback_colors,
+        fallback_keywords,
+        tapped,
+        count,
+    ) = match &ability.effect {
         Effect::Token {
             name,
             power,
             toughness,
+            types,
+            colors,
+            keywords,
+            tapped,
             count,
-            ..
-        } => (name.clone(), Some(*power), Some(*toughness), *count),
-        _ => ("Token".to_string(), None, None, 1),
+        } => (
+            name.clone(),
+            *power,
+            *toughness,
+            types.clone(),
+            colors.clone(),
+            keywords.clone(),
+            *tapped,
+            *count,
+        ),
+        _ => ("Token".to_string(), 0, 0, vec![], vec![], vec![], false, 1),
     };
 
-    let parsed = parse_token_script(&script_name);
+    let parsed = parse_token_script(&script_name).or_else(|| {
+        build_token_attrs_from_effect(
+            &script_name,
+            fallback_power,
+            fallback_toughness,
+            &fallback_types,
+            &fallback_colors,
+            &fallback_keywords,
+        )
+    });
 
     let display_name = parsed
         .as_ref()
@@ -321,12 +352,15 @@ pub fn resolve(
                             obj.keywords = attrs.keywords.clone();
                             obj.base_keywords = attrs.keywords.clone();
                         } else {
-                            obj.power = fallback_power;
-                            obj.toughness = fallback_toughness;
-                            if fallback_power.is_some() {
+                            if fallback_power != 0 || fallback_toughness != 0 {
+                                obj.power = Some(fallback_power);
+                                obj.toughness = Some(fallback_toughness);
+                                obj.base_power = Some(fallback_power);
+                                obj.base_toughness = Some(fallback_toughness);
                                 obj.card_types.core_types.push(CoreType::Creature);
                             }
                         }
+                        obj.tapped = tapped;
                     }
 
                     state.layers_dirty = true;
@@ -362,6 +396,50 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn build_token_attrs_from_effect(
+    name: &str,
+    power: i32,
+    toughness: i32,
+    types: &[String],
+    colors: &[ManaColor],
+    keywords: &[Keyword],
+) -> Option<TokenAttrs> {
+    if types.is_empty() && colors.is_empty() && keywords.is_empty() && power == 0 && toughness == 0
+    {
+        return None;
+    }
+
+    let mut core_types = Vec::new();
+    let mut subtypes = Vec::new();
+
+    for token_type in types {
+        let trimmed = token_type.trim();
+        if let Ok(core_type) = CoreType::from_str(trimmed) {
+            if !core_types.contains(&core_type) {
+                core_types.push(core_type);
+            }
+        } else if !trimmed.is_empty() {
+            subtypes.push(trimmed.to_string());
+        }
+    }
+
+    if core_types.is_empty() && (power != 0 || toughness != 0) {
+        core_types.push(CoreType::Creature);
+    }
+
+    let has_power_toughness = power != 0 || toughness != 0;
+    let is_creature = core_types.contains(&CoreType::Creature);
+    Some(TokenAttrs {
+        display_name: name.to_string(),
+        power: (is_creature || has_power_toughness).then_some(power),
+        toughness: (is_creature || has_power_toughness).then_some(toughness),
+        core_types,
+        subtypes,
+        colors: colors.to_vec(),
+        keywords: keywords.to_vec(),
+    })
 }
 
 #[cfg(test)]
@@ -475,6 +553,7 @@ mod tests {
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
+                tapped: false,
                 count: 1,
             },
             vec![],
@@ -537,6 +616,7 @@ mod tests {
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
+                tapped: false,
                 count: 1,
             },
             vec![],
@@ -581,6 +661,7 @@ mod tests {
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
+                tapped: false,
                 count: 2,
             },
             vec![],
@@ -606,5 +687,58 @@ mod tests {
             .filter(|e| matches!(e, GameEvent::TokenCreated { .. }))
             .collect();
         assert_eq!(token_events.len(), 2);
+    }
+
+    #[test]
+    fn explicit_artifact_token_uses_typed_fields() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: 0,
+                toughness: 0,
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: 1,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&state.battlefield[0]];
+        assert_eq!(obj.name, "Treasure");
+        assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+        assert!(obj.card_types.subtypes.contains(&"Treasure".to_string()));
+        assert_eq!(obj.power, None);
+        assert_eq!(obj.toughness, None);
+    }
+
+    #[test]
+    fn explicit_token_can_enter_tapped() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Powerstone".to_string(),
+                power: 0,
+                toughness: 0,
+                types: vec!["Artifact".to_string(), "Powerstone".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: true,
+                count: 1,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.objects[&state.battlefield[0]].tapped);
     }
 }

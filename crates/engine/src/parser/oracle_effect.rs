@@ -1,8 +1,40 @@
+use std::str::FromStr;
+
+use super::oracle_static::parse_continuous_modifications;
 use super::oracle_target::parse_target;
-use super::oracle_util::{parse_mana_production, parse_number};
-use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter};
+use super::oracle_util::{parse_mana_production, parse_number, strip_reminder_text};
+use crate::types::ability::{
+    AbilityDefinition, AbilityKind, ControllerRef, DamageAmount, Duration, Effect,
+    StaticDefinition, TargetFilter, TypeFilter,
+};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedEffectClause {
+    effect: Effect,
+    duration: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubjectApplication {
+    affected: TargetFilter,
+    target: Option<TargetFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenDescription {
+    name: String,
+    power: Option<i32>,
+    toughness: Option<i32>,
+    types: Vec<String>,
+    colors: Vec<ManaColor>,
+    keywords: Vec<Keyword>,
+    tapped: bool,
+    count: u32,
+}
 
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
@@ -11,7 +43,38 @@ use crate::types::zones::Zone;
 /// For compound effects ("Gain 3 life. Draw a card."), call `parse_effect_chain`
 /// which splits on sentence boundaries and chains via AbilityDefinition::sub_ability.
 pub fn parse_effect(text: &str) -> Effect {
+    parse_effect_clause(text).effect
+}
+
+fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     let text = text.trim().trim_end_matches('.');
+    if text.is_empty() {
+        return parsed_clause(Effect::Unimplemented {
+            name: "empty".to_string(),
+            description: None,
+        });
+    }
+
+    if let Some((duration, rest)) = strip_leading_duration(text) {
+        return with_clause_duration(parse_effect_clause(rest), duration);
+    }
+
+    // Mirror the CubeArtisan grammar's high-level sentence shapes:
+    // 1) conditionals ("if X, Y"), 2) subject + verb phrase, 3) bare imperative.
+    if let Some(stripped) = strip_leading_conditional(text) {
+        return parse_effect_clause(&stripped);
+    }
+    if let Some(clause) = try_parse_subject_continuous_clause(text) {
+        return clause;
+    }
+    if let Some(stripped) = strip_subject_clause(text) {
+        return parse_effect_clause(&stripped);
+    }
+
+    parsed_clause(parse_imperative_effect(text))
+}
+
+fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
 
     // --- Mana production: "add {G}", "add one mana of any color", "add {C}" ---
@@ -284,6 +347,13 @@ pub fn parse_effect(text: &str) -> Effect {
         };
     }
 
+    // --- Put {target} onto/in/on {zone} ---
+    if lower.starts_with("put ") {
+        if let Some(effect) = try_parse_put_zone_change(&lower, text) {
+            return effect;
+        }
+    }
+
     // --- Put card on top of library ---
     if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
         return Effect::ChangeZone {
@@ -293,36 +363,9 @@ pub fn parse_effect(text: &str) -> Effect {
         };
     }
 
-    // --- Subject stripping: "each player/opponent" → delegate to verb ---
-    if lower.starts_with("each player ") || lower.starts_with("each opponent ") {
-        if let Some(verb_start) = find_verb_after_subject(&lower) {
-            let rest = &text[verb_start..];
-            let deconjugated = deconjugate_verb(rest);
-            return parse_effect(&deconjugated);
-        }
-    }
-
     // --- "you may " prefix stripping ---
     if lower.starts_with("you may ") {
         return parse_effect(&text[8..]);
-    }
-
-    // --- "it " prefix: "it gets +N/+M" / "it deals N damage" ---
-    if lower.starts_with("it ") {
-        return parse_effect(&text[3..]);
-    }
-
-    // --- "that creature/player" prefix stripping ---
-    if lower.starts_with("that creature ") {
-        return parse_effect(&text[14..]);
-    }
-    if lower.starts_with("that player ") {
-        return parse_effect(&text[12..]);
-    }
-
-    // --- "they " prefix stripping ---
-    if lower.starts_with("they ") {
-        return parse_effect(&text[5..]);
     }
 
     // --- Fallback ---
@@ -339,15 +382,18 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let sentences = split_effect_sentences(text);
     let mut defs: Vec<AbilityDefinition> = sentences
         .iter()
-        .map(|s| AbilityDefinition {
-            kind,
-            effect: parse_effect(s),
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
+        .map(|s| {
+            let clause = parse_effect_clause(s);
+            AbilityDefinition {
+                kind,
+                effect: clause.effect,
+                cost: None,
+                sub_ability: None,
+                duration: clause.duration,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            }
         })
         .collect();
 
@@ -388,31 +434,293 @@ fn split_effect_sentences(text: &str) -> Vec<String> {
 
 // --- Helper parsers ---
 
-fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
-    // Match: "~ deals N damage to {target}" or "deals N damage to each {filter}"
-    if let Some(pos) = lower.find("deals ") {
-        let after = &lower[pos + 6..];
-        if let Some((n, rest)) = parse_number(after) {
-            if rest.to_lowercase().starts_with("damage") {
-                let after_damage = rest.trim_start_matches(|c: char| c.is_alphabetic()).trim();
-                let after_to = after_damage.strip_prefix("to ").unwrap_or(after_damage);
-                // "each" → DamageAll
-                if after_to.starts_with("each ") {
-                    let (target, _) = parse_target(after_to);
-                    return Some(Effect::DamageAll {
-                        amount: DamageAmount::Fixed(n as i32),
-                        target,
-                    });
+fn parsed_clause(effect: Effect) -> ParsedEffectClause {
+    ParsedEffectClause {
+        effect,
+        duration: None,
+    }
+}
+
+fn with_clause_duration(mut clause: ParsedEffectClause, duration: Duration) -> ParsedEffectClause {
+    if clause.duration.is_none() {
+        clause.duration = Some(duration.clone());
+    }
+    if let Effect::GenericEffect {
+        duration: effect_duration,
+        ..
+    } = &mut clause.effect
+    {
+        if effect_duration.is_none() {
+            *effect_duration = Some(duration);
+        }
+    }
+    clause
+}
+
+fn strip_leading_conditional(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !lower.starts_with("if ") {
+        return None;
+    }
+
+    let mut paren_depth = 0u32;
+    let mut in_quotes = false;
+
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => paren_depth += 1,
+            ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
+            ',' if !in_quotes && paren_depth == 0 => {
+                let rest = text[idx + 1..].trim();
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
                 }
-                let (target, _) = parse_target(after_to);
-                return Some(Effect::DealDamage {
-                    amount: DamageAmount::Fixed(n as i32),
-                    target,
-                });
             }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
+    let lower = text.to_lowercase();
+    for (prefix, duration) in [
+        ("until end of turn, ", Duration::UntilEndOfTurn),
+        ("until your next turn, ", Duration::UntilYourNextTurn),
+    ] {
+        if lower.starts_with(prefix) {
+            return Some((duration, text[prefix.len()..].trim()));
         }
     }
     None
+}
+
+fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
+    let lower = text.to_lowercase();
+    for (suffix, duration) in [
+        (" until end of turn", Duration::UntilEndOfTurn),
+        (" until your next turn", Duration::UntilYourNextTurn),
+    ] {
+        if lower.ends_with(suffix) {
+            let end = text.len() - suffix.len();
+            return (text[..end].trim_end_matches(',').trim(), Some(duration));
+        }
+    }
+    (text, None)
+}
+
+fn try_parse_subject_continuous_clause(text: &str) -> Option<ParsedEffectClause> {
+    let verb_start = find_predicate_start(text)?;
+    let subject = text[..verb_start].trim();
+    let predicate = text[verb_start..].trim();
+    let application = parse_subject_application(subject)?;
+    build_continuous_clause(application, predicate)
+}
+
+fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
+    let lower = subject.to_lowercase();
+
+    if lower.starts_with("target ") {
+        let (filter, _) = parse_target(subject);
+        return subject_filter_application(filter, true);
+    }
+    if lower.starts_with("all ") || lower.starts_with("each ") {
+        let (filter, _) = parse_target(subject);
+        return subject_filter_application(filter, false);
+    }
+    if lower.starts_with("enchanted creature")
+        || lower.starts_with("enchanted permanent")
+        || lower.starts_with("equipped creature")
+    {
+        let (filter, _) = parse_target(subject);
+        return Some(SubjectApplication {
+            affected: filter,
+            target: None,
+        });
+    }
+    if lower == "creatures you control" || lower == "other creatures you control" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            },
+            target: None,
+        });
+    }
+    if matches!(
+        lower.as_str(),
+        "this"
+            | "it"
+            | "this card"
+            | "this creature"
+            | "this permanent"
+            | "this artifact"
+            | "this land"
+    ) {
+        return Some(SubjectApplication {
+            affected: TargetFilter::SelfRef,
+            target: None,
+        });
+    }
+
+    None
+}
+
+fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<SubjectApplication> {
+    if matches!(filter, TargetFilter::Player | TargetFilter::Controller) {
+        return None;
+    }
+    Some(SubjectApplication {
+        target: targeted.then_some(filter.clone()),
+        affected: filter,
+    })
+}
+
+fn build_continuous_clause(
+    application: SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let normalized = deconjugate_verb(predicate);
+    let (predicate, duration) = strip_trailing_duration(&normalized);
+    let modifications = parse_continuous_modifications(predicate);
+    if modifications.is_empty() {
+        return None;
+    }
+
+    if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
+        let effect = if let Some(target) = application.target.clone() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            }
+        } else if application.affected == TargetFilter::SelfRef {
+            Effect::Pump {
+                power,
+                toughness,
+                target: TargetFilter::SelfRef,
+            }
+        } else {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target: application.affected,
+            }
+        };
+        return Some(ParsedEffectClause { effect, duration });
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(application.affected),
+                modifications,
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: Some(predicate.to_string()),
+            }],
+            duration: duration.clone(),
+            target: application.target,
+        },
+        duration,
+    })
+}
+
+fn extract_pump_modifiers(
+    modifications: &[crate::types::ability::ContinuousModification],
+) -> Option<(i32, i32)> {
+    let mut power = None;
+    let mut toughness = None;
+
+    for modification in modifications {
+        match modification {
+            crate::types::ability::ContinuousModification::AddPower { value } => {
+                power = Some(*value);
+            }
+            crate::types::ability::ContinuousModification::AddToughness { value } => {
+                toughness = Some(*value);
+            }
+            _ => return None,
+        }
+    }
+
+    Some((power?, toughness?))
+}
+
+fn strip_subject_clause(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !starts_with_subject_prefix(&lower) {
+        return None;
+    }
+
+    let verb_start = find_predicate_start(text)?;
+    let predicate = text[verb_start..].trim();
+    if predicate.is_empty() {
+        return None;
+    }
+
+    Some(deconjugate_verb(predicate))
+}
+
+fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
+    // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
+    // and variable forms like "deal that much damage" or
+    // "deal damage equal to its power".
+    let Some(pos) = lower.find("deals ").or_else(|| lower.find("deal ")) else {
+        return None;
+    };
+    let verb_len = if lower[pos..].starts_with("deals ") {
+        6
+    } else {
+        5
+    };
+    let after = &_text[pos + verb_len..];
+    let after_lower = &lower[pos + verb_len..];
+
+    let (amount, after_target) = if let Some((n, rest)) = parse_number(after_lower) {
+        if rest.starts_with("damage") {
+            (
+                DamageAmount::Fixed(n as i32),
+                &after[after.len() - rest.len() + "damage".len()..],
+            )
+        } else {
+            return None;
+        }
+    } else if after_lower.starts_with("that much damage") {
+        (
+            DamageAmount::Variable("that much".to_string()),
+            &after["that much damage".len()..],
+        )
+    } else if after_lower.starts_with("damage equal to ") {
+        let amount_text = &after["damage equal to ".len()..];
+        let to_pos = amount_text.to_lowercase().find(" to ")?;
+        (
+            DamageAmount::Variable(amount_text[..to_pos].trim().to_string()),
+            &amount_text[to_pos + 4..],
+        )
+    } else {
+        return None;
+    };
+
+    let after_to = after_target
+        .trim()
+        .strip_prefix("to ")
+        .unwrap_or(after_target)
+        .trim();
+    if after_to.starts_with("each ") {
+        let (target, _) = parse_target(after_to);
+        return Some(Effect::DamageAll { amount, target });
+    }
+
+    let (target, _) = parse_target(after_to);
+    Some(Effect::DealDamage { amount, target })
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
@@ -457,106 +765,408 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
     })
 }
 
-fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
+fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
+    let text = strip_reminder_text(text);
+    let lower = text.to_lowercase();
+
     // "create a token that's a copy of {target}"
     if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
-        let copy_pos = lower
-            .find("copy of ")
-            .map(|p| p + 8)
-            .unwrap_or(lower.len());
-        let (target, _) = parse_target(&_text[copy_pos..]);
+        let copy_pos = lower.find("copy of ").map(|p| p + 8).unwrap_or(lower.len());
+        let (target, _) = parse_target(&text[copy_pos..]);
         return Some(Effect::CopySpell { target });
     }
 
-    // "create N {P/T} {color} {type} creature token(s) [with {keywords}]"
-    let after = &lower[7..]; // skip "create "
-    let (count, rest) = parse_number(after).unwrap_or((1, after));
+    let after = text[7..].trim();
+    let token = parse_token_description(after)?;
+    Some(Effect::Token {
+        name: token.name,
+        power: token.power.unwrap_or(0),
+        toughness: token.toughness.unwrap_or(0),
+        types: token.types,
+        colors: token.colors,
+        keywords: token.keywords,
+        tapped: token.tapped,
+        count: token.count,
+    })
+}
 
-    // Try to find P/T pattern directly after count
-    if let Some((p, t)) = parse_pt_modifier(rest) {
-        let type_name = "Token".to_string();
-        return Some(Effect::Token {
-            name: type_name,
-            power: p,
-            toughness: t,
-            types: vec!["Creature".to_string()],
-            colors: vec![],
-            keywords: vec![],
-            count,
-        });
-    }
+fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
+    let after_put = &text[4..];
+    let after_put_lower = &lower[4..];
 
-    // Handle "create a N/N {color} {creature_type} creature token"
-    // where P/T appears after a/an and optional adjectives
-    if let Some(pt_pos) = find_pt_pattern(rest) {
-        if let Some((p, t)) = parse_pt_modifier(&rest[pt_pos..]) {
-            let after_pt = &rest[pt_pos..];
-            let after_slash = after_pt
-                .find(|c: char| c.is_whitespace())
-                .map(|i| after_pt[i..].trim())
-                .unwrap_or("");
-            let color = extract_color_word(after_slash);
-            let creature_type = extract_creature_type(after_slash);
-            return Some(Effect::Token {
-                name: creature_type.clone(),
-                power: p,
-                toughness: t,
-                types: vec!["Creature".to_string()],
-                colors: color.into_iter().collect(),
-                keywords: vec![],
-                count,
+    for (needle, destination) in [
+        (" onto the battlefield", Zone::Battlefield),
+        (" into your hand", Zone::Hand),
+        (" into its owner's hand", Zone::Hand),
+        (" into their owner's hand", Zone::Hand),
+        (" into your graveyard", Zone::Graveyard),
+        (" into its owner's graveyard", Zone::Graveyard),
+        (" into their owner's graveyard", Zone::Graveyard),
+        (" on the bottom of", Zone::Library),
+        (" on top of", Zone::Library),
+    ] {
+        if let Some(pos) = after_put_lower.find(needle) {
+            let target_text = after_put[..pos].trim();
+            if target_text.is_empty() {
+                return None;
+            }
+            let (target, _) = parse_target(target_text);
+            return Some(Effect::ChangeZone {
+                origin: infer_origin_zone(after_put_lower),
+                destination,
+                target,
             });
         }
     }
 
-    // Fallback: unstructured token
-    Some(Effect::Unimplemented {
-        name: "create".to_string(),
-        description: Some(lower.to_string()),
-    })
-}
-
-/// Find the byte offset of a P/T pattern (e.g., "1/1", "2/2") within text.
-fn find_pt_pattern(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    for (i, window) in bytes.windows(3).enumerate() {
-        if window[0].is_ascii_digit() && window[1] == b'/' && window[2].is_ascii_digit() {
-            return Some(i);
-        }
-    }
     None
 }
 
-/// Extract a color word from token description text.
-fn extract_color_word(text: &str) -> Option<ManaColor> {
-    let lower = text.to_lowercase();
-    if lower.contains("white") {
-        Some(ManaColor::White)
-    } else if lower.contains("blue") {
-        Some(ManaColor::Blue)
-    } else if lower.contains("black") {
-        Some(ManaColor::Black)
-    } else if lower.contains("red") {
-        Some(ManaColor::Red)
-    } else if lower.contains("green") {
-        Some(ManaColor::Green)
+fn infer_origin_zone(lower: &str) -> Option<Zone> {
+    if lower.contains("from your graveyard") || lower.contains("from a graveyard") {
+        Some(Zone::Graveyard)
+    } else if lower.contains("from exile") {
+        Some(Zone::Exile)
+    } else if lower.contains("from your hand") {
+        Some(Zone::Hand)
+    } else if lower.contains("from your library") {
+        Some(Zone::Library)
     } else {
         None
     }
 }
 
-/// Extract creature type from token description (word before "creature token").
-fn extract_creature_type(text: &str) -> String {
+fn parse_token_description(text: &str) -> Option<TokenDescription> {
+    let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
-    if let Some(pos) = lower.find("creature token") {
-        let before = lower[..pos].trim();
-        if let Some(last_word) = before.split_whitespace().last() {
-            let capitalized =
-                last_word[..1].to_uppercase() + &last_word[1..];
-            return capitalized;
+    if lower.contains(" attached to ") {
+        return None;
+    }
+
+    let (count, leading_name, mut rest) = if let Some((count, rest)) = parse_fixed_token_count(text)
+    {
+        (count, None, rest)
+    } else if let Some((name, rest)) = parse_named_token_preamble(text) {
+        (1, Some(name), rest)
+    } else {
+        return None;
+    };
+    let mut tapped = false;
+
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix("tapped ") {
+            tapped = true;
+            rest = stripped;
+            continue;
+        }
+        if let Some(stripped) = trimmed.strip_prefix("untapped ") {
+            rest = stripped;
+            continue;
+        }
+        break;
+    }
+
+    rest = strip_token_supertypes(rest);
+
+    let (power, toughness, rest) =
+        if let Some((power, toughness, rest)) = parse_token_pt_prefix(rest) {
+            (Some(power), Some(toughness), rest)
+        } else {
+            (None, None, rest)
+        };
+
+    let (colors, rest) = parse_token_color_prefix(rest);
+    let (descriptor, suffix) = split_token_head(rest)?;
+    let (name_override, suffix) = parse_token_name_clause(suffix);
+    let keywords = parse_token_keyword_clause(suffix);
+    let (mut name, types) = parse_token_identity(descriptor)?;
+
+    if suffix.to_lowercase().contains(" attached to ") {
+        return None;
+    }
+
+    if let Some(name_override) = leading_name.or(name_override) {
+        name = name_override;
+    }
+
+    let is_creature = types.iter().any(|token_type| token_type == "Creature");
+    if is_creature && (power.is_none() || toughness.is_none()) {
+        return None;
+    }
+
+    if is_creature && power == Some(0) && toughness == Some(0) && suffix.contains('"') {
+        return None;
+    }
+
+    Some(TokenDescription {
+        name,
+        power,
+        toughness,
+        types,
+        colors,
+        keywords,
+        tapped,
+        count,
+    })
+}
+
+fn parse_fixed_token_count(text: &str) -> Option<(u32, &str)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with('x') || lower.starts_with("that many") {
+        return None;
+    }
+    let (count, rest) = parse_number(trimmed)?;
+    if count == 0 && lower.starts_with('x') {
+        return None;
+    }
+    Some((count, rest))
+}
+
+fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
+    let comma = text.find(',')?;
+    let name = text[..comma].trim().trim_matches('"');
+    if name.is_empty() {
+        return None;
+    }
+
+    let after_comma = text[comma + 1..].trim_start();
+    let rest = after_comma
+        .strip_prefix("a ")
+        .or_else(|| after_comma.strip_prefix("an "))?;
+    Some((name.to_string(), rest))
+}
+
+fn parse_token_pt_prefix(text: &str) -> Option<(i32, i32, &str)> {
+    let text = text.trim_start();
+    let word_end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let token = &text[..word_end];
+    let slash = token.find('/')?;
+    let power = token[..slash].trim();
+    let toughness = token[slash + 1..].trim();
+    if power.eq_ignore_ascii_case("x") || toughness.eq_ignore_ascii_case("x") {
+        return None;
+    }
+    let power = power.parse::<i32>().ok()?;
+    let toughness = toughness.parse::<i32>().ok()?;
+    Some((power, toughness, text[word_end..].trim_start()))
+}
+
+fn strip_token_supertypes(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim_start();
+        let Some(stripped) = ["legendary ", "snow ", "basic "]
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix))
+        else {
+            return trimmed;
+        };
+        text = stripped;
+    }
+}
+
+fn parse_token_color_prefix(mut text: &str) -> (Vec<ManaColor>, &str) {
+    let mut colors = Vec::new();
+
+    loop {
+        let trimmed = text.trim_start();
+        let Some((color, rest)) = strip_color_word(trimmed) else {
+            break;
+        };
+        if let Some(color) = color {
+            colors.push(color);
+        }
+        text = rest;
+
+        let trimmed = text.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("and ") {
+            text = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(", ") {
+            text = rest;
+            continue;
+        }
+        break;
+    }
+
+    (colors, text.trim_start())
+}
+
+fn strip_color_word(text: &str) -> Option<(Option<ManaColor>, &str)> {
+    for (word, color) in [
+        ("white", Some(ManaColor::White)),
+        ("blue", Some(ManaColor::Blue)),
+        ("black", Some(ManaColor::Black)),
+        ("red", Some(ManaColor::Red)),
+        ("green", Some(ManaColor::Green)),
+        ("colorless", None),
+    ] {
+        if let Some(rest) = text.strip_prefix(word) {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return Some((color, rest.trim_start()));
+            }
         }
     }
-    "Token".to_string()
+    None
+}
+
+fn split_token_head(text: &str) -> Option<(&str, &str)> {
+    let lower = text.to_lowercase();
+    let pos = lower.find(" token")?;
+    let head = text[..pos].trim();
+    let mut suffix = &text[pos + 6..];
+    if let Some(stripped) = suffix.strip_prefix('s') {
+        suffix = stripped;
+    }
+    if head.is_empty() {
+        return None;
+    }
+    Some((head, suffix.trim()))
+}
+
+fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
+    let trimmed = text.trim_start();
+    let Some(after_named) = trimmed.strip_prefix("named ") else {
+        return (None, trimmed);
+    };
+
+    let lower = after_named.to_lowercase();
+    let mut end = after_named.len();
+    for needle in [" with ", " attached ", ",", "."] {
+        if let Some(pos) = lower.find(needle) {
+            end = end.min(pos);
+        }
+    }
+
+    let name = after_named[..end].trim().trim_matches('"');
+    let rest = after_named[end..].trim_start();
+    if name.is_empty() {
+        (None, rest)
+    } else {
+        (Some(name.to_string()), rest)
+    }
+}
+
+fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+    let mut core_types = Vec::new();
+    let mut subtypes = Vec::new();
+
+    for word in descriptor.split_whitespace() {
+        match word.to_lowercase().as_str() {
+            "artifact" => push_unique_string(&mut core_types, "Artifact"),
+            "creature" => push_unique_string(&mut core_types, "Creature"),
+            "enchantment" => push_unique_string(&mut core_types, "Enchantment"),
+            "land" => push_unique_string(&mut core_types, "Land"),
+            "snow" | "legendary" | "basic" => {}
+            _ => subtypes.push(title_case_word(word)),
+        }
+    }
+
+    if core_types.is_empty() {
+        return known_named_token_identity(descriptor);
+    }
+
+    let name = if subtypes.is_empty() {
+        "Token".to_string()
+    } else {
+        subtypes.join(" ")
+    };
+
+    let mut types = core_types;
+    for subtype in subtypes {
+        push_unique_owned(&mut types, subtype);
+    }
+
+    Some((name, types))
+}
+
+fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+    let name = match descriptor.trim().to_lowercase().as_str() {
+        "treasure" => "Treasure",
+        "food" => "Food",
+        "clue" => "Clue",
+        "blood" => "Blood",
+        "map" => "Map",
+        "powerstone" => "Powerstone",
+        "junk" => "Junk",
+        "shard" => "Shard",
+        _ => return None,
+    };
+
+    Some((
+        name.to_string(),
+        vec!["Artifact".to_string(), name.to_string()],
+    ))
+}
+
+fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
+    let trimmed = text.trim_start();
+    let Some(after_with) = trimmed.strip_prefix("with ") else {
+        return Vec::new();
+    };
+
+    let raw_clause = after_with
+        .split('"')
+        .next()
+        .unwrap_or(after_with)
+        .split(" where ")
+        .next()
+        .unwrap_or(after_with)
+        .split(" attached ")
+        .next()
+        .unwrap_or(after_with)
+        .trim()
+        .trim_end_matches('.');
+
+    split_token_keyword_list(raw_clause)
+        .into_iter()
+        .filter_map(map_token_keyword)
+        .collect()
+}
+
+fn split_token_keyword_list(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    for chunk in text.split(", and ") {
+        for sub in chunk.split(" and ") {
+            for item in sub.split(", ") {
+                let trimmed = item.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                }
+            }
+        }
+    }
+    parts
+}
+
+fn map_token_keyword(text: &str) -> Option<Keyword> {
+    match Keyword::from_str(text.trim()) {
+        Ok(Keyword::Unknown(_)) => None,
+        Ok(keyword) => Some(keyword),
+        Err(_) => None,
+    }
+}
+
+fn title_case_word(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn push_unique_owned(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 /// Strip third-person 's' from the first word: "discards a card" → "discard a card".
@@ -565,22 +1175,108 @@ fn deconjugate_verb(text: &str) -> String {
     let first_space = text.find(' ').unwrap_or(text.len());
     let verb = &text[..first_space];
     let rest = &text[first_space..];
-    let base = if verb.ends_with('s') && !verb.ends_with("ss") {
-        &verb[..verb.len() - 1]
-    } else {
-        verb
-    };
+    let base = normalize_verb_token(verb);
     format!("{}{}", base, rest)
 }
 
-/// Find the byte offset of the verb after "each player/opponent" subjects.
-fn find_verb_after_subject(lower: &str) -> Option<usize> {
-    for prefix in &["each opponent ", "each player "] {
-        if lower.starts_with(prefix) {
-            return Some(prefix.len());
+fn starts_with_subject_prefix(lower: &str) -> bool {
+    [
+        "all ",
+        "each opponent ",
+        "each player ",
+        "enchanted ",
+        "equipped ",
+        "it ",
+        "its controller ",
+        "target ",
+        "that ",
+        "the chosen ",
+        "they ",
+        "this ",
+        "those ",
+        "you ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn find_predicate_start(text: &str) -> Option<usize> {
+    const VERBS: &[&str] = &[
+        "add",
+        "attack",
+        "become",
+        "can",
+        "cast",
+        "choose",
+        "copy",
+        "counter",
+        "create",
+        "deal",
+        "discard",
+        "draw",
+        "exile",
+        "explore",
+        "fight",
+        "gain",
+        "get",
+        "have",
+        "look",
+        "lose",
+        "mill",
+        "pay",
+        "put",
+        "regenerate",
+        "reveal",
+        "return",
+        "sacrifice",
+        "scry",
+        "search",
+        "shuffle",
+        "surveil",
+        "tap",
+        "transform",
+        "untap",
+    ];
+
+    let lower = text.to_lowercase();
+    let mut word_start = None;
+
+    for (idx, ch) in lower.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = word_start.take() {
+                let token = &lower[start..idx];
+                if VERBS.contains(&normalize_verb_token(token).as_str()) {
+                    return Some(start);
+                }
+            }
+            continue;
+        }
+
+        if word_start.is_none() {
+            word_start = Some(idx);
         }
     }
+
+    if let Some(start) = word_start {
+        let token = &lower[start..];
+        if VERBS.contains(&normalize_verb_token(token).as_str()) {
+            return Some(start);
+        }
+    }
+
     None
+}
+
+fn normalize_verb_token(token: &str) -> String {
+    let token = token.trim_matches(|c: char| !c.is_alphabetic());
+    match token {
+        "does" => "do".to_string(),
+        "has" => "have".to_string(),
+        "is" => "be".to_string(),
+        "copies" => "copy".to_string(),
+        _ if token.ends_with('s') && !token.ends_with("ss") => token[..token.len() - 1].to_string(),
+        _ => token.to_string(),
+    }
 }
 
 fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
@@ -828,6 +1524,110 @@ mod tests {
     }
 
     #[test]
+    fn effect_create_treasure_token() {
+        let e = parse_effect("Create a Treasure token");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                ref types,
+                power: 0,
+                toughness: 0,
+                count: 1,
+                ..
+            } if name == "Treasure" && types == &vec!["Artifact".to_string(), "Treasure".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_tapped_powerstone_token() {
+        let e = parse_effect("Create a tapped Powerstone token");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                tapped: true,
+                ..
+            } if name == "Powerstone"
+        ));
+    }
+
+    #[test]
+    fn effect_create_multicolor_artifact_creature_token() {
+        let e = parse_effect("Create a 2/1 white and black Inkling creature token with flying");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                power: 2,
+                toughness: 1,
+                ref colors,
+                ref keywords,
+                ..
+            } if name == "Inkling"
+                && colors == &vec![ManaColor::White, ManaColor::Black]
+                && keywords == &vec![Keyword::Flying]
+        ));
+    }
+
+    #[test]
+    fn effect_create_named_artifact_token() {
+        let e = parse_effect(
+            "Create a colorless artifact token named Etherium Cell with \"{T}, Sacrifice this token: Add one mana of any color.\"",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                ref types,
+                ..
+            } if name == "Etherium Cell" && types == &vec!["Artifact".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_attached_role_stays_unimplemented() {
+        let e = parse_effect("Create a Monster Role token attached to target creature you control");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented { ref name, .. } if name == "create"
+        ));
+    }
+
+    #[test]
+    fn effect_create_named_legendary_creature_token() {
+        let e = parse_effect("Create Voja, a legendary 2/2 green and white Wolf creature token");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                power: 2,
+                toughness: 2,
+                ref colors,
+                ref types,
+                ..
+            } if name == "Voja"
+                && colors == &vec![ManaColor::Green, ManaColor::White]
+                && types == &vec!["Creature".to_string(), "Wolf".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_named_legendary_artifact_token() {
+        let e = parse_effect(
+            "Create Tamiyo's Notebook, a legendary colorless artifact token with \"{T}: Draw a card.\"",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                ref types,
+                ..
+            } if name == "Tamiyo's Notebook" && types == &vec!["Artifact".to_string()]
+        ));
+    }
+
+    #[test]
     fn effect_that_creature_gets() {
         let e = parse_effect("That creature gets +1/+1 until end of turn");
         assert!(matches!(
@@ -835,6 +1635,143 @@ mod tests {
             Effect::Pump {
                 power: 1,
                 toughness: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_target_player_draws() {
+        let e = parse_effect("Target player draws a card");
+        assert!(matches!(e, Effect::Draw { count: 1 }));
+    }
+
+    #[test]
+    fn effect_this_creature_gets() {
+        let e = parse_effect("This creature gets +2/+2 until end of turn");
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: 2,
+                toughness: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_if_kicked_destroys() {
+        let e = parse_effect("if it was kicked, destroy target enchantment");
+        assert!(matches!(
+            e,
+            Effect::Destroy {
+                target: TargetFilter::Typed { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_target_creature_gains_keyword_uses_continuous_effect() {
+        let e = parse_effect("Target creature gains flying until end of turn");
+        assert!(matches!(
+            e,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_all_creatures_gain_keywords_uses_continuous_effect() {
+        let e = parse_effect("All creatures gain trample and haste until end of turn");
+        assert!(matches!(e, Effect::GenericEffect { target: None, .. }));
+    }
+
+    #[test]
+    fn effect_chain_preserves_leading_duration_prefix() {
+        let def = parse_effect_chain(
+            "Until end of turn, target creature gains flying",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        assert!(matches!(def.effect, Effect::GenericEffect { .. }));
+    }
+
+    #[test]
+    fn effect_deal_damage_all_imperative() {
+        let e = parse_effect("Deal 1 damage to each opponent");
+        assert!(matches!(
+            e,
+            Effect::DamageAll {
+                amount: DamageAmount::Fixed(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_deal_that_much_damage() {
+        let e = parse_effect("Deal that much damage to any target");
+        assert!(matches!(
+            e,
+            Effect::DealDamage {
+                amount: DamageAmount::Variable(ref value),
+                ..
+            } if value == "that much"
+        ));
+    }
+
+    #[test]
+    fn effect_deal_damage_equal_to_expression() {
+        let e = parse_effect("Deal damage equal to its power to any target");
+        assert!(matches!(
+            e,
+            Effect::DealDamage {
+                amount: DamageAmount::Variable(ref value),
+                ..
+            } if value == "its power"
+        ));
+    }
+
+    #[test]
+    fn effect_put_target_on_bottom_of_library() {
+        let e = parse_effect("Put target creature on the bottom of its owner's library");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_put_card_onto_battlefield() {
+        let e = parse_effect("Put a land card from your hand onto the battlefield");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_put_target_into_hand() {
+        let e = parse_effect("Put target nonland permanent into your hand");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
                 ..
             }
         ));
