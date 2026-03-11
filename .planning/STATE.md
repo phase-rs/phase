@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 29-15-PLAN.md
-last_updated: "2026-03-11T18:36:25.968Z"
+stopped_at: Completed 29-14-PLAN.md
+last_updated: "2026-03-11T18:37:00.658Z"
 last_activity: 2026-03-11 — Phase 29 Plan 15 complete (Remaining PlayerId(1-x) Migration)
 progress:
   total_phases: 9
@@ -69,6 +69,7 @@ Progress: [████████████████░░░░] 38/47 p
 | Phase 29 P05 | 3min | 1 tasks | 3 files |
 | Phase 29 P16 | 2min | 1 tasks | 0 files |
 | Phase 29 P15 | 4min | 2 tasks | 1 files |
+| Phase 29 P14 | 4min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -201,6 +202,7 @@ Recent decisions affecting current work:
 - [29-05]: opponent() removed from priority.rs (zero external callers in engine crate)
 - [Phase 29]: No code changes needed for Plan 16 — Plan 05 already eliminated all PlayerId(1-x) from effects modules
 - [Phase 29]: FormatConfig::standard() used for N-player scenario constructor (20 life default)
+- [Phase 29]: mill.rs was the only effects module with hardcoded 2-player opponent logic; replaced with players::next_player()
 
 ### Roadmap Evolution
 
@@ -218,6 +220,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:36:25.965Z
-Stopped at: Completed 29-15-PLAN.md
+Last session: 2026-03-11T18:37:00.655Z
+Stopped at: Completed 29-14-PLAN.md
 Resume file: None
