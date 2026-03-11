@@ -12,13 +12,15 @@ function createState(overrides: {
   stack?: unknown[];
   battlefield?: number[];
   objects?: Record<string, unknown>;
+  players?: unknown[];
   turn_number?: number;
 } = {}): GameState {
   return {
     phase: overrides.phase ?? "PreCombatMain",
     stack: overrides.stack ?? [],
     battlefield: overrides.battlefield ?? [],
-    objects: overrides.objects ?? {},
+    objects: overrides.objects ?? { 1: { id: 1 } },
+    players: overrides.players ?? [{ id: 0 }, { id: 1 }],
     turn_number: overrides.turn_number ?? 1,
   } as unknown as GameState;
 }
@@ -176,6 +178,21 @@ describe("shouldAutoPass", () => {
   it("does not auto-pass with empty legal actions array (actions not yet computed)", () => {
     expect(
       shouldAutoPass(createState(), priority(0), [], false, []),
+    ).toBe(false);
+  });
+
+  it("does not auto-pass with no objects in game state (invalid state)", () => {
+    const emptyState = createState({ objects: {} });
+    expect(
+      shouldAutoPass(emptyState, priority(0), [], false, PASS_ONLY),
+    ).toBe(false);
+  });
+
+  it("does not auto-pass with no players in game state (invalid state)", () => {
+    const state = createState();
+    (state as unknown as { players: unknown[] }).players = [];
+    expect(
+      shouldAutoPass(state, priority(0), [], false, PASS_ONLY),
     ).toBe(false);
   });
 

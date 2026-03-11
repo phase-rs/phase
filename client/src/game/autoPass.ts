@@ -23,6 +23,9 @@ export function shouldAutoPass(
   if (waitingFor.type !== "Priority") return false;
   if (waitingFor.data.player !== getPlayerId()) return false;
 
+  // Don't auto-pass an invalid/empty game state (e.g. no cards loaded yet)
+  if (state.players.length === 0 || Object.keys(state.objects).length === 0) return false;
+
   // Phase stops only gate initial priority (empty stack)
   if (state.stack.length === 0 && phaseStops.includes(state.phase)) return false;
 
