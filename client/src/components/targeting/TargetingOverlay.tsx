@@ -1,11 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect } from "react";
 
-import type { ObjectId, TargetRef } from "../../adapter/types.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { TargetArrow } from "./TargetArrow.tsx";
 
 export function TargetingOverlay() {
   const playerId = usePlayerId();
@@ -13,12 +12,8 @@ export function TargetingOverlay() {
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
   const targetingMode = useUiStore((s) => s.targetingMode);
-  const selectedTargets = useUiStore((s) => s.selectedTargets);
-  const sourceObjectId = useUiStore((s) => s.sourceObjectId);
   const startTargeting = useUiStore((s) => s.startTargeting);
   const clearTargets = useUiStore((s) => s.clearTargets);
-
-  const sourceRef = useRef<{ x: number; y: number } | null>(null);
 
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const pendingCast = waitingFor?.type === "TargetSelection" ? waitingFor.data.pending_cast : null;
@@ -29,7 +24,6 @@ export function TargetingOverlay() {
   useEffect(() => {
     if (!isTargetSelection || !gameState || !legalTargets) return;
 
-    // Extract object IDs from engine's legal targets (filter out Player refs)
     const validIds = legalTargets
       .filter((t): t is { Object: ObjectId } => "Object" in t)
       .map((t) => t.Object);
@@ -42,37 +36,10 @@ export function TargetingOverlay() {
     };
   }, [isTargetSelection, gameState, legalTargets, pendingCast, startTargeting, clearTargets]);
 
-  // Track source element position for arrow drawing
-  useEffect(() => {
-    if (!sourceObjectId) {
-      sourceRef.current = null;
-      return;
-    }
-    const el = document.querySelector(`[data-object-id="${sourceObjectId}"]`);
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      sourceRef.current = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    }
-  }, [sourceObjectId]);
-
-  const handleConfirm = useCallback(() => {
-    const targets: TargetRef[] = selectedTargets.map((id) => ({ Object: id }));
-    dispatch({ type: "SelectTargets", data: { targets } });
-    clearTargets();
-  }, [selectedTargets, dispatch, clearTargets]);
-
   const handleCancel = useCallback(() => {
     clearTargets();
     dispatch({ type: "CancelCast" });
   }, [clearTargets, dispatch]);
-
-  // Get target element positions for arrows
-  const getTargetPos = (objectId: ObjectId) => {
-    const el = document.querySelector(`[data-object-id="${objectId}"]`);
-    if (!el) return null;
-    const rect = el.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  };
 
   if (!targetingMode || !isTargetSelection) return null;
 
@@ -98,39 +65,17 @@ export function TargetingOverlay() {
           </div>
         </div>
 
-        {/* Action buttons (must be clickable) */}
-        <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
-          {selectedTargets.length > 0 && (
-            <button
-              onClick={handleConfirm}
-              className="rounded-lg bg-cyan-600 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-cyan-500"
-            >
-              Confirm Target
-            </button>
-          )}
-          {!isTriggerTargeting && (
+        {/* Cancel button (only for voluntary casts, not triggers) */}
+        {!isTriggerTargeting && (
+          <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
             >
               Cancel
             </button>
-          )}
-        </div>
-
-        {/* Arrows from source to selected targets */}
-        {sourceRef.current &&
-          selectedTargets.map((targetId) => {
-            const targetPos = getTargetPos(targetId);
-            if (!targetPos || !sourceRef.current) return null;
-            return (
-              <TargetArrow
-                key={targetId}
-                from={sourceRef.current}
-                to={targetPos}
-              />
-            );
-          })}
+          </div>
+        )}
       </motion.div>
     </AnimatePresence>
   );

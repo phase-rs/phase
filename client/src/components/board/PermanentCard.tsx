@@ -32,9 +32,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
   const targetingMode = useUiStore((s) => s.targetingMode);
-  const selectedTargets = useUiStore((s) => s.selectedTargets);
   const selectObject = useUiStore((s) => s.selectObject);
-  const addTarget = useUiStore((s) => s.addTarget);
+  const clearTargets = useUiStore((s) => s.clearTargets);
   const hoverObject = useUiStore((s) => s.hoverObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const combatMode = useUiStore((s) => s.combatMode);
@@ -82,7 +81,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  const isTarget = selectedTargets.includes(objectId);
   const isValidTarget = targetingMode && validTargetIds.includes(objectId);
 
   // Combat state — check both UI selection and committed combat state
@@ -102,9 +100,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   } else if (isBlocking) {
     glowClass =
       "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
-  } else if (isTarget) {
-    glowClass =
-      "ring-2 ring-cyan-400 shadow-[0_0_10px_2px_rgba(34,211,238,0.5)]";
   } else if (isValidTarget) {
     glowClass =
       "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
@@ -144,7 +139,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     } else if (combatMode === "blockers" && combatClickHandler) {
       combatClickHandler(objectId);
     } else if (targetingMode && isValidTarget) {
-      addTarget(objectId);
+      dispatchAction({ type: "SelectTargets", data: { targets: [{ Object: objectId }] } });
+      clearTargets();
     } else if (activatableAction) {
       dispatchAction(activatableAction);
     } else if (isUndoableTap) {
