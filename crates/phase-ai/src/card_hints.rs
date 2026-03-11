@@ -1,3 +1,4 @@
+use engine::game::players;
 use engine::types::ability::effect_variant_name;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -59,9 +60,9 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
                 .iter()
                 .any(|a| effect_variant_name(&a.effect) == "Counter");
 
-            // Removal: higher priority when opponent has high-value creatures
+            // Removal: higher priority when opponents have high-value creatures
             if has_destroy || has_damage {
-                let opponent = PlayerId(1 - player.0);
+                let opponents = players::opponents(state, player);
                 let max_threat = state
                     .battlefield
                     .iter()
@@ -70,7 +71,7 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
                             .objects
                             .get(&id)
                             .map(|o| {
-                                o.controller == opponent
+                                opponents.contains(&o.controller)
                                     && o.card_types.core_types.contains(&CoreType::Creature)
                             })
                             .unwrap_or(false)

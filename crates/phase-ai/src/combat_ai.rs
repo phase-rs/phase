@@ -1,3 +1,4 @@
+use engine::game::players;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -11,10 +12,15 @@ use crate::eval::evaluate_creature;
 /// Evaluates whether each attack is profitable based on creature values
 /// and likely blocker assignments. Aggressive when ahead on life.
 pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
-    let opponent = PlayerId(1 - player.0);
+    let opponents = players::opponents(state, player);
     let p_life = state.players[player.0 as usize].life;
-    let o_life = state.players[opponent.0 as usize].life;
-    let ahead_on_life = p_life > o_life;
+    // Compare against the most threatening opponent (lowest life = closest to lethal)
+    let min_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .min()
+        .unwrap_or(20);
+    let ahead_on_life = p_life > min_opp_life;
 
     let candidates: Vec<ObjectId> = state
         .battlefield
@@ -29,12 +35,13 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         })
         .collect();
 
+    // Collect blockers from ALL opponents
     let opponent_blockers: Vec<ObjectId> = state
         .battlefield
         .iter()
         .filter_map(|&id| {
             let obj = state.objects.get(&id)?;
-            if obj.controller == opponent
+            if opponents.contains(&obj.controller)
                 && obj.card_types.core_types.contains(&CoreType::Creature)
                 && !obj.tapped
             {

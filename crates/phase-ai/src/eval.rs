@@ -1,3 +1,4 @@
+use engine::game::players;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -43,36 +44,60 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
         };
     }
 
-    let opponent = PlayerId(1 - player.0);
+    let opponents = players::opponents(state, player);
     let p = &state.players[player.0 as usize];
-    let o = &state.players[opponent.0 as usize];
 
     // Check for lethal life totals
     if p.life <= 0 {
         return LOSS_SCORE;
     }
-    if o.life <= 0 {
+    // If any opponent is dead, that's good (but not an outright win unless all are)
+    let all_opponents_dead = !opponents.is_empty()
+        && opponents
+            .iter()
+            .all(|&opp| state.players[opp.0 as usize].life <= 0);
+    if all_opponents_dead {
         return WIN_SCORE;
     }
 
     let mut score = 0.0;
 
-    // Life differential
-    score += (p.life - o.life) as f64 * weights.life;
+    // Aggregate opponent stats across all living opponents
+    let mut total_opp_life = 0;
+    let mut total_opp_creatures = 0;
+    let mut total_opp_power = 0;
+    let mut total_opp_toughness = 0;
+    let mut total_opp_hand_size = 0;
+    for &opp in &opponents {
+        let o = &state.players[opp.0 as usize];
+        total_opp_life += o.life;
+        let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
+        total_opp_creatures += opp_creatures;
+        total_opp_power += opp_power;
+        total_opp_toughness += opp_toughness;
+        total_opp_hand_size += o.hand.len();
+    }
+
+    // Average opponent life for comparison (avoids inflating score in multiplayer)
+    let opp_count = opponents.len().max(1) as f64;
+    let avg_opp_life = total_opp_life as f64 / opp_count;
+
+    // Life differential (against average opponent)
+    score += (p.life as f64 - avg_opp_life) * weights.life;
 
     // Board stats
     let (my_creatures, my_power, my_toughness) = board_stats(state, player);
-    let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opponent);
 
-    score += (my_creatures - opp_creatures) as f64 * weights.board_presence;
-    score += (my_power - opp_power) as f64 * weights.board_power;
-    score += (my_toughness - opp_toughness) as f64 * weights.board_toughness;
+    score += (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
+    score += (my_power - total_opp_power) as f64 * weights.board_power;
+    score += (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
 
     // Hand size advantage
-    score += (p.hand.len() as f64 - o.hand.len() as f64) * weights.hand_size;
+    let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
+    score += (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
 
-    // Aggression bonus: reward attacking potential when ahead
-    if p.life > o.life && my_power > 0 {
+    // Aggression bonus: reward attacking potential when ahead on life
+    if p.life as f64 > avg_opp_life && my_power > 0 {
         score += my_power as f64 * weights.aggression;
     }
 

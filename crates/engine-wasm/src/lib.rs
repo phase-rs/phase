@@ -146,8 +146,9 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
 
 /// Get the AI's chosen action for the current game state.
 /// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
+/// `player_id` is the seat index of the AI player (0-based).
 #[wasm_bindgen]
-pub fn get_ai_action(difficulty: &str) -> Result<JsValue, JsValue> {
+pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
     let ai_difficulty = match difficulty {
         "VeryEasy" => AiDifficulty::VeryEasy,
         "Easy" => AiDifficulty::Easy,
@@ -165,8 +166,7 @@ pub fn get_ai_action(difficulty: &str) -> Result<JsValue, JsValue> {
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Game not initialized"))?;
 
-        // AI is always player 1
-        let ai_player = PlayerId(1);
+        let ai_player = PlayerId(player_id);
         let mut rng = rand::rng();
 
         match choose_action(state, ai_player, &config, &mut rng) {

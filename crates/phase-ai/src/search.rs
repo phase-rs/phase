@@ -113,12 +113,12 @@ pub fn choose_action(
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let selected = choose_attackers(state, ai_player);
         // Default target: first opponent
-        let default_target = state
-            .players
-            .iter()
-            .find(|p| p.id != ai_player && !state.eliminated_players.contains(&p.id))
-            .map(|p| AttackTarget::Player(p.id))
-            .unwrap_or(AttackTarget::Player(PlayerId(1 - ai_player.0)));
+        let default_target = engine::game::players::opponents(state, ai_player)
+            .first()
+            .map(|&opp| AttackTarget::Player(opp))
+            .unwrap_or(AttackTarget::Player(
+                engine::game::players::next_player(state, ai_player),
+            ));
         let attacks: Vec<_> = selected
             .into_iter()
             .map(|id| (id, default_target.clone()))

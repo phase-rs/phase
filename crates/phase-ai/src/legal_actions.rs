@@ -441,12 +441,12 @@ fn target_selection_actions(state: &GameState, player: PlayerId) -> Vec<GameActi
 
 fn attacker_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     // Determine the default attack target (first opponent)
-    let default_target = state
-        .players
-        .iter()
-        .find(|p| p.id != player && !state.eliminated_players.contains(&p.id))
-        .map(|p| AttackTarget::Player(p.id))
-        .unwrap_or(AttackTarget::Player(PlayerId(1 - player.0)));
+    let default_target = engine::game::players::opponents(state, player)
+        .first()
+        .map(|&opp| AttackTarget::Player(opp))
+        .unwrap_or(AttackTarget::Player(
+            engine::game::players::next_player(state, player),
+        ));
 
     // Always allow not attacking
     let mut actions = vec![GameAction::DeclareAttackers {
