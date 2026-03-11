@@ -274,6 +274,19 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                 Some(target)
             }
         }
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => {
+            if matches!(
+                target,
+                TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+            ) {
+                None
+            } else {
+                Some(target)
+            }
+        }
         _ => None,
     }
 }

@@ -12,6 +12,7 @@ const AUTO_PASS_BEAT_MS = 200;
 export interface GameLoopConfig {
   mode: "ai" | "online" | "local";
   difficulty?: string;
+  playerCount?: number;
 }
 
 export interface GameLoopController {
@@ -64,8 +65,11 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     active = true;
 
     if (config.mode === "ai") {
+      const count = config.playerCount ?? 2;
+      const playerIds = Array.from({ length: count - 1 }, (_, i) => i + 1);
       opponentController = createAIController({
         difficulty: config.difficulty ?? "Medium",
+        playerIds,
       });
       opponentController.start();
     }

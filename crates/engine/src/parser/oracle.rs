@@ -220,7 +220,7 @@ pub fn parse_oracle_text(
         }
 
         // Priority 14b: Try parsing as effect even for non-spells
-        if is_imperative_verb(&lower) {
+        if is_effect_sentence_candidate(&lower) {
             let def = parse_effect_chain(&line, AbilityKind::Spell);
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
@@ -671,9 +671,12 @@ fn is_keyword_cost_line(lower: &str) -> bool {
         "splice",
         "entwine",
     ];
-    keyword_costs
-        .iter()
-        .any(|kw| lower.starts_with(kw) && (lower.len() == kw.len() || lower.as_bytes().get(kw.len()) == Some(&b' ') || lower.as_bytes().get(kw.len()) == Some(&b'\t')))
+    keyword_costs.iter().any(|kw| {
+        lower.starts_with(kw)
+            && (lower.len() == kw.len()
+                || lower.as_bytes().get(kw.len()) == Some(&b' ')
+                || lower.as_bytes().get(kw.len()) == Some(&b'\t'))
+    })
 }
 
 /// Strip an "ability word — " prefix from a line.
@@ -710,9 +713,11 @@ fn has_unimplemented(def: &AbilityDefinition) -> bool {
     false
 }
 
-/// Check if a line starts with an imperative verb that `parse_effect` can handle.
-fn is_imperative_verb(lower: &str) -> bool {
-    let verbs = [
+/// Check if a line looks like an effect sentence that `parse_effect` can normalize.
+/// This mirrors the sentence-level shapes in the CubeArtisan grammar:
+/// conditionals, subject + verb phrases, and bare imperatives.
+fn is_effect_sentence_candidate(lower: &str) -> bool {
+    let imperative_prefixes = [
         "add ",
         "attach ",
         "counter ",
@@ -742,15 +747,17 @@ fn is_imperative_verb(lower: &str) -> bool {
         "surveil ",
         "tap ",
         "untap ",
-        "you gain ",
-        "you lose ",
-        "you draw ",
         "you may ",
-        "target ",
-        "it deals ",
-        "it gets ",
     ];
-    verbs.iter().any(|v| lower.starts_with(v))
+
+    let subject_prefixes = [
+        "all ", "if ", "it ", "target ", "that ", "they ", "this ", "those ", "you ",
+    ];
+
+    imperative_prefixes
+        .iter()
+        .chain(subject_prefixes.iter())
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 /// Create an Unimplemented fallback ability.
@@ -856,6 +863,32 @@ mod tests {
         // Enchant line skipped (priority 2)
         assert_eq!(r.statics.len(), 1);
         assert_eq!(r.triggers.len(), 1);
+    }
+
+    #[test]
+    fn non_spell_target_sentence_routes_to_effect_parser() {
+        let r = parse(
+            "Target player draws a card.",
+            "Test Permanent",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+    }
+
+    #[test]
+    fn non_spell_conditional_sentence_routes_to_effect_parser() {
+        let r = parse(
+            "If you sacrificed a Food this turn, draw a card.",
+            "Test Permanent",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
     }
 
     #[test]

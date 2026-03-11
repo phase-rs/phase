@@ -9,10 +9,10 @@ use wasm_bindgen::prelude::*;
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList};
+use engine::types::format::FormatConfig;
 use engine::types::{
     GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone,
 };
-use engine::types::format::FormatConfig;
 
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
@@ -79,7 +79,16 @@ pub fn initialize_game(
         if let Ok(deck_list) = serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
             CARD_DB.with(|cell| {
                 if let Some(db) = cell.borrow().as_ref() {
-                    let payload = resolve_deck_list(db, &deck_list);
+                    let mut payload = resolve_deck_list(db, &deck_list);
+
+                    // When player_count > 2 and no explicit AI decks provided,
+                    // replicate the opponent deck for all additional AI players.
+                    if count > 2 && payload.ai_decks.is_empty() {
+                        for _ in 2..count {
+                            payload.ai_decks.push(payload.opponent_deck.clone());
+                        }
+                    }
+
                     load_deck_into_state(&mut state, &payload);
                 }
             });

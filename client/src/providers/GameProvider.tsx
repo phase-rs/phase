@@ -327,7 +327,7 @@ export function GameProvider({
     if (savedState) {
       resumeGame(gameId, adapter, savedState).then(() => {
         if (cancelled) return;
-        controller = createGameLoopController({ mode, difficulty });
+        controller = createGameLoopController({ mode, difficulty, playerCount });
         controller.start();
         audioManager.startMusic();
       });
@@ -355,7 +355,7 @@ export function GameProvider({
         onCardDataMissingRef.current?.();
       }
 
-      controller = createGameLoopController({ mode, difficulty });
+      controller = createGameLoopController({ mode, difficulty, playerCount });
       controller.start();
       audioManager.startMusic();
     });

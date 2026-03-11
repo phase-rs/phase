@@ -194,6 +194,7 @@ impl SessionManager {
             let payload = DeckPayload {
                 player_deck,
                 opponent_deck,
+                ai_decks: vec![],
             };
             load_deck_into_state(&mut session.state, &payload);
 

@@ -131,6 +131,10 @@ fn extract_target_filter_string(effect: &crate::types::ability::Effect) -> Strin
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::CopySpell { target, .. } => target,
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => target,
         _ => return "Any".to_string(),
     };
     match target {

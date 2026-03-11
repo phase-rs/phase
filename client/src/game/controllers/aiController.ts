@@ -1,10 +1,11 @@
-import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, AI_PLAYER_ID } from "../../constants/game";
+import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
 import { dispatchAction } from "../dispatch";
 import type { OpponentController } from "./types";
 
 export interface AIControllerConfig {
   difficulty: string;
+  playerIds: number[];
 }
 
 export interface AIController extends OpponentController {
@@ -19,6 +20,8 @@ export function createAIController(config: AIControllerConfig): AIController {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
 
+  const aiPlayerIds = new Set(config.playerIds);
+
   function checkAndSchedule() {
     if (!active || pending) return;
 
@@ -31,14 +34,14 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Game over -- stop scheduling
     if (waitingFor.type === "GameOver") return;
 
-    // Check if it's the AI's turn (player 1)
+    // Check if it's an AI player's turn
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
-    if (waitingFor.data.player !== AI_PLAYER_ID) return;
+    if (!aiPlayerIds.has(waitingFor.data.player)) return;
 
-    scheduleAction();
+    scheduleAction(waitingFor.data.player);
   }
 
-  function scheduleAction() {
+  function scheduleAction(playerId: number) {
     if (pending) return;
     pending = true;
 
@@ -50,7 +53,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           pending = false;
           return;
         }
-        const action = await adapter.getAiAction(config.difficulty, AI_PLAYER_ID);
+        const action = await adapter.getAiAction(config.difficulty, playerId);
         if (action == null) {
           pending = false;
           return;

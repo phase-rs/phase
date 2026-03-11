@@ -17,7 +17,6 @@ export function GameBoard() {
 
   // Track which opponent is focused (expanded) in multiplayer
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
-  const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
 
   // Compute live opponents from seat order
   const opponents = useMemo(() => {
@@ -89,29 +88,17 @@ export function GameBoard() {
           mode="focused"
         />
       ) : (
-        // Multiplayer: compact strips + optional focused battlefield
-        // Wrapper takes flex-1 so opponent half always occupies its share of the board
+        // Multiplayer: focused opponent battlefield (selection via OpponentHud tabs)
         <div className="flex min-h-0 flex-1 flex-col">
-          {/* Compact opponent strips — fixed height, floats above focused area */}
-          <div className="relative z-20 flex shrink-0 gap-2 overflow-x-auto px-2 py-1">
-            {opponents.map((opId) => (
-              <PlayerArea
-                key={opId}
-                playerId={opId}
-                mode="compact"
-                isActive={focusedOpponent === opId}
-                onFocus={() =>
-                  setFocusedOpponent(focusedOpponent === opId ? null : opId)
-                }
-              />
-            ))}
-          </div>
-          {/* Focused opponent expanded battlefield */}
-          {focusedOpponent != null && opponents.includes(focusedOpponent) && (
+          {focusedOpponent != null && opponents.includes(focusedOpponent) ? (
             <PlayerArea
               playerId={focusedOpponent}
               mode="focused"
             />
+          ) : (
+            <div className="flex flex-1 items-center justify-center">
+              <span className="text-xs text-gray-600">Click an opponent to view their board</span>
+            </div>
           )}
         </div>
       )}

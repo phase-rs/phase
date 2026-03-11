@@ -24,6 +24,8 @@ pub struct DeckEntry {
 pub struct DeckPayload {
     pub player_deck: Vec<DeckEntry>,
     pub opponent_deck: Vec<DeckEntry>,
+    #[serde(default)]
+    pub ai_decks: Vec<Vec<DeckEntry>>,
 }
 
 /// Lightweight deck format using card names only.
@@ -32,6 +34,8 @@ pub struct DeckPayload {
 pub struct DeckList {
     pub player_deck: Vec<String>,
     pub opponent_deck: Vec<String>,
+    #[serde(default)]
+    pub ai_decks: Vec<Vec<String>>,
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
@@ -59,6 +63,11 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
         player_deck: resolve_names(db, &list.player_deck),
         opponent_deck: resolve_names(db, &list.opponent_deck),
+        ai_decks: list
+            .ai_decks
+            .iter()
+            .map(|names| resolve_names(db, names))
+            .collect(),
     }
 }
 
@@ -239,6 +248,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     for entry in &payload.opponent_deck {
         for _ in 0..entry.count {
             create_object_from_card_face(state, &entry.card, PlayerId(1));
+        }
+    }
+
+    // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        let player_id = PlayerId((2 + i) as u8);
+        for entry in ai_deck {
+            for _ in 0..entry.count {
+                create_object_from_card_face(state, &entry.card, player_id);
+            }
         }
     }
 
@@ -431,6 +450,7 @@ mod tests {
                 card: make_creature_face(),
                 count: 3,
             }],
+            ai_decks: vec![],
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -458,6 +478,7 @@ mod tests {
         let payload = DeckPayload {
             player_deck: entries,
             opponent_deck: vec![],
+            ai_decks: vec![],
         };
         load_deck_into_state(&mut state, &payload);
 
@@ -590,6 +611,7 @@ mod tests {
                 count: 4,
             }],
             opponent_deck: vec![],
+            ai_decks: vec![],
         };
         let json = serde_json::to_string(&payload).unwrap();
         let deserialized: DeckPayload = serde_json::from_str(&json).unwrap();
