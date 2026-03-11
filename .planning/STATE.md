@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 26-03-PLAN.md
-last_updated: "2026-03-11T01:57:20.015Z"
-last_activity: 2026-03-11 — Completed Plan 26-03 (Frontend Lobby UI)
+stopped_at: Completed 26-06-PLAN.md
+last_updated: "2026-03-11T02:02:59.301Z"
+last_activity: 2026-03-11 — Completed Plan 26-06 (In-Game Multiplayer UX)
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 21
-  completed_plans: 19
-  percent: 50
+  completed_plans: 20
+  percent: 95
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 ## Current Position
 
 Phase: 26 (sixth of 6) — Polish & Fix Multi-player with Lobby and Embedded Server
-Plan: 4/6 complete
+Plan: 5/6 complete
 Status: In Progress
-Last activity: 2026-03-11 — Completed Plan 26-03 (Frontend Lobby UI)
+Last activity: 2026-03-11 — Completed Plan 26-06 (In-Game Multiplayer UX)
 
-Progress: [█████████░] 90%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -48,10 +48,11 @@ Progress: [█████████░] 90%
 | 23 | 2/2 | 18min | 9min |
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
-| 26 | 4/6 | 20min | 5min |
+| 26 | 5/6 | 28min | 6min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
 | Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
+| Phase 26 P06 | 8min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -126,6 +127,9 @@ Recent decisions affecting current work:
 - [26-03]: Lobby uses its own raw WebSocket connection, separate from in-game WebSocketAdapter
 - [26-03]: Timer options presented as button group (None/30s/60s/120s) rather than free-form input
 - [26-03]: Password modal inline in LobbyView rather than separate route
+- [26-06]: Emote auto-fade uses 3s timeout with unique numeric IDs for overlap handling
+- [26-06]: Game duration tracked from gameStartedAt timestamp set on GameStarted event
+- [26-06]: Back to Lobby navigates to /?view=lobby for lobby return after game over
 
 ### Roadmap Evolution
 
@@ -141,6 +145,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T01:57:20Z
-Stopped at: Completed 26-03-PLAN.md
+Last session: 2026-03-11T02:03:00Z
+Stopped at: Completed 26-06-PLAN.md
 Resume file: None

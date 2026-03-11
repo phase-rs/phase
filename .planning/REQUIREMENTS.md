@@ -80,10 +80,10 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### In-Game UX
 
-- [ ] **MP-CONCEDE**: Player can concede via game menu with confirmation dialog
-- [ ] **MP-EMOTE**: Quick emotes (MTGA-style pre-set messages) can be sent and received with temporary overlay display
-- [ ] **MP-TIMER-UI**: Per-turn timer countdown displayed near active player HUD when timer is configured
-- [ ] **MP-GAMEOVER**: Game over screen shows correct winner for both players, total turns, duration, and Back to Lobby button
+- [x] **MP-CONCEDE**: Player can concede via game menu with confirmation dialog
+- [x] **MP-EMOTE**: Quick emotes (MTGA-style pre-set messages) can be sent and received with temporary overlay display
+- [x] **MP-TIMER-UI**: Per-turn timer countdown displayed near active player HUD when timer is configured
+- [x] **MP-GAMEOVER**: Game over screen shows correct winner for both players, total turns, duration, and Back to Lobby button
 - [x] **MP-OPPONENT-NAME**: Opponent display name shown near their life total during gameplay
 
 ## Future Requirements
