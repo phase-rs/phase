@@ -32,6 +32,21 @@ struct ScoredAction {
     score: f64,
 }
 
+/// Filter actions by testing each against the engine.
+/// Any action the engine rejects is dropped before scoring.
+fn validate_actions(state: &GameState, actions: Vec<GameAction>) -> Vec<GameAction> {
+    actions
+        .into_iter()
+        .filter(|action| match action {
+            GameAction::PassPriority => true,
+            _ => {
+                let mut sim = state.clone();
+                apply(&mut sim, action.clone()).is_ok()
+            }
+        })
+        .collect()
+}
+
 /// Choose the best action for the AI player given the current game state.
 ///
 /// - For 0 or 1 legal actions, returns immediately.
@@ -44,7 +59,7 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
-    let actions = get_legal_actions(state);
+    let actions = validate_actions(state, get_legal_actions(state));
 
     if actions.is_empty() {
         return None;
