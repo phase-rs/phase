@@ -4,11 +4,12 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import type { ObjectId } from "../../adapter/types.ts";
-import { buildAttacks } from "../../utils/combat.ts";
+import type { AttackTarget, ObjectId } from "../../adapter/types.ts";
+import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
 import { AttackerControls } from "./AttackerControls.tsx";
 import { BlockerControls } from "./BlockerControls.tsx";
 import { BlockerArrow } from "./BlockerArrow.tsx";
+import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
 
 interface CombatOverlayProps {
   mode: "attackers" | "blockers";
@@ -37,6 +38,11 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
 
   // Blocker mode: track which blocker is pending assignment
   const [pendingBlocker, setPendingBlocker] = useState<ObjectId | null>(null);
+
+  // Attack target picker for multiplayer
+  const [showTargetPicker, setShowTargetPicker] = useState(false);
+  const isMultiTarget = hasMultipleAttackTargets(gameState);
+  const validAttackTargets = getValidAttackTargets(gameState);
 
   useEffect(() => {
     setCombatMode(mode);
@@ -98,12 +104,25 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   }, [dispatch, clearCombatSelection]);
 
   const handleConfirmAttackers = useCallback(() => {
+    if (isMultiTarget) {
+      setShowTargetPicker(true);
+      return;
+    }
     dispatch({
       type: "DeclareAttackers",
       data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
     });
     clearCombatSelection();
-  }, [dispatch, selectedAttackers, clearCombatSelection]);
+  }, [dispatch, selectedAttackers, clearCombatSelection, isMultiTarget, gameState, playerId]);
+
+  const handleTargetPickerConfirm = useCallback(
+    (attacks: [ObjectId, AttackTarget][]) => {
+      setShowTargetPicker(false);
+      dispatch({ type: "DeclareAttackers", data: { attacks } });
+      clearCombatSelection();
+    },
+    [dispatch, clearCombatSelection],
+  );
 
   // Blocker handler
   const handleConfirmBlockers = useCallback(() => {
@@ -118,12 +137,22 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
 
   if (mode === "attackers") {
     return (
-      <AttackerControls
-        onAttackAll={handleAttackAll}
-        onSkip={handleSkip}
-        onConfirm={handleConfirmAttackers}
-        attackerCount={selectedAttackers.length}
-      />
+      <>
+        <AttackerControls
+          onAttackAll={handleAttackAll}
+          onSkip={handleSkip}
+          onConfirm={handleConfirmAttackers}
+          attackerCount={selectedAttackers.length}
+        />
+        {showTargetPicker && (
+          <AttackTargetPicker
+            validTargets={validAttackTargets}
+            selectedAttackers={selectedAttackers}
+            onConfirm={handleTargetPickerConfirm}
+            onCancel={() => setShowTargetPicker(false)}
+          />
+        )}
+      </>
     );
   }
 

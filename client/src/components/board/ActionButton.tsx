@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
+import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { buildAttacks } from "../../utils/combat.ts";
+import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
 
 type ActionButtonMode =
   | "combat-attackers"
@@ -78,6 +79,11 @@ export function ActionButton() {
 
   // Pending blocker for two-click assignment
   const [pendingBlocker, setPendingBlocker] = useState<ObjectId | null>(null);
+
+  // Attack target picker visibility (multiplayer)
+  const [showTargetPicker, setShowTargetPicker] = useState(false);
+  const isMultiTarget = hasMultipleAttackTargets(gameState);
+  const validAttackTargets = getValidAttackTargets(gameState);
 
   // Resolve All ref
   const resolveAllRef = useRef(false);
@@ -191,10 +197,19 @@ export function ActionButton() {
   }
 
   function handleConfirmAttackers() {
+    if (isMultiTarget) {
+      setShowTargetPicker(true);
+      return;
+    }
     dispatchAction({
       type: "DeclareAttackers",
       data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
     });
+  }
+
+  function handleTargetPickerConfirm(attacks: [ObjectId, AttackTarget][]) {
+    setShowTargetPicker(false);
+    dispatchAction({ type: "DeclareAttackers", data: { attacks } });
   }
 
   function handleConfirmBlockers() {
@@ -396,6 +411,15 @@ export function ActionButton() {
             </button>
           )}
         </motion.div>
+      )}
+
+      {showTargetPicker && (
+        <AttackTargetPicker
+          validTargets={validAttackTargets}
+          selectedAttackers={selectedAttackers}
+          onConfirm={handleTargetPickerConfirm}
+          onCancel={() => setShowTargetPicker(false)}
+        />
       )}
     </AnimatePresence>
   );
