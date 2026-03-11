@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 29 — Plan 15 of 16 complete
+Phase: 29 — Plan 09 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 15 complete (Remaining PlayerId(1-x) Migration)
+Last activity: 2026-03-11 — Phase 29 Plan 09 complete (AI N-Player Threat Evaluation and Scaled Search)
 
 Progress: [████████████████░░░░] 38/47 plans (81%)
 
@@ -203,6 +203,11 @@ Recent decisions affecting current work:
 - [Phase 29]: No code changes needed for Plan 16 — Plan 05 already eliminated all PlayerId(1-x) from effects modules
 - [Phase 29]: FormatConfig::standard() used for N-player scenario constructor (20 life default)
 - [Phase 29]: mill.rs was the only effects module with hardcoded 2-player opponent logic; replaced with players::next_player()
+- [29-09]: threat_level() uses weighted combination: board 40%, life 20%, hand 15%, commander damage 25%
+- [29-09]: Multiplayer eval uses threat-weighted opponent scoring; 2-player retains original averaging path
+- [29-09]: choose_attackers_with_targets() as primary API; choose_attackers() backward-compat wrapper
+- [29-09]: Alpha-strike detection allocates smallest attackers first to just exceed lethal threshold
+- [29-09]: create_config_for_players() applies player-count scaling on top of platform scaling
 
 ### Roadmap Evolution
 
@@ -220,6 +225,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:37:00.655Z
-Stopped at: Completed 29-14-PLAN.md
-Resume file: None
+Last session: 2026-03-11T18:38:31Z
+Stopped at: Completed 29-09-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-10-PLAN.md
