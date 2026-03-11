@@ -1,17 +1,201 @@
-use std::collections::HashMap;
-use std::str::FromStr;
-
-use crate::types::ability::{
-    AbilityDefinition, AbilityKind, DamageAmount, Effect, ReplacementDefinition, StaticDefinition,
-    TargetSpec, TriggerDefinition,
-};
-use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
-use crate::types::triggers::TriggerMode;
+use crate::types::ability::TargetSpec;
 
 use super::ParseError;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cost parsing (always available — used by JSON ability loading path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Split a cost string into components, splitting on spaces but respecting angle bracket nesting.
+/// E.g. `"R Sac<1/CARDNAME>"` -> `["R", "Sac<1/CARDNAME>"]`
+fn split_cost_components(cost_str: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+
+    for ch in cost_str.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ' ' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    components.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        components.push(trimmed);
+    }
+    components
+}
+
+/// Try to parse a loyalty cost component.
+/// `"AddCounter<N/LOYALTY>"` -> `Some(N)`, `"SubCounter<N/LOYALTY>"` -> `Some(-N)`
+fn parse_loyalty(s: &str) -> Option<i32> {
+    if let Some(rest) = s.strip_prefix("AddCounter<") {
+        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
+            return num_str.parse::<i32>().ok();
+        }
+    }
+    if let Some(rest) = s.strip_prefix("SubCounter<") {
+        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
+            return num_str.parse::<i32>().ok().map(|n| -n);
+        }
+    }
+    None
+}
+
+/// Parse a single cost component into an AbilityCost.
+fn parse_single_cost(comp: &str) -> crate::types::ability::AbilityCost {
+    use crate::types::ability::AbilityCost;
+
+    // Tap
+    if comp == "T" {
+        return AbilityCost::Tap;
+    }
+    // Untap (Q is the Forge untap symbol)
+    if comp == "Untap" || comp == "Q" {
+        return AbilityCost::Tap;
+    }
+    // Loyalty
+    if let Some(amount) = parse_loyalty(comp) {
+        return AbilityCost::Loyalty { amount };
+    }
+    // Sacrifice: Sac<...>
+    if comp.starts_with("Sac<") {
+        return AbilityCost::Sacrifice {
+            target: TargetSpec::None,
+        };
+    }
+    // Known mana symbols: single digits, color letters, hybrid (e.g. "WB"), X
+    // Anything simple and alphanumeric that looks like mana
+    if is_mana_component(comp) {
+        return AbilityCost::Mana {
+            cost: comp.to_string(),
+        };
+    }
+    // Unknown: preserve as Mana fallback to retain data
+    AbilityCost::Mana {
+        cost: comp.to_string(),
+    }
+}
+
+/// Heuristic: returns true if a cost component looks like a mana symbol.
+/// Mana components are purely alphanumeric (digits, color letters, hybrid symbols like "WB", "X").
+fn is_mana_component(comp: &str) -> bool {
+    !comp.is_empty() && comp.chars().all(|c| c.is_alphanumeric())
+}
+
+/// Parse a Forge `Cost$` string into a typed `AbilityCost`.
+///
+/// Handles:
+/// - `"T"` -> Tap
+/// - `"AddCounter<N/LOYALTY>"` / `"SubCounter<N/LOYALTY>"` -> Loyalty
+/// - `"Sac<...>"` -> Sacrifice
+/// - Mana symbols like `"3"`, `"W"`, `"3 W"` -> Mana
+/// - Composite costs like `"R Sac<1/CARDNAME>"` -> Composite
+/// - `"Untap"` / `"Q"` -> Tap (reuse)
+/// - Unknown components -> Mana fallback to preserve data
+/// - `"True"` (free cost) -> None
+pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> {
+    use crate::types::ability::AbilityCost;
+
+    let cost_str = cost_str.trim();
+    if cost_str.is_empty() || cost_str == "True" {
+        return None;
+    }
+
+    // Single-component fast paths
+    if cost_str == "T" {
+        return Some(AbilityCost::Tap);
+    }
+    if let Some(amount) = parse_loyalty(cost_str) {
+        return Some(AbilityCost::Loyalty { amount });
+    }
+
+    // Split into components
+    let components = split_cost_components(cost_str);
+    if components.len() == 1 {
+        return Some(parse_single_cost(&components[0]));
+    }
+
+    // Multiple components: group mana parts together, other costs separate
+    let mut costs: Vec<AbilityCost> = Vec::new();
+    let mut mana_parts: Vec<String> = Vec::new();
+
+    for comp in &components {
+        if comp == "T" || comp == "Untap" || comp == "Q" {
+            costs.push(AbilityCost::Tap);
+        } else if let Some(amount) = parse_loyalty(comp) {
+            costs.push(AbilityCost::Loyalty { amount });
+        } else if comp.starts_with("Sac<") {
+            costs.push(AbilityCost::Sacrifice {
+                target: TargetSpec::None,
+            });
+        } else if is_mana_component(comp) {
+            mana_parts.push(comp.clone());
+        } else {
+            // Unknown non-mana component (e.g. PayLife<2>, Discard<1/Card>, tapXType<...>)
+            // Preserve as Mana fallback
+            costs.push(AbilityCost::Mana { cost: comp.clone() });
+        }
+    }
+
+    // Consolidate mana parts into a single Mana cost at the front
+    if !mana_parts.is_empty() {
+        costs.insert(
+            0,
+            AbilityCost::Mana {
+                cost: mana_parts.join(" "),
+            },
+        );
+    }
+
+    match costs.len() {
+        0 => None,
+        1 => Some(costs.into_iter().next().unwrap()),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Forge string parser (gated behind forge-compat feature)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "forge-compat")]
+use std::collections::HashMap;
+
+#[cfg(feature = "forge-compat")]
+use std::str::FromStr;
+
+#[cfg(feature = "forge-compat")]
+use crate::types::ability::{
+    AbilityDefinition, AbilityKind, DamageAmount, Effect, ReplacementDefinition, StaticDefinition,
+    TriggerDefinition,
+};
+
+#[cfg(feature = "forge-compat")]
+use crate::types::replacements::ReplacementEvent;
+
+#[cfg(feature = "forge-compat")]
+use crate::types::statics::StaticMode;
+
+#[cfg(feature = "forge-compat")]
+use crate::types::triggers::TriggerMode;
+
 /// Splits a pipe-delimited string into key-value pairs separated by `$`.
+#[cfg(feature = "forge-compat")]
 fn parse_params(raw: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
     for part in raw.split('|') {
@@ -24,6 +208,7 @@ fn parse_params(raw: &str) -> HashMap<String, String> {
 }
 
 /// Parse a TargetSpec from the ValidTgts parameter value.
+#[cfg(feature = "forge-compat")]
 fn parse_target_spec(value: &str) -> TargetSpec {
     match value {
         "Any" => TargetSpec::Any,
@@ -37,6 +222,7 @@ fn parse_target_spec(value: &str) -> TargetSpec {
 }
 
 /// Convert an api_type string and params into a typed Effect enum.
+#[cfg(feature = "forge-compat")]
 fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Effect {
     match api_type {
         "DealDamage" => {
@@ -442,169 +628,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
     }
 }
 
-/// Split a cost string into components, splitting on spaces but respecting angle bracket nesting.
-/// E.g. `"R Sac<1/CARDNAME>"` -> `["R", "Sac<1/CARDNAME>"]`
-fn split_cost_components(cost_str: &str) -> Vec<String> {
-    let mut components = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0u32;
-
-    for ch in cost_str.chars() {
-        match ch {
-            '<' => {
-                depth += 1;
-                current.push(ch);
-            }
-            '>' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ' ' if depth == 0 => {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    components.push(trimmed);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        components.push(trimmed);
-    }
-    components
-}
-
-/// Try to parse a loyalty cost component.
-/// `"AddCounter<N/LOYALTY>"` -> `Some(N)`, `"SubCounter<N/LOYALTY>"` -> `Some(-N)`
-fn parse_loyalty(s: &str) -> Option<i32> {
-    if let Some(rest) = s.strip_prefix("AddCounter<") {
-        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
-            return num_str.parse::<i32>().ok();
-        }
-    }
-    if let Some(rest) = s.strip_prefix("SubCounter<") {
-        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
-            return num_str.parse::<i32>().ok().map(|n| -n);
-        }
-    }
-    None
-}
-
-/// Parse a single cost component into an AbilityCost.
-fn parse_single_cost(comp: &str) -> crate::types::ability::AbilityCost {
-    use crate::types::ability::AbilityCost;
-
-    // Tap
-    if comp == "T" {
-        return AbilityCost::Tap;
-    }
-    // Untap (Q is the Forge untap symbol)
-    if comp == "Untap" || comp == "Q" {
-        return AbilityCost::Tap;
-    }
-    // Loyalty
-    if let Some(amount) = parse_loyalty(comp) {
-        return AbilityCost::Loyalty { amount };
-    }
-    // Sacrifice: Sac<...>
-    if comp.starts_with("Sac<") {
-        return AbilityCost::Sacrifice {
-            target: TargetSpec::None,
-        };
-    }
-    // Known mana symbols: single digits, color letters, hybrid (e.g. "WB"), X
-    // Anything simple and alphanumeric that looks like mana
-    if is_mana_component(comp) {
-        return AbilityCost::Mana {
-            cost: comp.to_string(),
-        };
-    }
-    // Unknown: preserve as Mana fallback to retain data (matches Effect::Other pattern)
-    AbilityCost::Mana {
-        cost: comp.to_string(),
-    }
-}
-
-/// Heuristic: returns true if a cost component looks like a mana symbol.
-/// Mana components are purely alphanumeric (digits, color letters, hybrid symbols like "WB", "X").
-fn is_mana_component(comp: &str) -> bool {
-    !comp.is_empty() && comp.chars().all(|c| c.is_alphanumeric())
-}
-
-/// Parse a Forge `Cost$` string into a typed `AbilityCost`.
-///
-/// Handles:
-/// - `"T"` -> Tap
-/// - `"AddCounter<N/LOYALTY>"` / `"SubCounter<N/LOYALTY>"` -> Loyalty
-/// - `"Sac<...>"` -> Sacrifice
-/// - Mana symbols like `"3"`, `"W"`, `"3 W"` -> Mana
-/// - Composite costs like `"R Sac<1/CARDNAME>"` -> Composite
-/// - `"Untap"` / `"Q"` -> Tap (reuse)
-/// - Unknown components -> Mana fallback to preserve data
-/// - `"True"` (free cost) -> None
-pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> {
-    use crate::types::ability::AbilityCost;
-
-    let cost_str = cost_str.trim();
-    if cost_str.is_empty() || cost_str == "True" {
-        return None;
-    }
-
-    // Single-component fast paths
-    if cost_str == "T" {
-        return Some(AbilityCost::Tap);
-    }
-    if let Some(amount) = parse_loyalty(cost_str) {
-        return Some(AbilityCost::Loyalty { amount });
-    }
-
-    // Split into components
-    let components = split_cost_components(cost_str);
-    if components.len() == 1 {
-        return Some(parse_single_cost(&components[0]));
-    }
-
-    // Multiple components: group mana parts together, other costs separate
-    let mut costs: Vec<AbilityCost> = Vec::new();
-    let mut mana_parts: Vec<String> = Vec::new();
-
-    for comp in &components {
-        if comp == "T" || comp == "Untap" || comp == "Q" {
-            costs.push(AbilityCost::Tap);
-        } else if let Some(amount) = parse_loyalty(comp) {
-            costs.push(AbilityCost::Loyalty { amount });
-        } else if comp.starts_with("Sac<") {
-            costs.push(AbilityCost::Sacrifice {
-                target: TargetSpec::None,
-            });
-        } else if is_mana_component(comp) {
-            mana_parts.push(comp.clone());
-        } else {
-            // Unknown non-mana component (e.g. PayLife<2>, Discard<1/Card>, tapXType<...>)
-            // Preserve as Mana fallback
-            costs.push(AbilityCost::Mana { cost: comp.clone() });
-        }
-    }
-
-    // Consolidate mana parts into a single Mana cost at the front
-    if !mana_parts.is_empty() {
-        costs.insert(
-            0,
-            AbilityCost::Mana {
-                cost: mana_parts.join(" "),
-            },
-        );
-    }
-
-    match costs.len() {
-        0 => None,
-        1 => Some(costs.into_iter().next().unwrap()),
-        _ => Some(AbilityCost::Composite { costs }),
-    }
-}
-
+#[cfg(feature = "forge-compat")]
 pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
     let mut params = parse_params(raw);
     let mut kind = None;
@@ -645,6 +669,7 @@ pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
     })
 }
 
+#[cfg(feature = "forge-compat")]
 pub fn parse_trigger(raw: &str) -> Result<TriggerDefinition, ParseError> {
     let mut params = parse_params(raw);
     let mode_str = params
@@ -654,6 +679,7 @@ pub fn parse_trigger(raw: &str) -> Result<TriggerDefinition, ParseError> {
     Ok(TriggerDefinition { mode, params })
 }
 
+#[cfg(feature = "forge-compat")]
 pub fn parse_static(raw: &str) -> Result<StaticDefinition, ParseError> {
     let mut params = parse_params(raw);
     let mode_str = params
@@ -663,6 +689,7 @@ pub fn parse_static(raw: &str) -> Result<StaticDefinition, ParseError> {
     Ok(StaticDefinition { mode, params })
 }
 
+#[cfg(feature = "forge-compat")]
 pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError> {
     let mut params = parse_params(raw);
     let event_str = params
@@ -673,126 +700,13 @@ pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError>
     Ok(ReplacementDefinition { event, params })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: cost parsing (always available)
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
-mod tests {
-    use crate::types::ability::{effect_variant_name, AbilityKind};
-
+mod cost_tests {
     use super::*;
-
-    #[test]
-    fn parse_spell_ability() {
-        let result = parse_ability("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3").unwrap();
-        assert_eq!(result.kind, AbilityKind::Spell);
-        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
-        let params = result.effect.to_params();
-        assert_eq!(params.get("ValidTgts").unwrap(), "Any");
-        assert_eq!(params.get("NumDmg").unwrap(), "3");
-    }
-
-    #[test]
-    fn parse_activated_ability() {
-        let result = parse_ability("AB$ Draw | Cost$ T | NumCards$ 1").unwrap();
-        assert_eq!(result.kind, AbilityKind::Activated);
-        assert_eq!(effect_variant_name(&result.effect), "Draw");
-        let params = result.effect.to_params();
-        assert_eq!(params.get("NumCards").unwrap(), "1");
-    }
-
-    #[test]
-    fn parse_database_ability() {
-        let result = parse_ability("DB$ ChangeZone | Origin$ Battlefield").unwrap();
-        assert_eq!(result.kind, AbilityKind::Database);
-        assert_eq!(effect_variant_name(&result.effect), "ChangeZone");
-        let params = result.effect.to_params();
-        assert_eq!(params.get("Origin").unwrap(), "Battlefield");
-    }
-
-    #[test]
-    fn parse_ability_missing_kind_errors() {
-        let result = parse_ability("NoKind$ Value | Foo$ Bar");
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ParseError::MissingAbilityKind
-        ));
-    }
-
-    #[test]
-    fn parse_trigger_changes_zone() {
-        let result = parse_trigger(
-            "Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | Execute$ TrigDraw",
-        )
-        .unwrap();
-        assert_eq!(result.mode, TriggerMode::ChangesZone);
-        assert_eq!(result.params.get("Origin").unwrap(), "Any");
-        assert_eq!(result.params.get("Destination").unwrap(), "Battlefield");
-        assert_eq!(result.params.get("Execute").unwrap(), "TrigDraw");
-    }
-
-    #[test]
-    fn parse_static_continuous() {
-        let result = parse_static("Mode$ Continuous | Affected$ Card.Self | AddPower$ 2").unwrap();
-        assert_eq!(result.mode, StaticMode::Continuous);
-        assert_eq!(result.params.get("Affected").unwrap(), "Card.Self");
-        assert_eq!(result.params.get("AddPower").unwrap(), "2");
-    }
-
-    #[test]
-    fn parse_replacement_damage_done() {
-        let result = parse_replacement(
-            "Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self",
-        )
-        .unwrap();
-        assert_eq!(result.event, ReplacementEvent::DamageDone);
-        assert_eq!(result.params.get("ActiveZones").unwrap(), "Battlefield");
-        assert_eq!(result.params.get("ValidSource").unwrap(), "Card.Self");
-    }
-
-    #[test]
-    fn parse_ability_preserves_all_params() {
-        let result = parse_ability(
-            "SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3 | SpellDescription$ CARDNAME deals 3 damage to any target.",
-        )
-        .unwrap();
-        // The typed effect consumes ValidTgts and NumDmg; SpellDescription remains unconsumed
-        // but is NOT in the params compat map because params_to_effect consumed known params
-        // and SpellDescription is not part of the DealDamage variant.
-        // However, to_params() only reconstructs what the Effect knows about.
-        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
-    }
-
-    #[test]
-    fn parse_trigger_missing_mode_errors() {
-        let result = parse_trigger("NoMode$ Value | Foo$ Bar");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_static_missing_mode_errors() {
-        let result = parse_static("NoMode$ Value | Foo$ Bar");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_replacement_missing_event_errors() {
-        let result = parse_replacement("NoEvent$ Value | Foo$ Bar");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_mana_ability() {
-        let result = parse_ability("AB$ Mana | Cost$ T | Produced$ G").unwrap();
-        assert_eq!(effect_variant_name(&result.effect), "Mana");
-    }
-
-    #[test]
-    fn parse_unknown_effect_falls_to_other() {
-        let result = parse_ability("SP$ SomeNewEffect | Foo$ Bar").unwrap();
-        assert_eq!(effect_variant_name(&result.effect), "SomeNewEffect");
-        assert!(matches!(result.effect, Effect::Other { .. }));
-    }
-
-    // --- parse_cost tests ---
 
     #[test]
     fn parse_cost_tap_only() {
@@ -980,10 +894,129 @@ mod tests {
             }
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: Forge parser (only when forge-compat feature is enabled)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "forge-compat"))]
+mod forge_parser_tests {
+    use crate::types::ability::{effect_variant_name, AbilityKind, Effect};
+
+    use super::*;
+
+    #[test]
+    fn parse_spell_ability() {
+        let result = parse_ability("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3").unwrap();
+        assert_eq!(result.kind, AbilityKind::Spell);
+        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
+        let params = result.effect.to_params();
+        assert_eq!(params.get("ValidTgts").unwrap(), "Any");
+        assert_eq!(params.get("NumDmg").unwrap(), "3");
+    }
+
+    #[test]
+    fn parse_activated_ability() {
+        let result = parse_ability("AB$ Draw | Cost$ T | NumCards$ 1").unwrap();
+        assert_eq!(result.kind, AbilityKind::Activated);
+        assert_eq!(effect_variant_name(&result.effect), "Draw");
+        let params = result.effect.to_params();
+        assert_eq!(params.get("NumCards").unwrap(), "1");
+    }
+
+    #[test]
+    fn parse_database_ability() {
+        let result = parse_ability("DB$ ChangeZone | Origin$ Battlefield").unwrap();
+        assert_eq!(result.kind, AbilityKind::Database);
+        assert_eq!(effect_variant_name(&result.effect), "ChangeZone");
+        let params = result.effect.to_params();
+        assert_eq!(params.get("Origin").unwrap(), "Battlefield");
+    }
+
+    #[test]
+    fn parse_ability_missing_kind_errors() {
+        let result = parse_ability("NoKind$ Value | Foo$ Bar");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingAbilityKind
+        ));
+    }
+
+    #[test]
+    fn parse_trigger_changes_zone() {
+        let result = parse_trigger(
+            "Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | Execute$ TrigDraw",
+        )
+        .unwrap();
+        assert_eq!(result.mode, TriggerMode::ChangesZone);
+        assert_eq!(result.params.get("Origin").unwrap(), "Any");
+        assert_eq!(result.params.get("Destination").unwrap(), "Battlefield");
+        assert_eq!(result.params.get("Execute").unwrap(), "TrigDraw");
+    }
+
+    #[test]
+    fn parse_static_continuous() {
+        let result = parse_static("Mode$ Continuous | Affected$ Card.Self | AddPower$ 2").unwrap();
+        assert_eq!(result.mode, StaticMode::Continuous);
+        assert_eq!(result.params.get("Affected").unwrap(), "Card.Self");
+        assert_eq!(result.params.get("AddPower").unwrap(), "2");
+    }
+
+    #[test]
+    fn parse_replacement_damage_done() {
+        let result = parse_replacement(
+            "Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self",
+        )
+        .unwrap();
+        assert_eq!(result.event, ReplacementEvent::DamageDone);
+        assert_eq!(result.params.get("ActiveZones").unwrap(), "Battlefield");
+        assert_eq!(result.params.get("ValidSource").unwrap(), "Card.Self");
+    }
+
+    #[test]
+    fn parse_ability_preserves_all_params() {
+        let result = parse_ability(
+            "SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3 | SpellDescription$ CARDNAME deals 3 damage to any target.",
+        )
+        .unwrap();
+        assert_eq!(effect_variant_name(&result.effect), "DealDamage");
+    }
+
+    #[test]
+    fn parse_trigger_missing_mode_errors() {
+        let result = parse_trigger("NoMode$ Value | Foo$ Bar");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_static_missing_mode_errors() {
+        let result = parse_static("NoMode$ Value | Foo$ Bar");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_replacement_missing_event_errors() {
+        let result = parse_replacement("NoEvent$ Value | Foo$ Bar");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mana_ability() {
+        let result = parse_ability("AB$ Mana | Cost$ T | Produced$ G").unwrap();
+        assert_eq!(effect_variant_name(&result.effect), "Mana");
+    }
+
+    #[test]
+    fn parse_unknown_effect_falls_to_other() {
+        let result = parse_ability("SP$ SomeNewEffect | Foo$ Bar").unwrap();
+        assert_eq!(effect_variant_name(&result.effect), "SomeNewEffect");
+        assert!(matches!(result.effect, Effect::Other { .. }));
+    }
 
     #[test]
     fn parse_cost_loyalty_wired_into_parse_ability() {
-        // Verify that parse_ability correctly uses parse_cost for loyalty costs
         let result = parse_ability("AB$ Dig | Cost$ AddCounter<2/LOYALTY> | DigNum$ 1").unwrap();
         assert_eq!(
             result.cost,

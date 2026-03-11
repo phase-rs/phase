@@ -7,6 +7,7 @@ use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
+#[cfg(feature = "forge-compat")]
 use crate::parser::ability::parse_ability;
 use crate::types::ability::{
     effect_variant_name, AbilityDefinition, StaticDefinition, TriggerDefinition,
@@ -106,7 +107,8 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             // Check static abilities
             check_statics(&face.static_abilities, &static_registry, &mut missing);
 
-            // Check SVar-referenced sub-abilities
+            // Check SVar-referenced sub-abilities (only with forge-compat parser)
+            #[cfg(feature = "forge-compat")]
             for svar_val in face.svars.values() {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
