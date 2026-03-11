@@ -1,47 +1,37 @@
-//! Canonical Forge-style object filter matching.
+//! Typed object filter matching using TargetFilter enum.
 //!
-//! Replicates the filter syntax from Java Forge's `Card.isValid()` +
-//! `CardProperty.cardHasProperty()`:
-//!
-//! ```text
-//! "Creature.Other+YouCtrl"
-//!  ^^^^^^^  ^^^^^ ^^^^^^
-//!  type     prop1  prop2
-//! ```
-//!
-//! - `.` separates the **type restriction** (left) from **properties** (right).
-//! - `+` chains multiple properties with AND logic.
-//! - Both sides are individually optional (e.g. `"YouCtrl"` alone is valid).
+//! Replaces the Forge-style string filter parsing with typed enum matching.
+//! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
+use crate::game::game_object::GameObject;
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
-/// Check if an object matches a Forge-style filter string.
+/// Check if an object matches a typed TargetFilter.
 ///
-/// `source_id` is the object that owns the ability (used for Self/Other resolution).
-/// The source's controller is looked up from `state` (for YouCtrl/OppCtrl).
-///
-/// Returns `true` if every component of the filter is satisfied.
-pub fn object_matches_filter(
+/// `source_id` is the object that owns the ability (used for SelfRef/Other resolution).
+/// The source's controller is looked up from `state` (for You/Opponent).
+pub fn matches_target_filter(
     state: &GameState,
     object_id: ObjectId,
-    filter: &str,
+    filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
     let source_controller = state.objects.get(&source_id).map(|o| o.controller);
     filter_inner(state, object_id, filter, source_id, source_controller)
 }
 
-/// Like [`object_matches_filter`], but with an explicit controller.
+/// Like [`matches_target_filter`], but with an explicit controller.
 ///
 /// Use this when resolving effects from the stack where the source object
 /// may no longer exist (e.g. sacrificed as a cost).
-pub fn object_matches_filter_controlled(
+pub fn matches_target_filter_controlled(
     state: &GameState,
     object_id: ObjectId,
-    filter: &str,
+    filter: &TargetFilter,
     source_id: ObjectId,
     controller: PlayerId,
 ) -> bool {
@@ -51,144 +41,182 @@ pub fn object_matches_filter_controlled(
 fn filter_inner(
     state: &GameState,
     object_id: ObjectId,
-    filter: &str,
+    filter: &TargetFilter,
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
 ) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
-
-    // Pre-extract source properties needed by matches_property
-    let source_attached_to = state
-        .objects
-        .get(&source_id)
-        .and_then(|src| src.attached_to);
-
-    // Split on `.` first: left side is type, right side is `+`-separated properties.
-    // If there's no `.`, the whole string could be either a type or a property.
-    let (type_part, props_part) = match filter.split_once('.') {
-        Some((t, p)) => (Some(t), Some(p)),
-        None => {
-            // Single token: try as type first, fall back to property
-            if is_type_keyword(filter) {
-                (Some(filter), None)
-            } else {
-                (None, Some(filter))
+    match filter {
+        TargetFilter::None => false,
+        TargetFilter::Any => true,
+        TargetFilter::Player => false, // Players are not objects
+        TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::SelfRef => object_id == source_id,
+        TargetFilter::Typed {
+            card_type,
+            subtype,
+            controller,
+            properties,
+        } => {
+            let obj = match state.objects.get(&object_id) {
+                Some(o) => o,
+                None => return false,
+            };
+            // Type check
+            if let Some(tf) = card_type {
+                if !matches_type_filter(tf, obj) {
+                    return false;
+                }
             }
-        }
-    };
-
-    // --- Type restriction ---
-    if let Some(type_str) = type_part {
-        if !matches_type(type_str, obj) {
-            return false;
-        }
-    }
-
-    // --- Property restrictions (+ or . separated, per Forge convention) ---
-    if let Some(props) = props_part {
-        for prop in props.split(['+', '.']) {
-            if !matches_property(
-                prop,
-                obj,
-                object_id,
-                source_id,
-                source_controller,
-                source_attached_to,
-            ) {
-                return false;
+            // Controller check
+            if let Some(ctrl) = controller {
+                match ctrl {
+                    ControllerRef::You => {
+                        if source_controller != Some(obj.controller) {
+                            return false;
+                        }
+                    }
+                    ControllerRef::Opponent => {
+                        if source_controller == Some(obj.controller) {
+                            return false;
+                        }
+                    }
+                }
             }
+            // Subtype check
+            if let Some(st) = subtype {
+                if !obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(st))
+                {
+                    return false;
+                }
+            }
+            // All properties must match
+            let source_attached_to = state
+                .objects
+                .get(&source_id)
+                .and_then(|s| s.attached_to);
+            properties.iter().all(|p| {
+                matches_filter_prop(
+                    p,
+                    obj,
+                    object_id,
+                    source_id,
+                    source_controller,
+                    source_attached_to,
+                )
+            })
         }
+        TargetFilter::Not { filter: inner } => {
+            !filter_inner(state, object_id, inner, source_id, source_controller)
+        }
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| filter_inner(state, object_id, f, source_id, source_controller)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|f| filter_inner(state, object_id, f, source_id, source_controller)),
     }
-
-    true
 }
 
-/// Check if a filter token is a known type keyword.
-fn is_type_keyword(token: &str) -> bool {
-    matches!(
-        token,
-        "Creature"
-            | "Land"
-            | "Artifact"
-            | "Enchantment"
-            | "Instant"
-            | "Sorcery"
-            | "Planeswalker"
-            | "Card"
-            | "Permanent"
-            | "Any"
-    )
-}
-
-/// Check if an object matches a type restriction.
-fn matches_type(type_str: &str, obj: &crate::game::game_object::GameObject) -> bool {
-    match type_str {
-        "Creature" => obj.card_types.core_types.contains(&CoreType::Creature),
-        "Land" => obj.card_types.core_types.contains(&CoreType::Land),
-        "Artifact" => obj.card_types.core_types.contains(&CoreType::Artifact),
-        "Enchantment" => obj.card_types.core_types.contains(&CoreType::Enchantment),
-        "Instant" => obj.card_types.core_types.contains(&CoreType::Instant),
-        "Sorcery" => obj.card_types.core_types.contains(&CoreType::Sorcery),
-        "Planeswalker" => obj.card_types.core_types.contains(&CoreType::Planeswalker),
-        "Permanent" => {
+/// Check if an object matches a TypeFilter variant.
+fn matches_type_filter(tf: &TypeFilter, obj: &GameObject) -> bool {
+    match tf {
+        TypeFilter::Creature => obj.card_types.core_types.contains(&CoreType::Creature),
+        TypeFilter::Land => obj.card_types.core_types.contains(&CoreType::Land),
+        TypeFilter::Artifact => obj.card_types.core_types.contains(&CoreType::Artifact),
+        TypeFilter::Enchantment => obj.card_types.core_types.contains(&CoreType::Enchantment),
+        TypeFilter::Instant => obj.card_types.core_types.contains(&CoreType::Instant),
+        TypeFilter::Sorcery => obj.card_types.core_types.contains(&CoreType::Sorcery),
+        TypeFilter::Planeswalker => obj.card_types.core_types.contains(&CoreType::Planeswalker),
+        TypeFilter::Permanent => {
             obj.card_types.core_types.contains(&CoreType::Creature)
                 || obj.card_types.core_types.contains(&CoreType::Artifact)
                 || obj.card_types.core_types.contains(&CoreType::Enchantment)
                 || obj.card_types.core_types.contains(&CoreType::Land)
                 || obj.card_types.core_types.contains(&CoreType::Planeswalker)
         }
-        "Card" | "Any" => true,
-        _ => true, // Unknown type, permissive fallback
+        TypeFilter::Card | TypeFilter::Any => true,
     }
 }
 
-/// Check if an object satisfies a single property restriction.
-///
-/// `source_attached_to` is the pre-extracted `attached_to` field from the source
-/// object, used for `EnchantedBy` matching (aura static abilities).
-fn matches_property(
-    prop: &str,
-    obj: &crate::game::game_object::GameObject,
+/// Check if an object satisfies a single FilterProp.
+fn matches_filter_prop(
+    prop: &FilterProp,
+    obj: &GameObject,
     object_id: ObjectId,
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
     source_attached_to: Option<ObjectId>,
 ) -> bool {
     match prop {
-        // Identity
-        "Self" => object_id == source_id,
-        "Other" => object_id != source_id,
-
-        // Controller
-        "YouCtrl" => source_controller == Some(obj.controller),
-        "YouDontCtrl" => source_controller != Some(obj.controller),
-        "OppCtrl" => source_controller.is_some() && source_controller != Some(obj.controller),
-
-        // Ownership
-        "YouOwn" => source_controller == Some(obj.owner),
-        "YouDontOwn" => source_controller != Some(obj.owner),
-        "OppOwn" => source_controller.is_some() && source_controller != Some(obj.owner),
-
-        // State
-        "tapped" => obj.tapped,
-        "untapped" => !obj.tapped,
-
-        // Aura attachment: source is attached to this object
-        "EnchantedBy" => source_attached_to == Some(object_id),
-
-        // Permissive fallback for unrecognized properties
-        _ => true,
+        FilterProp::Token => {
+            // A token has no card_id (card_id.0 == 0) in typical token creation
+            // For now, permissive true -- tokens will be marked more explicitly later
+            true
+        }
+        FilterProp::Attacking => {
+            // Would check combat state -- permissive for now
+            true
+        }
+        FilterProp::Tapped => obj.tapped,
+        FilterProp::NonType { value } => {
+            // Object does not have this type
+            let core: Option<CoreType> = value.parse().ok();
+            match core {
+                Some(ct) => !obj.card_types.core_types.contains(&ct),
+                None => true, // Unknown type name -- permissive
+            }
+        }
+        FilterProp::WithKeyword { value } => {
+            // Check if object has the keyword
+            let kw: Result<crate::types::keywords::Keyword, _> = value.parse();
+            match kw {
+                Ok(k) => obj.has_keyword(&k),
+                Err(_) => true, // Unknown keyword -- permissive
+            }
+        }
+        FilterProp::CountersGE {
+            counter_type,
+            count,
+        } => {
+            let ct = parse_counter_type(counter_type);
+            obj.counters.get(&ct).copied().unwrap_or(0) >= *count
+        }
+        FilterProp::CmcGE { value } => {
+            let cmc = match &obj.mana_cost {
+                crate::types::mana::ManaCost::NoCost => 0u32,
+                crate::types::mana::ManaCost::Cost { shards, generic } => {
+                    *generic as u32 + shards.len() as u32
+                }
+            };
+            cmc >= *value
+        }
+        FilterProp::InZone { zone } => obj.zone == *zone,
+        FilterProp::Owned { controller } => match controller {
+            ControllerRef::You => source_controller == Some(obj.owner),
+            ControllerRef::Opponent => {
+                source_controller.is_some() && source_controller != Some(obj.owner)
+            }
+        },
+        FilterProp::EnchantedBy => source_attached_to == Some(object_id),
+        FilterProp::EquippedBy => source_attached_to == Some(object_id),
+        FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }
 
-/// Check if a player matches a Forge-style player filter (e.g. "You", "Opp").
+fn parse_counter_type(s: &str) -> crate::game::game_object::CounterType {
+    match s {
+        "+1/+1" => crate::game::game_object::CounterType::Plus1Plus1,
+        "-1/-1" => crate::game::game_object::CounterType::Minus1Minus1,
+        "loyalty" => crate::game::game_object::CounterType::Loyalty,
+        other => crate::game::game_object::CounterType::Generic(other.to_string()),
+    }
+}
+
+/// Check if a player matches a typed player filter.
 ///
 /// Used by static abilities that target players rather than objects.
 pub fn player_matches_filter(
@@ -218,6 +246,7 @@ pub fn player_matches_filter(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -245,20 +274,44 @@ mod tests {
     }
 
     #[test]
-    fn empty_filter_matches_everything() {
+    fn none_filter_matches_nothing() {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
-        assert!(object_matches_filter(&state, id, "", id));
+        assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    #[test]
+    fn any_filter_matches_everything() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Bear");
+        assert!(matches_target_filter(&state, id, &TargetFilter::Any, id));
     }
 
     #[test]
     fn type_filter_matches_correct_type() {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
-        assert!(object_matches_filter(&state, id, "Creature", id));
-        assert!(!object_matches_filter(&state, id, "Land", id));
-        assert!(object_matches_filter(&state, id, "Card", id));
-        assert!(object_matches_filter(&state, id, "Any", id));
+        let creature_filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        let land_filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Land),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        let card_filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Card),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        assert!(matches_target_filter(&state, id, &creature_filter, id));
+        assert!(!matches_target_filter(&state, id, &land_filter, id));
+        assert!(matches_target_filter(&state, id, &card_filter, id));
     }
 
     #[test]
@@ -266,8 +319,18 @@ mod tests {
         let mut state = setup();
         let a = add_creature(&mut state, PlayerId(0), "A");
         let b = add_creature(&mut state, PlayerId(0), "B");
-        assert!(object_matches_filter(&state, a, "Card.Self", a));
-        assert!(!object_matches_filter(&state, b, "Card.Self", a));
+        assert!(matches_target_filter(
+            &state,
+            a,
+            &TargetFilter::SelfRef,
+            a
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            b,
+            &TargetFilter::SelfRef,
+            a
+        ));
     }
 
     #[test]
@@ -276,12 +339,25 @@ mod tests {
         let marshal = add_creature(&mut state, PlayerId(0), "Benalish Marshal");
         let bear = add_creature(&mut state, PlayerId(0), "Bear");
 
-        let filter = "Creature.Other+YouCtrl";
+        // "Creature.Other+YouCtrl" = And(Typed{creature, You}, Not(SelfRef))
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SelfRef),
+                },
+            ],
+        };
 
         // Marshal should NOT match its own "Other" filter
-        assert!(!object_matches_filter(&state, marshal, filter, marshal));
+        assert!(!matches_target_filter(&state, marshal, &filter, marshal));
         // Bear should match
-        assert!(object_matches_filter(&state, bear, filter, marshal));
+        assert!(matches_target_filter(&state, bear, &filter, marshal));
     }
 
     #[test]
@@ -290,18 +366,15 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        assert!(object_matches_filter(
-            &state,
-            mine,
-            "Creature.YouCtrl",
-            mine
-        ));
-        assert!(!object_matches_filter(
-            &state,
-            theirs,
-            "Creature.YouCtrl",
-            mine
-        ));
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        };
+
+        assert!(matches_target_filter(&state, mine, &filter, mine));
+        assert!(!matches_target_filter(&state, theirs, &filter, mine));
     }
 
     #[test]
@@ -310,53 +383,55 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        assert!(!object_matches_filter(
-            &state,
-            mine,
-            "Creature.OppCtrl",
-            mine
-        ));
-        assert!(object_matches_filter(
-            &state,
-            theirs,
-            "Creature.OppCtrl",
-            mine
-        ));
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        };
+
+        assert!(!matches_target_filter(&state, mine, &filter, mine));
+        assert!(matches_target_filter(&state, theirs, &filter, mine));
     }
 
     #[test]
-    fn combined_type_and_properties() {
+    fn combined_type_and_controller() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Lord");
         let ally = add_creature(&mut state, PlayerId(0), "Ally");
         let enemy = add_creature(&mut state, PlayerId(1), "Enemy");
 
-        // "Creature.Other+YouCtrl" — other creatures I control
-        assert!(!object_matches_filter(
-            &state,
-            source,
-            "Creature.Other+YouCtrl",
-            source
-        ));
-        assert!(object_matches_filter(
-            &state,
-            ally,
-            "Creature.Other+YouCtrl",
-            source
-        ));
-        assert!(!object_matches_filter(
-            &state,
-            enemy,
-            "Creature.Other+YouCtrl",
-            source
-        ));
+        // "Creature.Other+YouCtrl"
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SelfRef),
+                },
+            ],
+        };
+
+        assert!(!matches_target_filter(&state, source, &filter, source));
+        assert!(matches_target_filter(&state, ally, &filter, source));
+        assert!(!matches_target_filter(&state, enemy, &filter, source));
     }
 
     #[test]
     fn permanent_matches_multiple_types() {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
-        assert!(object_matches_filter(&state, id, "Permanent", id));
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Permanent),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        assert!(matches_target_filter(&state, id, &filter, id));
     }
 
     #[test]
@@ -383,15 +458,16 @@ mod tests {
             .push(CoreType::Enchantment);
         state.objects.get_mut(&aura).unwrap().attached_to = Some(creature_a);
 
-        // EnchantedBy should match only the creature the aura is attached to
-        assert!(object_matches_filter(
-            &state,
-            creature_a,
-            "Creature.EnchantedBy",
-            aura
-        ));
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::EnchantedBy],
+        };
+
+        assert!(matches_target_filter(&state, creature_a, &filter, aura));
         assert!(
-            !object_matches_filter(&state, creature_b, "Creature.EnchantedBy", aura),
+            !matches_target_filter(&state, creature_b, &filter, aura),
             "EnchantedBy must not match creatures the aura is NOT attached to"
         );
     }
@@ -418,8 +494,15 @@ mod tests {
             .core_types
             .push(CoreType::Enchantment);
 
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::EnchantedBy],
+        };
+
         assert!(
-            !object_matches_filter(&state, creature, "Creature.EnchantedBy", aura),
+            !matches_target_filter(&state, creature, &filter, aura),
             "Unattached aura should not match any creature"
         );
     }
@@ -442,5 +525,76 @@ mod tests {
             Some(PlayerId(0))
         ));
         assert!(player_matches_filter(PlayerId(1), "Opp", Some(PlayerId(0))));
+    }
+
+    #[test]
+    fn not_filter_inverts() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Bear");
+        let not_self = TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        };
+        assert!(!matches_target_filter(&state, id, &not_self, id));
+    }
+
+    #[test]
+    fn or_filter_any_match() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Bear");
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Land),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                },
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                },
+            ],
+        };
+        assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    #[test]
+    fn tapped_property() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Bear");
+        state.objects.get_mut(&id).unwrap().tapped = true;
+
+        let filter = TargetFilter::Typed {
+            card_type: None,
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::Tapped],
+        };
+        assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    #[test]
+    fn controlled_variant_uses_explicit_controller() {
+        let mut state = setup();
+        let obj = add_creature(&mut state, PlayerId(1), "Theirs");
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        };
+
+        // Source doesn't exist, but we pass controller explicitly
+        let fake_source = ObjectId(9999);
+        assert!(matches_target_filter_controlled(
+            &state,
+            obj,
+            &filter,
+            fake_source,
+            PlayerId(0)
+        ));
     }
 }
