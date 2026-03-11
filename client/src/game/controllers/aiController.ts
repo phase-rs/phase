@@ -1,4 +1,3 @@
-import type { GameAction } from "../../adapter/types";
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, AI_PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
 import { dispatchAction } from "../dispatch";

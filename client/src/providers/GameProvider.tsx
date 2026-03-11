@@ -18,10 +18,6 @@ import { detectServerUrl } from "../services/serverDetection";
 import { useGameStore, loadGame } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
-function getWsUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? useMultiplayerStore.getState().serverAddress;
-}
-
 function loadActiveDeck(): ParsedDeck | null {
   const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
   if (!activeName) return null;
@@ -254,21 +250,34 @@ export function GameProvider({
 
       const wsMode = joinCode ? "join" : "host";
 
+      // Track adapter for cleanup (needed for StrictMode double-mount)
+      let wsAdapter: WebSocketAdapter | null = null;
+
+      // Extract password from URL search params
+      const urlParams = new URLSearchParams(window.location.search);
+      const password = urlParams.get("password") ?? undefined;
+
       // Use smart server detection for initial connection
       const setupWs = async () => {
         if (cancelled) return;
         const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
+        if (cancelled) return;
 
-        const wsAdapter = new WebSocketAdapter(
+        wsAdapter = new WebSocketAdapter(
           serverUrl,
           wsMode,
           deck,
           wsMode === "join" ? joinCode : undefined,
+          wsMode === "join" ? password : undefined,
         );
 
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
             const store = useGameStore.getState();
+            // Store adapter if not yet stored (reconnect path)
+            if (!store.adapter && wsAdapter) {
+              store.setAdapter(wsAdapter);
+            }
             store.setGameState(event.state);
             store.setWaitingFor(event.state.waiting_for);
             useMultiplayerStore.getState().setConnectionStatus("connected");
@@ -282,6 +291,8 @@ export function GameProvider({
           }
           if (event.type === "reconnected") {
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            onReadyRef.current?.();
+            audioManager.startMusic();
           }
           onWsEventRef.current?.(event);
         });
@@ -306,6 +317,7 @@ export function GameProvider({
       return () => {
         cancelled = true;
         if (wsUnsubscribe) wsUnsubscribe();
+        if (wsAdapter) wsAdapter.dispose();
         useMultiplayerStore.getState().setConnectionStatus("disconnected");
         audioManager.stopMusic(0);
         reset();

@@ -75,14 +75,12 @@ describe("WASM legal actions integration", () => {
     const player = players[0];
 
     if (player?.hand?.length > 0) {
-      let foundMatch = false;
       for (const objId of player.hand) {
         const obj = objects[String(objId)]
           ?? (state.objects instanceof Map ? state.objects.get(objId) : null);
         if (obj) {
           const isPlayable = playableCardIds.has(Number(obj.card_id));
           console.log(`  hand obj ${objId}: "${obj.name}" card_id=${obj.card_id} (${typeof obj.card_id}) → playable: ${isPlayable}`);
-          if (isPlayable) foundMatch = true;
         }
       }
       // With empty libraries/no deck, hand may be empty — that's OK

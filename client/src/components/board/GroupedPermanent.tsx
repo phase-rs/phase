@@ -1,7 +1,6 @@
 import { useState } from "react";
 
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
-import { useGameStore } from "../../stores/gameStore.ts";
 import { PermanentCard } from "./PermanentCard.tsx";
 
 interface GroupedPermanentProps {
@@ -10,9 +9,6 @@ interface GroupedPermanentProps {
 
 export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
   const [expanded, setExpanded] = useState(false);
-  const representativeObj = useGameStore(
-    (s) => s.gameState?.objects[group.ids[0]],
-  );
 
   if (group.count === 1) {
     return <PermanentCard objectId={group.ids[0]} />;

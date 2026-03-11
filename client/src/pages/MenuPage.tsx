@@ -11,7 +11,9 @@ import { listSavedDeckNames, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck } from "../services/deckParser";
 import {
+  clearActiveGame,
   loadActiveGame,
+  loadGame,
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
@@ -39,13 +41,13 @@ export function MenuPage() {
     }
 
     const saved = loadActiveGame();
-    if (saved) {
-      useGameStore.setState({ gameId: saved.id });
-      navigate(`/game/${saved.id}?mode=${saved.mode}&difficulty=${saved.difficulty}`, { replace: true });
-      return;
+    if (saved && loadGame(saved.id)) {
+      setActiveGame(saved);
+    } else if (saved) {
+      // Metadata exists but game state is gone — clean up stale entry
+      clearActiveGame();
     }
-    setActiveGame(saved);
-  }, [navigate]);
+  }, []);
 
   const handleResumeGame = () => {
     if (!activeGame) return;
