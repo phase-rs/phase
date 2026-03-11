@@ -123,7 +123,12 @@ fn build_card_face(
         keywords: mtgjson
             .keywords
             .as_ref()
-            .map(|kws| kws.iter().map(|s| s.parse::<Keyword>().unwrap()).collect())
+            .map(|kws| {
+                kws.iter()
+                    .map(|s| s.parse::<Keyword>().unwrap())
+                    .filter(|k| !matches!(k, Keyword::Unknown(_)))
+                    .collect()
+            })
             .unwrap_or_default(),
         abilities: abilities.abilities.clone(),
         triggers: abilities.triggers.clone(),
@@ -518,6 +523,24 @@ mod tests {
             Some("my-oracle-id".to_string()),
         );
         assert_eq!(face.scryfall_oracle_id.as_deref(), Some("my-oracle-id"));
+    }
+
+    #[test]
+    fn build_card_face_filters_unknown_keywords() {
+        let mut mtgjson = make_test_atomic_card("Ruin-Lurker Bat");
+        mtgjson.keywords = Some(vec![
+            "Flying".to_string(),
+            "Lifelink".to_string(),
+            "Scry".to_string(),     // action keyword — not in enum
+            "Mill".to_string(),     // action keyword — not in enum
+            "Landfall".to_string(), // ability word — not in enum
+        ]);
+
+        let face = build_card_face(&mtgjson, &empty_face_abilities(), None);
+
+        assert_eq!(face.keywords.len(), 2);
+        assert!(face.keywords.contains(&Keyword::Flying));
+        assert!(face.keywords.contains(&Keyword::Lifelink));
     }
 
     #[test]
