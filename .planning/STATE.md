@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Phase 29 context gathered
-last_updated: "2026-03-11T16:55:59.610Z"
-last_activity: 2026-03-11 — Phase 27 Plan 04 complete (TriggerTargetSelection UI and context rewrite)
+status: in-progress
+stopped_at: Completed 29-01-PLAN.md
+last_updated: "2026-03-11T17:55:00Z"
+last_activity: 2026-03-11 — Phase 29 Plan 01 complete (N-Player Foundation Types)
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 31
-  completed_plans: 30
-  percent: 97
+  total_plans: 46
+  completed_plans: 31
+  percent: 67
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 27 Aura Casting and Triggered Targeting — Complete (all 4 plans)
+**Current focus:** Phase 29 Support N Players — Plan 01 complete (Foundation Types)
 
 ## Current Position
 
-Phase: 27 complete — All 4 plans complete
-Status: Phase 27 Complete
-Last activity: 2026-03-11 — Phase 27 Plan 04 complete (TriggerTargetSelection UI and context rewrite)
+Phase: 29 — Plan 01 of 16 complete
+Status: In Progress
+Last activity: 2026-03-11 — Phase 29 Plan 01 complete (N-Player Foundation Types)
 
-Progress: [██████████████████░░] 30/31 plans (97%)
+Progress: [█████████████░░░░░░░] 31/46 plans (67%)
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [██████████████████░░] 30/31 p
 | Phase 27 P02 | 6min | 2 tasks | 2 files |
 | Phase 27 P03 | 13min | 2 tasks | 3 files |
 | Phase 27 P04 | 2min | 2 tasks | 3 files |
+| Phase 29 P01 | 7min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -176,6 +177,9 @@ Recent decisions affecting current work:
 - [27-03]: Exile return gracefully handles cards already moved from exile (no panic, no-op)
 - [27-04]: TargetingOverlay reuses existing targeting UI for TriggerTargetSelection (no separate component)
 - [27-04]: Cancel button hidden for trigger targeting (MTG triggers are mandatory)
+- [29-01]: CommanderDamageEntry struct instead of HashMap<(PlayerId, ObjectId), u32> for serde_json compat (tuple keys don't serialize)
+- [29-01]: PartialOrd + Ord derived on PlayerId for BTreeSet<PlayerId> support
+- [29-01]: priority_pass_count kept alongside new priority_passes BTreeSet (migration deferred to Plan 02)
 
 ### Roadmap Evolution
 
@@ -193,6 +197,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T16:55:59.607Z
-Stopped at: Phase 29 context gathered
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-CONTEXT.md
+Last session: 2026-03-11T17:55:00Z
+Stopped at: Completed 29-01-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-02-PLAN.md
