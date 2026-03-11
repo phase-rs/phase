@@ -87,10 +87,17 @@ export function MenuPage() {
           )}
 
           <button
-            onClick={() => navigate("/play")}
+            onClick={() => navigate("/setup")}
             className={menuButtonClass({ tone: "indigo", size: "lg" })}
           >
-            {hasSavedGame ? "New Game vs AI" : "Play vs AI"}
+            {hasSavedGame ? "New Game" : "Play"}
+          </button>
+
+          <button
+            onClick={() => navigate("/play")}
+            className={menuButtonClass({ tone: "neutral", size: "lg" })}
+          >
+            Quick Play vs AI
           </button>
 
           <button

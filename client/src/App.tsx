@@ -7,6 +7,7 @@ import { MenuPage } from "./pages/MenuPage";
 import { PlayPage } from "./pages/PlayPage";
 import { MultiplayerPage } from "./pages/MultiplayerPage";
 import { GamePage } from "./pages/GamePage";
+import { GameSetupPage } from "./pages/GameSetupPage";
 import { DeckBuilderPage } from "./pages/DeckBuilderPage";
 
 export function App() {
@@ -47,6 +48,7 @@ export function App() {
         )}
         <Routes>
           <Route path="/" element={<MenuPage />} />
+          <Route path="/setup" element={<GameSetupPage />} />
           <Route path="/play" element={<PlayPage />} />
           <Route path="/multiplayer" element={<MultiplayerPage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
