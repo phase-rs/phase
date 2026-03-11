@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 26-01-PLAN.md
-last_updated: "2026-03-11T01:20:54.744Z"
-last_activity: 2026-03-11 — Completed Plan 26-02 (Server Protocol & Lobby)
+stopped_at: Completed 26-04-PLAN.md
+last_updated: "2026-03-11T01:30:41.000Z"
+last_activity: 2026-03-11 — Completed Plan 26-04 (P2P Networking)
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 21
-  completed_plans: 17
-  percent: 33
+  completed_plans: 19
+  percent: 50
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 ## Current Position
 
 Phase: 26 (sixth of 6) — Polish & Fix Multi-player with Lobby and Embedded Server
-Plan: 2/6 complete
+Plan: 4/6 complete
 Status: In Progress
-Last activity: 2026-03-11 — Completed Plan 26-02 (Server Protocol & Lobby)
+Last activity: 2026-03-11 — Completed Plan 26-04 (P2P Networking)
 
-Progress: [███░░░░░░░] 33%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -48,8 +48,9 @@ Progress: [███░░░░░░░] 33%
 | 23 | 2/2 | 18min | 9min |
 | 24 | 3/3 | 43min | 14min |
 | 25 | 3/3 | 31min | 10min |
-| 26 | 1/6 | 5min | 5min |
+| 26 | 4/6 | 20min | 5min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
+| Phase 26 P04 | 7min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,10 @@ Recent decisions affecting current work:
 - [Phase 26]: getPlayerId() as standalone function for non-React contexts reading from Zustand getState()
 - [Phase 26]: stateChanged wired in single onEvent listener rather than second subscription
 - [Phase 26]: setGameState/setWaitingFor added as minimal setters to gameStore for external state updates
+- [26-04]: P2PHostAdapter wraps WasmAdapter + PeerSession; host=player 0, guest=player 1
+- [26-04]: filterStateForGuest hides host hand/library via JSON clone + array zeroing
+- [26-04]: 5-char codes auto-detected as P2P via parseRoomCode; longer codes route to server
+- [26-04]: P2P games code-only, never listed in server lobby
 
 ### Roadmap Evolution
 
@@ -132,6 +137,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T01:20:54.741Z
-Stopped at: Completed 26-01-PLAN.md
+Last session: 2026-03-11T01:30:41Z
+Stopped at: Completed 26-04-PLAN.md
 Resume file: None

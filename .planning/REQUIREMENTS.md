@@ -68,9 +68,9 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### P2P WebRTC
 
-- [ ] **MP-P2P**: PeerJS-based WebRTC networking layer ported from Alchemy project with TURN/signaling support
-- [ ] **MP-P2P-HOST**: P2PHostAdapter runs WASM engine locally and sends filtered state to guest via DataChannel
-- [ ] **MP-P2P-GUEST**: P2PGuestAdapter receives state from host and sends actions, code-only (no lobby listing)
+- [x] **MP-P2P**: PeerJS-based WebRTC networking layer ported from Alchemy project with TURN/signaling support
+- [x] **MP-P2P-HOST**: P2PHostAdapter runs WASM engine locally and sends filtered state to guest via DataChannel
+- [x] **MP-P2P-GUEST**: P2PGuestAdapter receives state from host and sends actions, code-only (no lobby listing)
 
 ### Desktop Hosting
 
