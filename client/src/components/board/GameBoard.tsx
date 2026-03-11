@@ -99,7 +99,7 @@ export function GameBoard() {
                 playerId={opId}
                 mode={focusedOpponent === opId ? "focused" : "compact"}
                 onFocus={() =>
-                  setFocusedOpponent((prev) => (prev === opId ? null : opId))
+                  setFocusedOpponent(focusedOpponent === opId ? null : opId)
                 }
               />
             ))}
