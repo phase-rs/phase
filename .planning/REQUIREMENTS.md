@@ -74,9 +74,9 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### Desktop Hosting
 
-- [ ] **MP-SIDECAR**: phase-server embedded as Tauri sidecar binary, spawned on Host Game, auto-stops when game ends
-- [ ] **MP-CONNECT-UX**: Connection status dot (green/yellow/red) visible throughout multiplayer, toast on failure with Retry/Settings
-- [ ] **MP-SERVER-DETECT**: Smart server detection: (1) Tauri sidecar localhost, (2) last-used server, (3) manual entry; CODE@IP:PORT join syntax
+- [x] **MP-SIDECAR**: phase-server embedded as Tauri sidecar binary, spawned on Host Game, auto-stops when game ends
+- [x] **MP-CONNECT-UX**: Connection status dot (green/yellow/red) visible throughout multiplayer, toast on failure with Retry/Settings
+- [x] **MP-SERVER-DETECT**: Smart server detection: (1) Tauri sidecar localhost, (2) last-used server, (3) manual entry; CODE@IP:PORT join syntax
 
 ### In-Game UX
 
