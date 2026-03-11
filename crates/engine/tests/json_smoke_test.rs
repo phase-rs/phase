@@ -393,7 +393,10 @@ fn test_smoke_game_combat_damage() {
     apply(
         &mut state,
         GameAction::DeclareAttackers {
-            attacker_ids: vec![bears_id],
+            attacks: vec![(
+                bears_id,
+                engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)),
+            )],
         },
     )
     .unwrap();

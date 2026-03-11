@@ -1,5 +1,6 @@
 use rand::Rng;
 
+use engine::game::combat::AttackTarget;
 use engine::game::engine::apply;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -111,9 +112,18 @@ pub fn choose_action(
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let selected = choose_attackers(state, ai_player);
-        return Some(GameAction::DeclareAttackers {
-            attacker_ids: selected,
-        });
+        // Default target: first opponent
+        let default_target = state
+            .players
+            .iter()
+            .find(|p| p.id != ai_player && !state.eliminated_players.contains(&p.id))
+            .map(|p| AttackTarget::Player(p.id))
+            .unwrap_or(AttackTarget::Player(PlayerId(1 - ai_player.0)));
+        let attacks: Vec<_> = selected
+            .into_iter()
+            .map(|id| (id, default_target.clone()))
+            .collect();
+        return Some(GameAction::DeclareAttackers { attacks });
     }
 
     if let WaitingFor::DeclareBlockers { .. } = &state.waiting_for {

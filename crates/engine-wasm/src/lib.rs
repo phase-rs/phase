@@ -9,7 +9,9 @@ use wasm_bindgen::prelude::*;
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList};
-use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone};
+use engine::types::{
+    GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone,
+};
 
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
@@ -181,6 +183,14 @@ pub fn get_ai_action(difficulty: &str) -> Result<JsValue, JsValue> {
 #[derive(Tsify, Serialize, Deserialize)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type", content = "data")]
+pub enum WasmAttackTarget {
+    Player(u64),
+    Planeswalker(u64),
+}
+
+#[derive(Tsify, Serialize, Deserialize)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(tag = "type", content = "data")]
 pub enum WasmGameAction {
     PassPriority,
     PlayLand {
@@ -195,7 +205,7 @@ pub enum WasmGameAction {
         ability_index: usize,
     },
     DeclareAttackers {
-        attacker_ids: Vec<u64>,
+        attacks: Vec<(u64, WasmAttackTarget)>,
     },
     DeclareBlockers {
         assignments: Vec<(u64, u64)>,

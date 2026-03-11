@@ -1,3 +1,4 @@
+use engine::game::combat::AttackTarget;
 use engine::game::game_object::GameObject;
 use engine::game::mana_payment;
 use engine::types::actions::GameAction;
@@ -78,9 +79,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             }
             actions
         }
-        WaitingFor::TriggerTargetSelection {
-            legal_targets, ..
-        } => legal_targets
+        WaitingFor::TriggerTargetSelection { legal_targets, .. } => legal_targets
             .iter()
             .map(|t| GameAction::SelectTargets {
                 targets: vec![t.clone()],
@@ -441,9 +440,17 @@ fn target_selection_actions(state: &GameState, player: PlayerId) -> Vec<GameActi
 }
 
 fn attacker_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    // Determine the default attack target (first opponent)
+    let default_target = state
+        .players
+        .iter()
+        .find(|p| p.id != player && !state.eliminated_players.contains(&p.id))
+        .map(|p| AttackTarget::Player(p.id))
+        .unwrap_or(AttackTarget::Player(PlayerId(1 - player.0)));
+
     // Always allow not attacking
     let mut actions = vec![GameAction::DeclareAttackers {
-        attacker_ids: Vec::new(),
+        attacks: Vec::new(),
     }];
 
     // Find all creatures that can attack
@@ -467,14 +474,18 @@ fn attacker_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     // Return individual creature candidates -- the combat AI will decide the subset
     for &id in &candidates {
         actions.push(GameAction::DeclareAttackers {
-            attacker_ids: vec![id],
+            attacks: vec![(id, default_target.clone())],
         });
     }
 
     // Also return all-attack option
     if candidates.len() > 1 {
+        let all_attacks: Vec<_> = candidates
+            .iter()
+            .map(|&id| (id, default_target.clone()))
+            .collect();
         actions.push(GameAction::DeclareAttackers {
-            attacker_ids: candidates,
+            attacks: all_attacks,
         });
     }
 
@@ -733,11 +744,12 @@ mod tests {
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
         };
         add_creature_to_battlefield(&mut state, PlayerId(0), "Bear", 2, 2);
         let actions = get_legal_actions(&state);
         assert!(actions.contains(&GameAction::DeclareAttackers {
-            attacker_ids: Vec::new(),
+            attacks: Vec::new(),
         }));
     }
 
@@ -747,12 +759,13 @@ mod tests {
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
         };
         let id = add_creature_to_battlefield(&mut state, PlayerId(0), "Bear", 2, 2);
         let actions = get_legal_actions(&state);
         assert!(actions.iter().any(|a| matches!(
             a,
-            GameAction::DeclareAttackers { attacker_ids } if attacker_ids == &[id]
+            GameAction::DeclareAttackers { attacks } if attacks.iter().any(|(obj_id, _)| *obj_id == id)
         )));
     }
 
@@ -982,12 +995,8 @@ mod tests {
         let mut state = make_state();
         let land_id = add_land_to_battlefield(&mut state, PlayerId(0), "Forest", "Forest");
         // Add the mana ability that json_loader synthesizes for basic lands
-        state
-            .objects
-            .get_mut(&land_id)
-            .unwrap()
-            .abilities
-            .push(engine::types::ability::AbilityDefinition {
+        state.objects.get_mut(&land_id).unwrap().abilities.push(
+            engine::types::ability::AbilityDefinition {
                 kind: engine::types::ability::AbilityKind::Activated,
                 effect: engine::types::ability::Effect::Mana {
                     produced: vec![engine::types::mana::ManaColor::Green],
@@ -998,7 +1007,8 @@ mod tests {
                 description: None,
                 duration: None,
                 sorcery_speed: false,
-            });
+            },
+        );
 
         let actions = get_legal_actions(&state);
 

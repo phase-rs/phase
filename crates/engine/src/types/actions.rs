@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
 use super::identifiers::{CardId, ObjectId};
+use crate::game::combat::AttackTarget;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -19,7 +20,7 @@ pub enum GameAction {
         ability_index: usize,
     },
     DeclareAttackers {
-        attacker_ids: Vec<ObjectId>,
+        attacks: Vec<(ObjectId, AttackTarget)>,
     },
     DeclareBlockers {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -101,5 +102,47 @@ mod tests {
         let json = r#"{"type":"PassPriority"}"#;
         let action: GameAction = serde_json::from_str(json).unwrap();
         assert_eq!(action, GameAction::PassPriority);
+    }
+
+    #[test]
+    fn declare_attackers_with_attack_targets_roundtrips() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::player::PlayerId;
+
+        let action = GameAction::DeclareAttackers {
+            attacks: vec![
+                (ObjectId(1), AttackTarget::Player(PlayerId(1))),
+                (ObjectId(2), AttackTarget::Planeswalker(ObjectId(99))),
+            ],
+        };
+        let serialized = serde_json::to_string(&action).unwrap();
+        let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(action, deserialized);
+    }
+
+    #[test]
+    fn attack_target_serializes_as_tagged_union() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::player::PlayerId;
+
+        let target = AttackTarget::Player(PlayerId(1));
+        let json = serde_json::to_value(&target).unwrap();
+        assert_eq!(json["type"], "Player");
+        assert_eq!(json["data"], 1);
+
+        let target = AttackTarget::Planeswalker(ObjectId(42));
+        let json = serde_json::to_value(&target).unwrap();
+        assert_eq!(json["type"], "Planeswalker");
+        assert_eq!(json["data"], 42);
+    }
+
+    #[test]
+    fn declare_attackers_empty_attacks_roundtrips() {
+        let action = GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        };
+        let serialized = serde_json::to_string(&action).unwrap();
+        let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(action, deserialized);
     }
 }

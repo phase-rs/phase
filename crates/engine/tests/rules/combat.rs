@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::GameRunner;
 
 /// Helper: drive the engine from PreCombatMain through combat to completion.
@@ -19,11 +20,15 @@ fn run_combat(
     // Pass priority twice (both players) to advance through BeginCombat -> DeclareAttackers
     runner.pass_both_players();
 
+    // Build attacks: all attackers target player 1 (default 2-player behavior)
+    let attacks: Vec<_> = attacker_ids
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P1)))
+        .collect();
+
     // Declare attackers
     runner
-        .act(GameAction::DeclareAttackers {
-            attacker_ids: attacker_ids.clone(),
-        })
+        .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
 
     // Declare blockers
@@ -168,7 +173,7 @@ fn defender_cannot_attack() {
 
     // Trying to declare a defender as attacker should fail
     let result = runner.act(GameAction::DeclareAttackers {
-        attacker_ids: vec![wall_id],
+        attacks: vec![(wall_id, AttackTarget::Player(P1))],
     });
     assert!(
         result.is_err(),
@@ -231,7 +236,7 @@ fn attacker_taps_when_attacking() {
 
     runner
         .act(GameAction::DeclareAttackers {
-            attacker_ids: vec![attacker_id],
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
         })
         .expect("DeclareAttackers should succeed");
 

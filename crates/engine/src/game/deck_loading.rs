@@ -186,6 +186,48 @@ pub fn create_object_from_card_face(
     obj_id
 }
 
+/// Create a commander GameObject from a CardFace, placing it in the command zone.
+pub fn create_commander_from_card_face(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+
+    let power = parse_pt(&card_face.power);
+    let toughness = parse_pt(&card_face.toughness);
+    let loyalty = card_face
+        .loyalty
+        .as_ref()
+        .and_then(|s| s.parse::<u32>().ok());
+    let keywords = card_face.keywords.clone();
+    let color = card_face
+        .color_override
+        .clone()
+        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
+
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    obj.card_types = card_face.card_type.clone();
+    obj.mana_cost = card_face.mana_cost.clone();
+    obj.power = power;
+    obj.toughness = toughness;
+    obj.base_power = power;
+    obj.base_toughness = toughness;
+    obj.loyalty = loyalty;
+    obj.keywords = keywords.clone();
+    obj.base_keywords = keywords;
+    obj.abilities = card_face.abilities.clone();
+    obj.trigger_definitions = card_face.triggers.clone();
+    obj.static_definitions = card_face.static_abilities.clone();
+    obj.replacement_definitions = card_face.replacements.clone();
+    obj.color = color.clone();
+    obj.base_color = color;
+    obj.is_commander = true;
+
+    obj_id
+}
+
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     for entry in &payload.player_deck {

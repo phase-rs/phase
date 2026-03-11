@@ -189,10 +189,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
-        (
-            WaitingFor::DeclareAttackers { player, .. },
-            GameAction::DeclareAttackers { attacks },
-        ) => {
+        (WaitingFor::DeclareAttackers { player, .. }, GameAction::DeclareAttackers { attacks }) => {
             if state.active_player != *player {
                 return Err(EngineError::WrongPlayer);
             }
@@ -2943,10 +2940,7 @@ mod trigger_target_tests {
             timestamp: 1,
         });
 
-        let legal_targets = vec![
-            TargetRef::Object(target1),
-            TargetRef::Object(target2),
-        ];
+        let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -3305,9 +3299,6 @@ mod phase_trigger_regression_tests {
             state.pending_trigger.is_none(),
             "No pending trigger should exist for a skipped phase"
         );
-        assert!(matches!(
-            result2.waiting_for,
-            WaitingFor::Priority { .. }
-        ));
+        assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
     }
 }

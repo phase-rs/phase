@@ -14,7 +14,7 @@ use super::stack;
 use super::targeting;
 use super::zones;
 
-/// Cast a spell from hand.
+/// Cast a spell from hand (or command zone in Commander format).
 pub fn handle_cast_spell(
     state: &mut GameState,
     player: PlayerId,
@@ -39,6 +39,22 @@ pub fn handle_cast_spell(
                 .unwrap_or(false)
         })
         .copied()
+        .or_else(|| {
+            // In Commander format, also check the command zone
+            if !state.format_config.command_zone {
+                return None;
+            }
+            state
+                .objects
+                .values()
+                .find(|obj| {
+                    obj.card_id == card_id
+                        && obj.owner == player
+                        && obj.zone == Zone::Command
+                        && obj.is_commander
+                })
+                .map(|obj| obj.id)
+        })
         .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
 
     let obj = state.objects.get(&object_id).unwrap();
@@ -90,8 +106,38 @@ pub fn handle_cast_spell(
         }
     }
 
+    // 3b. Color identity check (Commander format only)
+    if state.format_config.command_zone {
+        let obj = state.objects.get(&object_id).unwrap();
+        if !super::commander::can_cast_in_color_identity(state, &obj.color, player) {
+            return Err(EngineError::ActionNotAllowed(
+                "Card is outside commander's color identity".to_string(),
+            ));
+        }
+    }
+
     // 4. Build ResolvedAbility from typed fields -- no params/svars
-    let mana_cost = obj.mana_cost.clone();
+    let obj = state.objects.get(&object_id).unwrap();
+    let casting_from_command_zone = obj.zone == Zone::Command;
+    let mut mana_cost = obj.mana_cost.clone();
+
+    // Apply commander tax when casting from command zone
+    if casting_from_command_zone {
+        let tax = super::commander::commander_tax(state, object_id);
+        if tax > 0 {
+            match &mut mana_cost {
+                crate::types::mana::ManaCost::Cost { generic, .. } => {
+                    *generic += tax;
+                }
+                crate::types::mana::ManaCost::NoCost => {
+                    mana_cost = crate::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: tax,
+                    };
+                }
+            }
+        }
+    }
     let resolved = ResolvedAbility {
         effect: ability_def.effect.clone(),
         targets: Vec::new(),
@@ -122,8 +168,7 @@ pub fn handle_cast_spell(
             }
         });
         if let Some(filter) = enchant_filter {
-            let legal =
-                targeting::find_legal_targets_typed(state, &filter, player, object_id);
+            let legal = targeting::find_legal_targets_typed(state, &filter, player, object_id);
             if legal.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets for Aura".to_string(),
@@ -515,8 +560,20 @@ fn pay_and_push(
     let _ = mana_payment::pay_cost(&mut player_data.mana_pool, cost)
         .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
-    // Move card from hand to stack zone
+    // Record commander cast before moving (need to check zone before move)
+    let was_in_command_zone = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.zone == Zone::Command && obj.is_commander)
+        .unwrap_or(false);
+
+    // Move card from hand/command zone to stack zone
     zones::move_to_zone(state, object_id, Zone::Stack, events);
+
+    // Track commander cast count for tax calculation
+    if was_in_command_zone {
+        super::commander::record_commander_cast(state, object_id);
+    }
 
     // Push stack entry
     stack::push_to_stack(
@@ -953,8 +1010,7 @@ mod tests {
         }
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
 
         match result {
             WaitingFor::TargetSelection { legal_targets, .. } => {
@@ -987,8 +1043,7 @@ mod tests {
             .push(CoreType::Creature);
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
 
         // Should auto-target and go straight to Priority (on stack)
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -1067,8 +1122,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::White, 1);
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(40), &mut events).unwrap();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(40), &mut events).unwrap();
 
         // Should resolve normally (Priority), not enter TargetSelection
         assert!(matches!(result, WaitingFor::Priority { .. }));

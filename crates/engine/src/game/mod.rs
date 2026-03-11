@@ -1,7 +1,7 @@
 pub mod casting;
 pub mod combat;
-pub mod commander;
 pub mod combat_damage;
+pub mod commander;
 pub mod coverage;
 pub mod day_night;
 pub mod deck_loading;

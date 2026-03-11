@@ -31,6 +31,16 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
+    // Commander zone redirection: when a commander would go to graveyard or exile,
+    // redirect to the command zone instead
+    let to = if state.format_config.command_zone
+        && super::commander::should_redirect_to_command_zone(state, object_id, to)
+    {
+        Zone::Command
+    } else {
+        to
+    };
+
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
