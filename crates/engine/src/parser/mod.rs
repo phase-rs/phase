@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod oracle;
 pub mod oracle_util;
 pub mod oracle_target;
 pub mod oracle_cost;
@@ -6,6 +7,8 @@ pub mod oracle_effect;
 pub mod oracle_trigger;
 pub mod oracle_static;
 pub mod oracle_replacement;
+
+pub use oracle::parse_oracle_text;
 #[cfg(feature = "forge-compat")]
 pub mod card_parser;
 #[cfg(feature = "forge-compat")]
