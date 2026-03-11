@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: completed
-stopped_at: Completed 27-04-PLAN.md
-last_updated: "2026-03-11T13:26:53Z"
+stopped_at: Phase 29 context gathered
+last_updated: "2026-03-11T16:55:59.610Z"
 last_activity: 2026-03-11 — Phase 27 Plan 04 complete (TriggerTargetSelection UI and context rewrite)
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 7
   total_plans: 31
   completed_plans: 30
@@ -181,6 +181,7 @@ Recent decisions affecting current work:
 
 - Phase 26 added: Polish and fix multi-player with lobby and embedded server
 - Phase 28 added: Native Ability Data Model — Eliminate all remaining Forge scripting DSL from card data format and engine runtime
+- Phase 29 added: Support N players in engine and on board in React for various formats
 
 ### Pending Todos
 
@@ -192,6 +193,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T13:26:53Z
-Stopped at: Completed 27-04-PLAN.md
-Resume file: Phase 27 complete (all 4 plans)
+Last session: 2026-03-11T16:55:59.607Z
+Stopped at: Phase 29 context gathered
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-CONTEXT.md
