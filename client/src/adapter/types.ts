@@ -4,6 +4,37 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// ── Game Format ─────────────────────────────────────────────────────────
+
+export type GameFormat = "Standard" | "Commander" | "FreeForAll" | "TwoHeadedGiant";
+
+export interface FormatConfig {
+  format: GameFormat;
+  starting_life: number;
+  min_players: number;
+  max_players: number;
+  deck_size: number;
+  singleton: boolean;
+  command_zone: boolean;
+  commander_damage_threshold: number | null;
+  range_of_influence: number | null;
+  team_based: boolean;
+}
+
+// ── Attack Target ───────────────────────────────────────────────────────
+
+export type AttackTarget =
+  | { Player: PlayerId }
+  | { Planeswalker: ObjectId };
+
+// ── Commander Damage ────────────────────────────────────────────────────
+
+export interface CommanderDamageEntry {
+  player: PlayerId;
+  commander: ObjectId;
+  damage: number;
+}
+
 // ── Enums (string literal unions matching Rust serde output) ─────────────
 
 export type Phase =
@@ -141,6 +172,7 @@ export interface Player {
   has_drawn_this_turn: boolean;
   lands_played_this_turn: number;
   can_look_at_top_of_library?: boolean;
+  is_eliminated?: boolean;
 }
 
 // ── Target Ref ───────────────────────────────────────────────────────────
@@ -204,7 +236,7 @@ export type WaitingFor =
   | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
   | { type: "ManaPayment"; data: { player: PlayerId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; legal_targets: TargetRef[] } }
-  | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[] } }
+  | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number } }
@@ -228,7 +260,7 @@ export type GameAction =
   | { type: "PlayLand"; data: { card_id: CardId } }
   | { type: "CastSpell"; data: { card_id: CardId; targets: ObjectId[] } }
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
-  | { type: "DeclareAttackers"; data: { attacker_ids: ObjectId[] } }
+  | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { keep: boolean } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
@@ -304,6 +336,10 @@ export interface GameState {
   pending_replacement: unknown | null;
   layers_dirty: boolean;
   next_timestamp: number;
+  seat_order?: PlayerId[];
+  format_config?: FormatConfig;
+  eliminated_players?: PlayerId[];
+  commander_damage?: CommanderDamageEntry[];
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────

@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import type { ObjectId } from "../../adapter/types.ts";
+import { buildAttacks } from "../../utils/combat.ts";
 import { AttackerControls } from "./AttackerControls.tsx";
 import { BlockerControls } from "./BlockerControls.tsx";
 import { BlockerArrow } from "./BlockerArrow.tsx";
@@ -14,6 +16,8 @@ interface CombatOverlayProps {
 
 export function CombatOverlay({ mode }: CombatOverlayProps) {
   const dispatch = useGameDispatch();
+  const playerId = usePlayerId();
+  const gameState = useGameStore((s) => s.gameState);
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
@@ -89,14 +93,14 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   }, [selectAllAttackers, validAttackerIds]);
 
   const handleSkip = useCallback(() => {
-    dispatch({ type: "DeclareAttackers", data: { attacker_ids: [] } });
+    dispatch({ type: "DeclareAttackers", data: { attacks: [] } });
     clearCombatSelection();
   }, [dispatch, clearCombatSelection]);
 
   const handleConfirmAttackers = useCallback(() => {
     dispatch({
       type: "DeclareAttackers",
-      data: { attacker_ids: selectedAttackers },
+      data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
     });
     clearCombatSelection();
   }, [dispatch, selectedAttackers, clearCombatSelection]);

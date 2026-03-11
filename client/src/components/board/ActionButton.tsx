@@ -7,6 +7,7 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { buildAttacks } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 
 type ActionButtonMode =
@@ -47,8 +48,9 @@ function getActionButtonMode(
 
 export function ActionButton() {
   const playerId = usePlayerId();
+  const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const stackLength = gameState?.stack.length ?? 0;
   const combatAttackers = useGameStore(
     (s) => s.gameState?.combat?.attackers,
   );
@@ -174,7 +176,7 @@ export function ActionButton() {
       }
       setSkipArmed(null);
       if (skipType === "attackers") {
-        dispatchAction({ type: "DeclareAttackers", data: { attacker_ids: [] } });
+        dispatchAction({ type: "DeclareAttackers", data: { attacks: [] } });
       } else {
         dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
       }
@@ -191,7 +193,7 @@ export function ActionButton() {
   function handleConfirmAttackers() {
     dispatchAction({
       type: "DeclareAttackers",
-      data: { attacker_ids: selectedAttackers },
+      data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
     });
   }
 
@@ -233,7 +235,7 @@ export function ActionButton() {
     if (waitingFor.type === "Priority") {
       dispatchAction({ type: "PassPriority" });
     } else if (waitingFor.type === "DeclareAttackers") {
-      dispatchAction({ type: "DeclareAttackers", data: { attacker_ids: [] } });
+      dispatchAction({ type: "DeclareAttackers", data: { attacks: [] } });
     } else if (waitingFor.type === "DeclareBlockers") {
       dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
     }

@@ -132,11 +132,11 @@ describe("CombatOverlay", () => {
 
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "DeclareAttackers",
-      data: { attacker_ids: [] },
+      data: { attacks: [] },
     });
   });
 
-  it("Confirm Attackers dispatches DeclareAttackers with selected IDs", () => {
+  it("Confirm Attackers dispatches DeclareAttackers with selected IDs as attacks", () => {
     // Pre-select an attacker
     useUiStore.setState({ selectedAttackers: [100] });
 
@@ -146,7 +146,7 @@ describe("CombatOverlay", () => {
 
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "DeclareAttackers",
-      data: { attacker_ids: [100] },
+      data: { attacks: [[100, { Player: 1 }]] },
     });
   });
 });
