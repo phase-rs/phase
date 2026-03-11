@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod oracle_util;
 #[cfg(feature = "forge-compat")]
 pub mod card_parser;
 #[cfg(feature = "forge-compat")]
