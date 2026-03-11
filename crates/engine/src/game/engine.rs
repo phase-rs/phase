@@ -2962,3 +2962,173 @@ mod trigger_target_tests {
         assert!(result.is_err(), "Should reject illegal target");
     }
 }
+
+#[cfg(test)]
+mod exile_return_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::ExileLink;
+    use crate::types::identifiers::{CardId, ObjectId};
+
+    #[test]
+    fn exile_return_source_leaves_battlefield_returns_exiled_card() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Create source permanent (e.g., Banishing Light) on battlefield
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Create exiled card -- directly in exile
+        let exiled_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+
+        // Set up the exile link
+        state.exile_links.push(ExileLink {
+            exiled_id,
+            source_id,
+        });
+
+        // Simulate events where source leaves the battlefield
+        let events = vec![crate::types::events::GameEvent::ZoneChanged {
+            object_id: source_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        }];
+
+        // Call check_exile_returns
+        check_exile_returns(&mut state, &mut events.clone());
+
+        // Exiled card should return to battlefield
+        assert!(
+            state.battlefield.contains(&exiled_id),
+            "Exiled card should return to battlefield"
+        );
+        assert!(
+            !state.exile.contains(&exiled_id),
+            "Exiled card should no longer be in exile"
+        );
+
+        // ExileLink should be removed
+        assert!(
+            state.exile_links.is_empty(),
+            "ExileLink should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn exile_return_card_already_gone_no_error() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Exiled card that has already left exile (moved to hand by another effect)
+        let exiled_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Already Moved".to_string(),
+            Zone::Hand,
+        );
+
+        state.exile_links.push(ExileLink {
+            exiled_id,
+            source_id,
+        });
+
+        let events = vec![crate::types::events::GameEvent::ZoneChanged {
+            object_id: source_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        }];
+
+        // Should not panic -- gracefully handle already-moved card
+        check_exile_returns(&mut state, &mut events.clone());
+
+        // Card stays in hand (not moved)
+        assert!(state.players[1].hand.contains(&exiled_id));
+        // Link is still cleaned up
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn exile_return_link_removed_after_return() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let exiled_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+
+        // Another unrelated exile link that should NOT be removed
+        let other_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_exiled = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Other Exiled".to_string(),
+            Zone::Exile,
+        );
+
+        state.exile_links.push(ExileLink {
+            exiled_id,
+            source_id,
+        });
+        state.exile_links.push(ExileLink {
+            exiled_id: other_exiled,
+            source_id: other_source,
+        });
+
+        let events = vec![crate::types::events::GameEvent::ZoneChanged {
+            object_id: source_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        }];
+
+        check_exile_returns(&mut state, &mut events.clone());
+
+        // First link's exiled card should return, second should stay in exile
+        assert!(state.battlefield.contains(&exiled_id));
+        assert!(state.exile.contains(&other_exiled));
+
+        // Only the triggered link should be removed
+        assert_eq!(state.exile_links.len(), 1);
+        assert_eq!(state.exile_links[0].exiled_id, other_exiled);
+    }
+}

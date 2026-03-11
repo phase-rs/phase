@@ -196,6 +196,66 @@ mod tests {
     }
 
     #[test]
+    fn exile_return_with_until_host_leaves_records_link() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Exiled Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let source_id = ObjectId(100);
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target_id)],
+            source_id,
+            PlayerId(0),
+        );
+        ability.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.exile.contains(&target_id));
+        assert_eq!(state.exile_links.len(), 1);
+        assert_eq!(state.exile_links[0].exiled_id, target_id);
+        assert_eq!(state.exile_links[0].source_id, source_id);
+    }
+
+    #[test]
+    fn exile_without_until_host_leaves_no_link() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Exiled Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.exile.contains(&target_id));
+        assert!(state.exile_links.is_empty(), "Should NOT record ExileLink without UntilHostLeavesPlay");
+    }
+
+    #[test]
     fn change_zone_all_bounce_opponent_creatures() {
         let mut state = GameState::new_two_player(42);
         let opp1 = create_object(
