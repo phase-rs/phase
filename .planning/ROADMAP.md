@@ -214,6 +214,7 @@ Plans:
 ### Phase 27: Aura Casting, Triggered Ability Targeting, and "Until Leaves" Exile Return
 **Goal**: Implement full Aura spell support (targeting + attachment), triggered ability target selection, and "until source leaves the battlefield" exile return tracking
 **Depends on**: Phase 28
+**Requirements**: P27-AURA, P27-TRIG, P27-EXILE, P27-FILTER, P27-TEST, P27-TYPED
 **Success Criteria** (what must be TRUE):
   1. Aura spells prompt the player for an enchant target during casting and attach to that target on resolution
   2. Triggered abilities with typed target filters prompt the player for target selection before going on the stack
@@ -221,5 +222,13 @@ Plans:
   4. General filter matching in targeting.rs handles typed TargetFilter (including NonType properties)
   5. `cargo test --all` passes with new tests covering all three features
   6. Phase 27 context must be rewritten to use typed data model (no Forge-style params or SVars)
+**Plans**: 3 plans
 
-Plans: TBD
+**Execution Order:**
+Wave 1: Plan 01 (type contracts, typed targeting, card data fixes, frontend types)
+Wave 2: Plans 02 + 03 (parallel — Aura casting/attachment, triggered targeting + exile return)
+
+Plans:
+- [ ] 27-01-PLAN.md — Type contracts, find_legal_targets_typed, PendingTrigger serde, GameState fields, frontend types, card data fixes
+- [ ] 27-02-PLAN.md — Aura enchant target selection during casting + attachment on resolution
+- [ ] 27-03-PLAN.md — Triggered ability target selection + exile return tracking
