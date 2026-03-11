@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 26-04-PLAN.md
-last_updated: "2026-03-11T01:30:41.000Z"
-last_activity: 2026-03-11 — Completed Plan 26-04 (P2P Networking)
+stopped_at: Completed 26-03-PLAN.md
+last_updated: "2026-03-11T01:57:20.015Z"
+last_activity: 2026-03-11 — Completed Plan 26-03 (Frontend Lobby UI)
 progress:
   total_phases: 6
   completed_phases: 5
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 Phase: 26 (sixth of 6) — Polish & Fix Multi-player with Lobby and Embedded Server
 Plan: 4/6 complete
 Status: In Progress
-Last activity: 2026-03-11 — Completed Plan 26-04 (P2P Networking)
+Last activity: 2026-03-11 — Completed Plan 26-03 (Frontend Lobby UI)
 
-Progress: [█████░░░░░] 50%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Progress: [█████░░░░░] 50%
 | 25 | 3/3 | 31min | 10min |
 | 26 | 4/6 | 20min | 5min |
 | Phase 26 P01 | 8min | 3 tasks | 16 files |
+| Phase 26 P03 | 5min | 3 tasks | 6 files |
 | Phase 26 P04 | 7min | 3 tasks | 12 files |
 
 ## Accumulated Context
@@ -122,6 +123,9 @@ Recent decisions affecting current work:
 - [26-04]: filterStateForGuest hides host hand/library via JSON clone + array zeroing
 - [26-04]: 5-char codes auto-detected as P2P via parseRoomCode; longer codes route to server
 - [26-04]: P2P games code-only, never listed in server lobby
+- [26-03]: Lobby uses its own raw WebSocket connection, separate from in-game WebSocketAdapter
+- [26-03]: Timer options presented as button group (None/30s/60s/120s) rather than free-form input
+- [26-03]: Password modal inline in LobbyView rather than separate route
 
 ### Roadmap Evolution
 
@@ -137,6 +141,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T01:30:41Z
-Stopped at: Completed 26-04-PLAN.md
+Last session: 2026-03-11T01:57:20Z
+Stopped at: Completed 26-03-PLAN.md
 Resume file: None

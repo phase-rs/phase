@@ -60,11 +60,11 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### Frontend Lobby
 
-- [ ] **MP-LOBBY-UI**: Frontend displays a browseable game list with real-time updates, manual code entry, and player count
-- [ ] **MP-MENU-FLOW**: Menu state machine follows mode-select -> deck-gallery-online -> lobby -> host-setup -> waiting
-- [ ] **MP-HOST-SETUP**: Host setup screen captures display name, public/private, password, format, and timer settings
-- [ ] **MP-WAITING**: Waiting screen shows game code, LAN IP, listed-in-lobby status, and cancel button
-- [ ] **MP-SETTINGS**: Dedicated Multiplayer section in settings for server address and display name
+- [x] **MP-LOBBY-UI**: Frontend displays a browseable game list with real-time updates, manual code entry, and player count
+- [x] **MP-MENU-FLOW**: Menu state machine follows mode-select -> deck-gallery-online -> lobby -> host-setup -> waiting
+- [x] **MP-HOST-SETUP**: Host setup screen captures display name, public/private, password, format, and timer settings
+- [x] **MP-WAITING**: Waiting screen shows game code, LAN IP, listed-in-lobby status, and cancel button
+- [x] **MP-SETTINGS**: Dedicated Multiplayer section in settings for server address and display name
 
 ### P2P WebRTC
 
