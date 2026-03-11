@@ -189,15 +189,18 @@ export function GameProvider({
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
-                const store = useGameStore.getState();
-                store.setGameState(event.state);
-                store.setWaitingFor(event.state.waiting_for);
+                useGameStore.setState({
+                  gameState: event.state,
+                  waitingFor: event.state.waiting_for,
+                });
               }
               onP2PEventRef.current?.(event);
             });
 
             await initGame(gameId, adapter);
             if (cancelled) return;
+            controller = createGameLoopController({ mode: "online" });
+            controller.start();
             onReadyRef.current?.();
             audioManager.startMusic();
           } else {
@@ -211,15 +214,18 @@ export function GameProvider({
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
-                const store = useGameStore.getState();
-                store.setGameState(event.state);
-                store.setWaitingFor(event.state.waiting_for);
+                useGameStore.setState({
+                  gameState: event.state,
+                  waitingFor: event.state.waiting_for,
+                });
               }
               onP2PEventRef.current?.(event);
             });
 
             await initGame(gameId, adapter);
             if (cancelled) return;
+            controller = createGameLoopController({ mode: "online" });
+            controller.start();
             onReadyRef.current?.();
             audioManager.startMusic();
           }
@@ -232,6 +238,7 @@ export function GameProvider({
 
       return () => {
         cancelled = true;
+        if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
         if (p2pHostDestroy) p2pHostDestroy();
         audioManager.stopMusic(0);
@@ -273,14 +280,15 @@ export function GameProvider({
 
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            const store = useGameStore.getState();
-            // Store adapter if not yet stored (reconnect path)
-            if (!store.adapter && wsAdapter) {
-              store.setAdapter(wsAdapter);
-            }
-            store.setGameState(event.state);
-            store.setWaitingFor(event.state.waiting_for);
-            store.setLegalActions(event.legalActions);
+            // Batch all state updates atomically so the auto-pass controller
+            // sees consistent waitingFor + legalActions in a single subscription tick.
+            const needAdapter = !useGameStore.getState().adapter && wsAdapter;
+            useGameStore.setState({
+              gameState: event.state,
+              waitingFor: event.state.waiting_for,
+              legalActions: event.legalActions,
+              ...(needAdapter ? { adapter: wsAdapter } : {}),
+            });
             useMultiplayerStore.getState().setConnectionStatus("connected");
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
@@ -297,6 +305,11 @@ export function GameProvider({
           }
           onWsEventRef.current?.(event);
         });
+
+        // Start auto-pass controller for multiplayer (safe before game state
+        // exists — onWaitingForChanged returns early when waitingFor is null)
+        controller = createGameLoopController({ mode: "online" });
+        controller.start();
 
         if (isReconnect) {
           wsAdapter.tryReconnect();
@@ -317,6 +330,7 @@ export function GameProvider({
 
       return () => {
         cancelled = true;
+        if (controller) controller.dispose();
         if (wsUnsubscribe) wsUnsubscribe();
         if (wsAdapter) wsAdapter.dispose();
         useMultiplayerStore.getState().setConnectionStatus("disconnected");

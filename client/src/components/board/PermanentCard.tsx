@@ -47,13 +47,27 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     (s) => s.gameState?.combat?.attackers,
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const isActivatable = useGameStore((s) => {
+  const undo = useGameStore((s) => s.undo);
+
+  // Single selector: returns the matching legal action (or null) — used for both glow and click
+  const activatableAction = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return false;
-    return s.legalActions.some((a) =>
+    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return null;
+    return s.legalActions.find((a) =>
       (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
       (a.type === "TapLandForMana" && a.data.object_id === objectId),
-    );
+    ) ?? null;
+  });
+  const isActivatable = activatableAction !== null;
+
+  // Check if this specific permanent was tapped in the most recent undoable action
+  // by comparing its tapped state against the previous snapshot
+  const isUndoableTap = useGameStore((s) => {
+    if (s.stateHistory.length === 0) return false;
+    const prev = s.stateHistory[s.stateHistory.length - 1];
+    const prevObj = prev.objects[objectId];
+    const curObj = s.gameState?.objects[objectId];
+    return !!prevObj && !prevObj.tapped && !!curObj?.tapped && curObj.controller === playerId;
   });
 
   const longPressHandlers = useLongPress(
@@ -97,6 +111,9 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400/60 shadow-[0_0_10px_2px_rgba(34,211,238,0.3)]";
+  } else if (isUndoableTap) {
+    glowClass =
+      "ring-1 ring-amber-400/40 shadow-[0_0_6px_1px_rgba(201,176,55,0.3)]";
   } else if (isSelected) {
     glowClass =
       "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
@@ -128,13 +145,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       combatClickHandler(objectId);
     } else if (targetingMode && isValidTarget) {
       addTarget(objectId);
-    } else if (isActivatable) {
-      const actions = useGameStore.getState().legalActions;
-      const action = actions.find((a) =>
-        (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
-        (a.type === "TapLandForMana" && a.data.object_id === objectId),
-      );
-      if (action) dispatchAction(action);
+    } else if (activatableAction) {
+      dispatchAction(activatableAction);
+    } else if (isUndoableTap) {
+      undo();
     } else {
       selectObject(isSelected ? null : objectId);
     }

@@ -25,7 +25,7 @@ interface GameStoreActions {
   initGame: (gameId: string, adapter: EngineAdapter, deckData?: unknown) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
-  undo: () => void;
+  undo: () => Promise<void>;
   reset: () => void;
   setAdapter: (adapter: EngineAdapter) => void;
   setGameState: (state: GameState) => void;
@@ -167,7 +167,7 @@ export const useGameStore = create<GameStore>()(
       return events;
     },
 
-    undo: () => {
+    undo: async () => {
       const { stateHistory, adapter } = get();
       if (stateHistory.length === 0 || !adapter) return;
 
@@ -175,10 +175,12 @@ export const useGameStore = create<GameStore>()(
 
       // Sync WASM engine state with the restored client state
       adapter.restoreState(previous);
+      const legalActions = await adapter.getLegalActions();
 
       set({
         gameState: previous,
         waitingFor: previous.waiting_for,
+        legalActions,
         events: [],
         stateHistory: stateHistory.slice(0, -1),
       });
