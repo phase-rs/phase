@@ -17,6 +17,7 @@ client/coverage/
 data/*
 !data/standard-cards.txt
 !data/mtgjson/
+data/mtgjson/AtomicCards.json
 !data/abilities/
 
 # OS

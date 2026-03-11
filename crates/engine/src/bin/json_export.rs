@@ -15,8 +15,14 @@ fn main() {
         process::exit(1);
     };
 
-    let mtgjson_path = path.join("mtgjson");
+    let mtgjson_path = path.join("mtgjson/AtomicCards.json");
     let abilities_dir = path.join("abilities");
+
+    if !mtgjson_path.exists() {
+        eprintln!("Error: {} not found", mtgjson_path.display());
+        eprintln!("  Download with: curl -o data/mtgjson/AtomicCards.json https://mtgjson.com/api/v5/AtomicCards.json");
+        process::exit(1);
+    }
 
     let db = match CardDatabase::load_json(&mtgjson_path, &abilities_dir) {
         Ok(db) => db,
