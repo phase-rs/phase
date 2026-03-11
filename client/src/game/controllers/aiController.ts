@@ -58,7 +58,12 @@ export function createAIController(config: AIControllerConfig): AIController {
           pending = false;
           return;
         }
-        await dispatchAction(action);
+        try {
+          await dispatchAction(action);
+        } catch (dispatchErr) {
+          console.warn("[AI] Action rejected, falling back to PassPriority:", dispatchErr);
+          await dispatchAction({ type: "PassPriority" });
+        }
       } catch (e) {
         console.error("[AI] Error choosing action:", e);
       } finally {
