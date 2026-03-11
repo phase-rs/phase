@@ -31,6 +31,10 @@ name = "migrate"
 path = "src/bin/migrate.rs"
 required-features = ["forge-compat"]
 
+[[bin]]
+name = "migrate-abilities"
+path = "src/bin/migrate_abilities.rs"
+
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
