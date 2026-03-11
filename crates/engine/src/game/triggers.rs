@@ -2430,4 +2430,352 @@ pub mod tests {
             ObjectId(999)
         ));
     }
+
+    // === Triggered ability target selection tests ===
+
+    #[test]
+    fn trigger_target_multi_targets_sets_pending() {
+        // Trigger with targeting + multiple legal targets -> sets pending_trigger
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create two opponent creatures as legal targets
+        let target1 = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Opp Creature 1".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target1).unwrap().card_types.core_types.push(CoreType::Creature);
+        state.objects.get_mut(&target1).unwrap().controller = PlayerId(1);
+
+        let target2 = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Opp Creature 2".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target2).unwrap().card_types.core_types.push(CoreType::Creature);
+        state.objects.get_mut(&target2).unwrap().controller = PlayerId(1);
+
+        // Create a creature with ETB exile trigger targeting a creature opponent controls
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Database,
+                    effect: Effect::ChangeZone {
+                        origin: Some(Zone::Battlefield),
+                        destination: Zone::Exile,
+                        target: TargetFilter::Typed {
+                            card_type: Some(TypeFilter::Creature),
+                            subtype: None,
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        },
+                    },
+                    cost: None,
+                    sub_ability: None,
+                    duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: Some(TargetFilter::SelfRef),
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        // Fire an ETB event for the trigger creature
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: trigger_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Multiple legal targets -> should set pending_trigger, NOT push to stack
+        assert!(state.pending_trigger.is_some(), "Should have pending trigger");
+        assert_eq!(state.stack.len(), 0, "Should NOT be on stack yet");
+        let pending = state.pending_trigger.as_ref().unwrap();
+        assert_eq!(pending.source_id, trigger_creature);
+        assert_eq!(pending.controller, PlayerId(0));
+    }
+
+    #[test]
+    fn trigger_target_single_target_auto_selects() {
+        // Trigger with targeting + exactly 1 legal target -> auto-targets and pushes to stack
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create only ONE opponent creature as legal target
+        let target1 = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Opp Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target1).unwrap().card_types.core_types.push(CoreType::Creature);
+        state.objects.get_mut(&target1).unwrap().controller = PlayerId(1);
+
+        // Create trigger creature
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Database,
+                    effect: Effect::ChangeZone {
+                        origin: Some(Zone::Battlefield),
+                        destination: Zone::Exile,
+                        target: TargetFilter::Typed {
+                            card_type: Some(TypeFilter::Creature),
+                            subtype: None,
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        },
+                    },
+                    cost: None,
+                    sub_ability: None,
+                    duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: Some(TargetFilter::SelfRef),
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: trigger_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Single legal target -> auto-target and push to stack
+        assert!(state.pending_trigger.is_none(), "Should NOT have pending trigger");
+        assert_eq!(state.stack.len(), 1, "Should be on stack");
+        let entry = &state.stack[0];
+        match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                assert_eq!(ability.targets.len(), 1);
+                assert_eq!(ability.targets[0], crate::types::ability::TargetRef::Object(target1));
+            }
+            _ => panic!("Expected TriggeredAbility on stack"),
+        }
+    }
+
+    #[test]
+    fn trigger_target_zero_targets_skips() {
+        // Trigger with targeting + 0 legal targets -> skipped entirely
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // No opponent creatures on battlefield (no legal targets)
+
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Database,
+                    effect: Effect::ChangeZone {
+                        origin: Some(Zone::Battlefield),
+                        destination: Zone::Exile,
+                        target: TargetFilter::Typed {
+                            card_type: Some(TypeFilter::Creature),
+                            subtype: None,
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        },
+                    },
+                    cost: None,
+                    sub_ability: None,
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: Some(TargetFilter::SelfRef),
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: trigger_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Zero legal targets -> trigger is skipped
+        assert!(state.pending_trigger.is_none(), "Should NOT have pending trigger");
+        assert_eq!(state.stack.len(), 0, "Should NOT be on stack");
+    }
+
+    #[test]
+    fn trigger_no_execute_goes_on_stack_without_targeting() {
+        // Trigger with no execute (Effect::Unimplemented) goes on stack without targeting attempt
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Simple Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: None, // No execute ability
+                valid_card: None,
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(99),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Should go on stack as before (Unimplemented ability), no targeting
+        assert_eq!(state.stack.len(), 1);
+        assert!(state.pending_trigger.is_none());
+    }
+
+    #[test]
+    fn trigger_no_targeting_effect_goes_on_stack() {
+        // Trigger with execute but no targeting (e.g., Draw) goes on stack immediately
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Draw Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Database,
+                    effect: Effect::Draw { count: 1 },
+                    cost: None,
+                    sub_ability: None,
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: None,
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+            });
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(99),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // No targeting needed -> should be on stack immediately
+        assert_eq!(state.stack.len(), 1);
+        assert!(state.pending_trigger.is_none());
+    }
 }
