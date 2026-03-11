@@ -31,13 +31,17 @@ import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
+import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
+import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
+import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
+import { useMultiplayerStore } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
 
@@ -70,6 +74,13 @@ export function GamePage() {
     | { status: "failed" }
   >({ status: "idle" });
 
+  // Multiplayer UX state
+  const [showConcedeDialog, setShowConcedeDialog] = useState(false);
+  const [receivedEmote, setReceivedEmote] = useState<string | null>(null);
+  const receivedEmoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [timerRemaining, setTimerRemaining] = useState<Record<number, number>>({});
+  const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+
   const handleWsEvent = useCallback((event: WsAdapterEvent) => {
     switch (event.type) {
       case "gameCreated":
@@ -97,6 +108,21 @@ export function GamePage() {
         break;
       case "reconnectFailed":
         setReconnectState({ status: "failed" });
+        break;
+      case "stateChanged":
+        // Record game start time on first state update
+        setGameStartedAt((prev) => prev ?? Date.now());
+        break;
+      case "conceded":
+        // Server will follow up with GameOver; nothing extra needed here
+        break;
+      case "emoteReceived":
+        setReceivedEmote(event.emote);
+        if (receivedEmoteTimerRef.current) clearTimeout(receivedEmoteTimerRef.current);
+        receivedEmoteTimerRef.current = setTimeout(() => setReceivedEmote(null), 3000);
+        break;
+      case "timerUpdate":
+        setTimerRemaining((prev) => ({ ...prev, [event.player]: event.remainingSeconds }));
         break;
     }
   }, []);
@@ -150,6 +176,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
+        isOnlineMode={mode === "online"}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -157,6 +184,12 @@ export function GamePage() {
         reconnectState={reconnectState}
         showCardDataMissing={showCardDataMissing}
         onDismissCardDataMissing={() => setShowCardDataMissing(false)}
+        showConcedeDialog={showConcedeDialog}
+        onShowConcedeDialog={() => setShowConcedeDialog(true)}
+        onHideConcedeDialog={() => setShowConcedeDialog(false)}
+        receivedEmote={receivedEmote}
+        timerRemaining={timerRemaining}
+        gameStartedAt={gameStartedAt}
       />
     </GameProvider>
   );
@@ -165,6 +198,7 @@ export function GamePage() {
 interface GamePageContentProps {
   gameId: string;
   mode: string | null;
+  isOnlineMode: boolean;
   hostGameCode: string | null;
   waitingForOpponent: boolean;
   opponentDisconnected: boolean;
@@ -175,11 +209,18 @@ interface GamePageContentProps {
     | { status: "failed" };
   showCardDataMissing: boolean;
   onDismissCardDataMissing: () => void;
+  showConcedeDialog: boolean;
+  onShowConcedeDialog: () => void;
+  onHideConcedeDialog: () => void;
+  receivedEmote: string | null;
+  timerRemaining: Record<number, number>;
+  gameStartedAt: number | null;
 }
 
 function GamePageContent({
   gameId,
   mode,
+  isOnlineMode,
   hostGameCode,
   waitingForOpponent,
   opponentDisconnected,
@@ -187,6 +228,12 @@ function GamePageContent({
   reconnectState,
   showCardDataMissing,
   onDismissCardDataMissing,
+  showConcedeDialog,
+  onShowConcedeDialog,
+  onHideConcedeDialog,
+  receivedEmote,
+  timerRemaining,
+  gameStartedAt,
 }: GamePageContentProps) {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -204,6 +251,25 @@ function GamePageContent({
   const [showPreferences, setShowPreferences] = useState(false);
 
   const playerId = usePlayerId();
+  const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
+  const adapter = useGameStore((s) => s.adapter);
+
+  const handleConcede = useCallback(() => {
+    if (adapter && adapter instanceof WebSocketAdapter) {
+      adapter.sendConcede();
+    }
+    onHideConcedeDialog();
+  }, [adapter, onHideConcedeDialog]);
+
+  const handleSendEmote = useCallback(
+    (emote: string) => {
+      if (adapter && adapter instanceof WebSocketAdapter) {
+        adapter.sendEmote(emote);
+      }
+    },
+    [adapter],
+  );
+
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const inspectedObj =
@@ -277,7 +343,7 @@ function GamePageContent({
         <OpponentHand showCards={showAiHand} />
 
         {/* Opponent avatar centered below their hand */}
-        <OpponentHud />
+        <OpponentHud opponentName={isOnlineMode ? opponentDisplayName : undefined} />
 
         {/* Battlefield */}
         <GameBoard />
@@ -326,9 +392,11 @@ function GamePageContent({
       <GameMenu
         gameId={gameId}
         isAiMode={mode === "ai"}
+        isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
         onSettingsClick={() => setShowPreferences(true)}
+        onConcede={onShowConcedeDialog}
       />
 
       {/* Host game: show game code while waiting */}
@@ -446,8 +514,40 @@ function GamePageContent({
         />
       )}
 
+      {/* Multiplayer UX overlays */}
+      {isOnlineMode && (
+        <>
+          <ConcedeDialog
+            isOpen={showConcedeDialog}
+            onConfirm={handleConcede}
+            onCancel={onHideConcedeDialog}
+          />
+          <EmoteOverlay onSendEmote={handleSendEmote} receivedEmote={receivedEmote} />
+          {/* Per-player timer display */}
+          {Object.entries(timerRemaining).map(([pid, secs]) =>
+            secs > 0 ? (
+              <div
+                key={pid}
+                className={`fixed z-30 text-xs font-mono font-bold ${
+                  Number(pid) === playerId
+                    ? "bottom-40 left-1/2 -translate-x-1/2 text-amber-400"
+                    : "top-16 left-1/2 -translate-x-1/2 text-red-400"
+                }`}
+              >
+                {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
+              </div>
+            ) : null,
+          )}
+        </>
+      )}
+
       {waitingFor?.type === "GameOver" && (
-        <GameOverScreen winner={waitingFor.data.winner} mode={mode} />
+        <GameOverScreen
+          winner={waitingFor.data.winner}
+          mode={mode}
+          isOnlineMode={isOnlineMode}
+          gameStartedAt={gameStartedAt}
+        />
       )}
     </div>
   );
@@ -714,18 +814,34 @@ function VictoryParticles() {
   );
 }
 
-function GameOverScreen({ winner, mode }: { winner: number | null; mode: string | null }) {
+function GameOverScreen({
+  winner,
+  mode,
+  isOnlineMode = false,
+  gameStartedAt,
+}: {
+  winner: number | null;
+  mode: string | null;
+  isOnlineMode?: boolean;
+  gameStartedAt?: number | null;
+}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const difficulty = searchParams.get("difficulty") ?? "Medium";
-  const players = useGameStore((s) => s.gameState?.players);
+  const gameState = useGameStore((s) => s.gameState);
+  const players = gameState?.players;
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
-  const playerLife = players?.[0]?.life ?? 0;
-  const opponentLife = players?.[1]?.life ?? 0;
+  const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
-  const isVictory = winner === 0;
+  const playerLife = players?.[activePlayerId]?.life ?? 0;
+  const opponentLife = players?.[activePlayerId === 0 ? 1 : 0]?.life ?? 0;
+
+  const isVictory = winner === activePlayerId;
   const isDraw = winner == null;
+
+  const turnCount = gameState?.turn_number ?? 0;
+  const gameDuration = gameStartedAt ? Math.floor((Date.now() - gameStartedAt) / 1000) : null;
 
   const titleText = isDraw ? "DRAW" : isVictory ? "VICTORY" : "DEFEAT";
   const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
@@ -776,7 +892,7 @@ function GameOverScreen({ winner, mode }: { winner: number | null; mode: string 
         {titleText}
       </motion.h2>
 
-      {/* Life totals */}
+      {/* Life totals and game stats */}
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
@@ -790,6 +906,21 @@ function GameOverScreen({ winner, mode }: { winner: number | null; mode: string 
               <span className="mx-3 text-gray-500">/</span>
               Opponent: <span className="font-bold text-white">{opponentLife}</span>
             </p>
+            {(turnCount > 0 || gameDuration !== null) && (
+              <p className="mt-2 text-sm text-gray-400">
+                {turnCount > 0 && (
+                  <span>Turns: {turnCount}</span>
+                )}
+                {turnCount > 0 && gameDuration !== null && (
+                  <span className="mx-2 text-gray-600">|</span>
+                )}
+                {gameDuration !== null && (
+                  <span>
+                    Duration: {Math.floor(gameDuration / 60)}:{String(gameDuration % 60).padStart(2, "0")}
+                  </span>
+                )}
+              </p>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -803,12 +934,21 @@ function GameOverScreen({ winner, mode }: { winner: number | null; mode: string 
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
           >
-            <button
-              onClick={() => navigate("/")}
-              className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
-            >
-              Return to Menu
-            </button>
+            {isOnlineMode ? (
+              <button
+                onClick={() => navigate("/?view=lobby")}
+                className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
+              >
+                Back to Lobby
+              </button>
+            ) : (
+              <button
+                onClick={() => navigate("/")}
+                className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
+              >
+                Return to Menu
+              </button>
+            )}
             <button
               onClick={handleRematch}
               className="rounded-lg border border-gray-500 bg-transparent px-10 py-4 text-lg font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
