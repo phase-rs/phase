@@ -165,9 +165,16 @@ fn build_pw_resolved(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
+    let mut params = ability_def.effect.to_params();
+    params.extend(
+        ability_def
+            .remaining_params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     ResolvedAbility {
         effect: ability_def.effect.clone(),
-        params: ability_def.params(),
+        params,
         targets: Vec::new(),
         source_id,
         controller,

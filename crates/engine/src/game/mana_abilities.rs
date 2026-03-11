@@ -1,4 +1,4 @@
-use crate::types::ability::AbilityDefinition;
+use crate::types::ability::{AbilityDefinition, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -11,7 +11,7 @@ use super::mana_payment;
 /// Check if a typed ability definition represents a mana ability (MTG Rule 605).
 /// Mana abilities produce mana and resolve immediately without using the stack.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    ability_def.api_type() == "Mana"
+    matches!(ability_def.effect, Effect::Mana { .. })
 }
 
 /// Map a Forge "Produced$" color code to ManaType.
@@ -60,7 +60,13 @@ pub fn resolve_mana_ability(
     }
 
     // Determine produced mana color from the typed Effect
-    let compat_params = ability_def.params();
+    let mut compat_params = ability_def.effect.to_params();
+    compat_params.extend(
+        ability_def
+            .remaining_params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     let produced = compat_params
         .get("Produced")
         .cloned()

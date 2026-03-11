@@ -93,7 +93,13 @@ pub fn handle_cast_spell(
     // 4. Build ResolvedAbility
     let mana_cost = obj.mana_cost.clone();
     let svars = obj.svars.clone();
-    let compat_params = ability_def.params();
+    let mut compat_params = ability_def.effect.to_params();
+    compat_params.extend(
+        ability_def
+            .remaining_params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     let mut resolved = ResolvedAbility {
         effect: ability_def.effect.clone(),
         params: compat_params.clone(),
@@ -231,7 +237,13 @@ pub fn handle_activate_ability(
         });
     }
 
-    let compat_params2 = ability_def.params();
+    let mut compat_params2 = ability_def.effect.to_params();
+    compat_params2.extend(
+        ability_def
+            .remaining_params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     let mut resolved = ResolvedAbility {
         effect: ability_def.effect.clone(),
         params: compat_params2.clone(),

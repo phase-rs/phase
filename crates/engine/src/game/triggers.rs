@@ -174,9 +174,16 @@ fn build_triggered_ability(
     if let Some(execute_svar) = trig_def.params.get("Execute") {
         if let Some(svar_value) = svars.get(execute_svar) {
             if let Ok(ability_def) = crate::parser::ability::parse_ability(svar_value) {
+                let mut params = ability_def.effect.to_params();
+                params.extend(
+                    ability_def
+                        .remaining_params
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
                 return ResolvedAbility {
                     effect: ability_def.effect.clone(),
-                    params: ability_def.params(),
+                    params,
                     targets: Vec::new(),
                     source_id,
                     controller,
