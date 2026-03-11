@@ -235,3 +235,46 @@ Plans:
 - [x] 27-02-PLAN.md — Aura enchant target selection during casting + attachment on resolution
 - [x] 27-03-PLAN.md — Triggered ability target selection + exile return tracking
 - [ ] 27-04-PLAN.md — Gap closure: TriggerTargetSelection UI wiring + CONTEXT.md typed model rewrite
+
+### Phase 29: Support N Players in Engine and on Board in React for Various Formats
+**Goal**: Extend the engine's hardcoded 2-player model to support N players (2-6), update the board UI to render multiple player areas, introduce format-awareness (Standard, Commander, Free-for-All, Two-Headed Giant), and update networking/lobby/deck builder/AI for multiplayer formats
+**Depends on**: Phase 28
+**Requirements**: NP-FORMAT, NP-SEAT, NP-ITER, NP-PRIORITY, NP-TURNS, NP-ELIM, NP-COMBAT, NP-ATTACK-TARGET, NP-COMMANDER, NP-CMDZONE, NP-CMDTAX, NP-OPPONENT-MIGRATION, NP-WASM, NP-SERVER, NP-FILTER, NP-AI-MIGRATE, NP-BOARD-UI, NP-PLAYERAREA, NP-COMPACT, NP-1V1-PARITY, NP-COMMANDER-UI, NP-ATTACK-UI, NP-BLOCK-UI, NP-AI-THREAT, NP-AI-SEARCH, NP-AI-SEAT, NP-LOBBY, NP-READY-UP, NP-SPECTATOR, NP-DISCONNECT, NP-DECKBUILDER, NP-LEGALITY, NP-COMMANDER-DECK, NP-SETUP-FLOW, NP-PRESETS, NP-PRECONS, NP-INTEGRATION, NP-WASM-BUILD
+**Success Criteria** (what must be TRUE):
+  1. FormatConfig with factory methods creates valid configurations for Standard, Commander, FFA, and 2HG
+  2. Priority passes clockwise through all living players; stack resolves when all have passed consecutively
+  3. Turn rotation follows seat_order, skipping eliminated players
+  4. Elimination follows CR 800.4: permanents exiled, spells removed, game continues with remaining players
+  5. Per-creature attack target selection works in multiplayer (splitting attacks across opponents)
+  6. Commander rules: command zone, +2 tax per cast, 21 commander damage loss, zone redirection
+  7. Zero remaining PlayerId(1 - x.0) patterns in the codebase
+  8. Board UI renders 2-6 players with full/focused/compact modes, 1v1 visual parity maintained
+  9. AI plays competently in multiplayer with threat-aware evaluation and scaled search
+  10. Lobby supports format-aware game creation, ready-up, and spectators
+  11. Deck builder supports Commander format with color identity enforcement
+  12. Format-first game setup flow with presets and pre-built Commander decks
+**Plans**: 13 plans
+
+**Execution Order:**
+Wave 1: Plan 01 (foundation types — FormatConfig, player iteration, GameState extensions)
+Wave 2: Plans 02 + 03 + 04 (parallel — priority/turns/elimination, combat targeting, commander rules)
+Wave 3: Plans 05 + 06 (parallel — opponent() migration across 66 files, WASM/server/AI crate migration)
+Wave 4: Plans 07 + 08 (parallel — board UI refactor, combat UI)
+Wave 5: Plans 09 + 10 (parallel — AI N-player adaptation, lobby/networking format-awareness)
+Wave 6: Plans 11 + 12 (parallel — deck builder commander support, game setup flow)
+Wave 7: Plan 13 (integration verification + gameplay checkpoint)
+
+Plans:
+- [ ] 29-01-PLAN.md — FormatConfig types, player iteration functions, GameState/Player extensions
+- [ ] 29-02-PLAN.md — N-player priority, turn rotation, elimination system, SBA updates
+- [ ] 29-03-PLAN.md — Per-creature attack target selection, AttackTarget enum, combat damage with commander tracking
+- [ ] 29-04-PLAN.md — Commander rules: command zone, tax, zone redirection, color identity enforcement
+- [ ] 29-05-PLAN.md — Systematic PlayerId(1-x) migration across all engine files (66 files)
+- [ ] 29-06-PLAN.md — WASM bridge, server session, protocol, state filtering, AI crate migration for N players
+- [ ] 29-07-PLAN.md — Board UI: PlayerArea (full/focused/compact), CompactStrip, GameBoard N-player layout, Commander display
+- [ ] 29-08-PLAN.md — Combat UI: AttackTargetPicker, "Attack all" button, multi-defender blocking
+- [ ] 29-09-PLAN.md — AI: threat-aware evaluation, paranoid search, scaled budgets, multi-opponent combat
+- [ ] 29-10-PLAN.md — Lobby: format-aware host setup, ready room, spectator support, disconnect handling
+- [ ] 29-11-PLAN.md — Deck builder: Commander support, format legality badges, color identity validation
+- [ ] 29-12-PLAN.md — Game setup: format-first flow, FormatPicker, game presets, pre-built Commander decks
+- [ ] 29-13-PLAN.md — Integration verification: WASM rebuild, full test suite, 2-player parity + multiplayer gameplay checkpoint
