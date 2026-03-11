@@ -291,6 +291,7 @@ fn get_valid_tgts_string(def: &AbilityDefinition) -> String {
                 Some(crate::types::ability::TypeFilter::Land) => "Land",
                 Some(crate::types::ability::TypeFilter::Artifact) => "Artifact",
                 Some(crate::types::ability::TypeFilter::Enchantment) => "Enchantment",
+                Some(crate::types::ability::TypeFilter::Card) => "Card",
                 _ => "Any",
             };
             let ctrl_str = match controller {

@@ -147,6 +147,7 @@ fn extract_target_filter_string(effect: &crate::types::ability::Effect) -> Strin
                 Some(crate::types::ability::TypeFilter::Land) => "Land",
                 Some(crate::types::ability::TypeFilter::Artifact) => "Artifact",
                 Some(crate::types::ability::TypeFilter::Enchantment) => "Enchantment",
+                Some(crate::types::ability::TypeFilter::Card) => "Card",
                 _ => "Any",
             };
             let ctrl_str = match controller {

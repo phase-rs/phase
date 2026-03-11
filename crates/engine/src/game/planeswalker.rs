@@ -165,10 +165,11 @@ fn build_pw_resolved(
     )
 }
 
-#[cfg(all(test, feature = "forge-compat"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -185,8 +186,20 @@ mod tests {
         state
     }
 
-    fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
-        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    /// Create a loyalty ability with the given cost and effect.
+    fn make_loyalty_ability(loyalty_amount: i32, effect: Effect) -> AbilityDefinition {
+        AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect,
+            cost: Some(AbilityCost::Loyalty {
+                amount: loyalty_amount,
+            }),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        }
     }
 
     fn create_planeswalker(
@@ -219,7 +232,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
+            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
         );
 
         let mut events = Vec::new();
@@ -239,8 +252,16 @@ mod tests {
             PlayerId(0),
             "Liliana",
             5,
-            vec![parse_test_ability(
-                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature",
+            vec![make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Typed {
+                        card_type: Some(crate::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
+                    },
+                },
             )],
         );
 
@@ -259,7 +280,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
+            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
         );
 
         let mut events = Vec::new();
@@ -281,7 +302,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
+            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
         );
 
         // Activate loyalty
@@ -311,7 +332,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
+            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
         );
 
         // Not main phase
@@ -337,6 +358,7 @@ mod tests {
                 ability: ResolvedAbility::new(
                     crate::types::ability::Effect::Unimplemented {
                         name: "Dummy".to_string(),
+                        description: None,
                     },
                     vec![],
                     ObjectId(99),
@@ -356,8 +378,16 @@ mod tests {
             PlayerId(0),
             "Liliana",
             2,
-            vec![parse_test_ability(
-                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature",
+            vec![make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Typed {
+                        card_type: Some(crate::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
+                    },
+                },
             )],
         );
 
@@ -403,22 +433,39 @@ mod tests {
     #[test]
     fn parse_loyalty_cost_extracts_values() {
         assert_eq!(
-            parse_loyalty_cost(&parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")),
+            parse_loyalty_cost(&make_loyalty_ability(1, Effect::Draw { count: 1 })),
             1
         );
         assert_eq!(
-            parse_loyalty_cost(&parse_test_ability(
-                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature"
+            parse_loyalty_cost(&make_loyalty_ability(
+                -3,
+                Effect::Destroy {
+                    target: crate::types::ability::TargetFilter::Any,
+                }
             )),
             -3
         );
         assert_eq!(
-            parse_loyalty_cost(&parse_test_ability("AB$ Mill | PW_Cost$ 0 | NumCards$ 3")),
+            parse_loyalty_cost(&make_loyalty_ability(
+                0,
+                Effect::Mill {
+                    count: 3,
+                    target: crate::types::ability::TargetFilter::Any,
+                }
+            )),
             0
         );
-        assert_eq!(
-            parse_loyalty_cost(&parse_test_ability("AB$ Draw | NumCards$ 1")),
-            0
-        ); // no PW_Cost
+        // No loyalty cost
+        let no_cost = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Draw { count: 1 },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        };
+        assert_eq!(parse_loyalty_cost(&no_cost), 0);
     }
 }

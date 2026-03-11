@@ -76,34 +76,64 @@ pub fn resolve_mana_ability(
     Ok(())
 }
 
-#[cfg(all(test, feature = "forge-compat"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityCost, AbilityKind, DamageAmount, Effect, TargetFilter};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::ManaType;
+    use crate::types::mana::{ManaColor, ManaType};
     use crate::types::zones::Zone;
 
-    fn parse_test_ability(raw: &str) -> AbilityDefinition {
-        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    fn make_mana_ability(colors: Vec<ManaColor>) -> AbilityDefinition {
+        AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Mana { produced: colors },
+            cost: Some(AbilityCost::Tap),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        }
     }
 
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
-        let def =
-            parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.");
+        let def = make_mana_ability(vec![ManaColor::Green]);
         assert!(is_mana_ability(&def));
     }
 
     #[test]
     fn non_mana_api_type_not_detected() {
-        let def = parse_test_ability("AB$ DealDamage | Cost$ T | NumDmg$ 1 | ValidTgts$ Any");
+        let def = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(1),
+                target: TargetFilter::Any,
+            },
+            cost: Some(AbilityCost::Tap),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        };
         assert!(!is_mana_ability(&def));
     }
 
     #[test]
     fn draw_ability_is_not_mana_ability() {
-        let def = parse_test_ability("AB$ Draw | Cost$ T | NumCards$ 1");
+        let def = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Draw { count: 1 },
+            cost: Some(AbilityCost::Tap),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        };
         assert!(!is_mana_ability(&def));
     }
 
@@ -118,18 +148,12 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def =
-            parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.");
+        let def = make_mana_ability(vec![ManaColor::Green]);
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 
-        // Object should be tapped
         assert!(state.objects.get(&obj_id).unwrap().tapped);
-
-        // Player 0 should have 1 green mana
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
-
-        // Should have PermanentTapped + ManaAdded events
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
@@ -150,7 +174,7 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
 
-        let def = parse_test_ability("AB$ Mana | Cost$ T | Produced$ G");
+        let def = make_mana_ability(vec![ManaColor::Green]);
         let mut events = Vec::new();
         let result = resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events);
 
@@ -168,13 +192,23 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def = parse_test_ability("AB$ Mana | Cost$ T | Produced$ C | Amount$ 2");
+        // Empty produced vec maps to colorless mana (single unit via max(1))
+        let def = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Mana { produced: vec![] },
+            cost: Some(AbilityCost::Tap),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        };
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),
-            2
+            1
         );
     }
 }

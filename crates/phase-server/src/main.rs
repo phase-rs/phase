@@ -51,11 +51,8 @@ async fn main() {
     let card_db = if export_path.exists() {
         CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
     } else {
-        CardDatabase::load_json(
-            &data_path.join("mtgjson/test_fixture.json"),
-            &data_path.join("abilities"),
-        )
-        .expect("Failed to load card database")
+        CardDatabase::from_mtgjson(&data_path.join("mtgjson/test_fixture.json"))
+            .expect("Failed to load card database")
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);

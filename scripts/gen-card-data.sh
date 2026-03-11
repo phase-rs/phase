@@ -6,12 +6,6 @@ OUTPUT="client/public/card-data.json"
 
 echo "=== Card Data Generation ==="
 
-# Verify ability JSON files exist
-if [ ! -d "$DATA_DIR/abilities" ]; then
-  echo "Error: $DATA_DIR/abilities not found. Typed ability JSON files are required."
-  exit 1
-fi
-
 # Download MTGJSON AtomicCards if not present
 MTGJSON_FILE="$DATA_DIR/mtgjson/AtomicCards.json"
 if [ ! -f "$MTGJSON_FILE" ]; then
@@ -21,10 +15,10 @@ if [ ! -f "$MTGJSON_FILE" ]; then
   echo "Downloaded MTGJSON data."
 fi
 
-# Build and run the JSON-based card data exporter
-echo "Exporting card data from MTGJSON + ability JSON..."
+# Build and run the Oracle-based card data generator
+echo "Generating card data from MTGJSON via Oracle text parser..."
 mkdir -p "$(dirname "$OUTPUT")"
-cargo run --release --bin json-export -- "$DATA_DIR" > "$OUTPUT"
+cargo run --release --bin oracle-gen -- "$DATA_DIR" --stats > "$OUTPUT"
 
 # Summary
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
