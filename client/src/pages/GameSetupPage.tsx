@@ -444,11 +444,12 @@ export function GameSetupPage() {
 
         {step === "lobby" && (
           <LobbyView
-            onHostGame={() => { setConnectionMode("server"); setStep("host-setup"); }}
-            onHostP2P={() => { setConnectionMode("p2p"); setStep("host-setup"); }}
+            onHostGame={() => { setStep("host-setup"); }}
+            onHostP2P={() => { setStep("host-setup"); }}
             onJoinGame={handleJoinWithPassword}
             activeDeckName={activeDeckName}
             onChangeDeck={() => setStep("deck-select")}
+            connectionMode={connectionMode}
           />
         )}
 

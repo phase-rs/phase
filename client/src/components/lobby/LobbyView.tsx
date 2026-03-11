@@ -13,6 +13,7 @@ interface LobbyViewProps {
   onJoinGame: (code: string, password?: string) => void;
   activeDeckName: string | null;
   onChangeDeck: () => void;
+  connectionMode?: "server" | "p2p";
 }
 
 const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
@@ -29,7 +30,10 @@ export function LobbyView({
   onJoinGame,
   activeDeckName,
   onChangeDeck,
+  connectionMode,
 }: LobbyViewProps) {
+  const isServer = connectionMode !== "p2p";
+  const isP2P = connectionMode === "p2p";
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
   const [games, setGames] = useState<LobbyGame[]>([]);
   const [playerCount, setPlayerCount] = useState(0);
@@ -40,7 +44,10 @@ export function LobbyView({
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    // Convert ws:// URL to connect for lobby subscription
+    // P2P mode doesn't need server lobby connection
+    if (isP2P) return;
+
+    // Connect to server lobby for game list subscription
     const ws = new WebSocket(serverAddress);
     wsRef.current = ws;
 
@@ -92,7 +99,7 @@ export function LobbyView({
       ws.close();
       wsRef.current = null;
     };
-  }, [serverAddress]);
+  }, [serverAddress, isP2P]);
 
   const handleJoinFromList = useCallback(
     (code: string) => {
@@ -129,8 +136,10 @@ export function LobbyView({
     <div className="relative z-10 flex w-full max-w-lg flex-col items-center gap-6 px-4">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <h2 className="text-2xl font-bold tracking-tight text-white">Game Lobby</h2>
-        {playerCount > 0 && (
+        <h2 className="text-2xl font-bold tracking-tight text-white">
+          {isP2P ? "Peer-to-Peer" : "Online Lobby"}
+        </h2>
+        {isServer && playerCount > 0 && (
           <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
             {playerCount} online
           </span>
@@ -151,43 +160,54 @@ export function LobbyView({
         </button>
       </div>
 
-      {/* Format filter */}
-      <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
-        {FORMAT_FILTERS.map((opt) => (
-          <button
-            key={opt.label}
-            onClick={() => setFormatFilter(opt.value)}
-            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-              formatFilter === opt.value
-                ? "bg-cyan-600 text-white"
-                : "text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
+      {/* Format filter — server only */}
+      {isServer && (
+        <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
+          {FORMAT_FILTERS.map((opt) => (
+            <button
+              key={opt.label}
+              onClick={() => setFormatFilter(opt.value)}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                formatFilter === opt.value
+                  ? "bg-cyan-600 text-white"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
 
-      {/* Game list */}
-      <div className="w-full">
-        {filteredGames.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-gray-700 py-8 text-center">
-            <p className="text-sm text-gray-500">
-              No games available. Host one or join by code!
-            </p>
-          </div>
-        ) : (
-          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
-            {filteredGames.map((game) => (
-              <GameListItem
-                key={game.game_code}
-                game={game}
-                onJoin={handleJoinFromList}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      {/* Game list — server only */}
+      {isServer && (
+        <div className="w-full">
+          {filteredGames.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-700 py-8 text-center">
+              <p className="text-sm text-gray-500">
+                No games available. Host one or join by code!
+              </p>
+            </div>
+          ) : (
+            <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
+              {filteredGames.map((game) => (
+                <GameListItem
+                  key={game.game_code}
+                  game={game}
+                  onJoin={handleJoinFromList}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* P2P description */}
+      {isP2P && (
+        <div className="w-full rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-sm text-cyan-200">
+          Direct peer-to-peer connection. Host a game and share the 5-character code with your opponent.
+        </div>
+      )}
 
       {/* Manual code entry */}
       <div className="flex w-full items-center gap-2">
@@ -196,8 +216,8 @@ export function LobbyView({
           value={joinCode}
           onChange={(e) => setJoinCode(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
-          placeholder="Enter code or CODE@IP:PORT"
-          maxLength={50}
+          placeholder={isP2P ? "Enter 5-character P2P code" : "Enter code or CODE@IP:PORT"}
+          maxLength={isP2P ? 5 : 50}
           className="flex-1 rounded-lg bg-gray-800 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
         />
         <button
@@ -213,20 +233,24 @@ export function LobbyView({
         </button>
       </div>
 
-      {/* Host Game buttons */}
+      {/* Host Game button — mode-specific */}
       <div className="flex gap-3">
-        <button
-          onClick={onHostGame}
-          className={menuButtonClass({ tone: "emerald", size: "md" })}
-        >
-          Host (Server)
-        </button>
-        <button
-          onClick={onHostP2P}
-          className={menuButtonClass({ tone: "cyan", size: "md" })}
-        >
-          Host (P2P)
-        </button>
+        {isServer && (
+          <button
+            onClick={onHostGame}
+            className={menuButtonClass({ tone: "emerald", size: "md" })}
+          >
+            Host Game
+          </button>
+        )}
+        {isP2P && (
+          <button
+            onClick={onHostP2P}
+            className={menuButtonClass({ tone: "cyan", size: "md" })}
+          >
+            Host P2P Game
+          </button>
+        )}
       </div>
 
       {/* Password modal */}
