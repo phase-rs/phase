@@ -171,10 +171,62 @@ pub fn parse_oracle_text(
             continue;
         }
 
-        // Priority 13: Kicker/Multikicker — skip (handled by keywords)
+        // Priority 13: Keyword cost lines — skip (handled by MTGJSON keywords)
+        if is_keyword_cost_line(&lower) {
+            i += 1;
+            continue;
+        }
+
+        // Priority 13b: Kicker/Multikicker — skip (handled by keywords)
         if lower.starts_with("kicker") || lower.starts_with("multikicker") {
             i += 1;
             continue;
+        }
+
+        // Priority 13c: "Activate only..." constraint — skip
+        if lower.starts_with("activate ") || lower.starts_with("activate only") {
+            i += 1;
+            continue;
+        }
+
+        // Priority 14: Ability word — strip prefix and re-classify effect
+        if let Some(effect_text) = strip_ability_word(&line) {
+            let effect_lower = effect_text.to_lowercase();
+            // Try as trigger
+            if effect_lower.starts_with("when ")
+                || effect_lower.starts_with("whenever ")
+                || effect_lower.starts_with("at ")
+            {
+                let trigger = parse_trigger_line(&effect_text, card_name);
+                result.triggers.push(trigger);
+                i += 1;
+                continue;
+            }
+            // Try as static
+            if is_static_pattern(&effect_lower) {
+                if let Some(static_def) = parse_static_line(&effect_text) {
+                    result.statics.push(static_def);
+                    i += 1;
+                    continue;
+                }
+            }
+            // Try as effect
+            let def = parse_effect_chain(&effect_text, AbilityKind::Spell);
+            if !has_unimplemented(&def) {
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 14b: Try parsing as effect even for non-spells
+        if is_imperative_verb(&lower) {
+            let def = parse_effect_chain(&line, AbilityKind::Spell);
+            if !has_unimplemented(&def) {
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
         }
 
         // Priority 15: Fallback
@@ -504,9 +556,34 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("gets -")
         || lower.contains("get +")
         || lower.contains("get -")
+        || lower.contains("have ")
         || lower.contains("has ")
         || lower.contains("can't be blocked")
         || lower.contains("can't attack")
+        || lower.contains("can't block")
+        || lower.contains("can't be countered")
+        || lower.contains("can't be the target")
+        || lower.contains("can't be sacrificed")
+        || lower.contains("doesn't untap")
+        || lower.contains("don't untap")
+        || lower.starts_with("as long as ")
+        || lower.starts_with("enchanted ")
+        || lower.starts_with("equipped ")
+        || lower.starts_with("all creatures ")
+        || lower.starts_with("all permanents ")
+        || lower.starts_with("other ")
+        || lower.starts_with("each creature ")
+        || lower.starts_with("creatures you control ")
+        || lower.starts_with("creatures your opponents control ")
+        || lower.starts_with("spells you cast ")
+        || lower.starts_with("spells your opponents cast ")
+        || lower.contains("enters with ")
+        || lower.contains("cost {")
+        || lower.contains("costs {")
+        || lower.contains("cost less")
+        || lower.contains("cost more")
+        || lower.contains("costs less")
+        || lower.contains("costs more")
 }
 
 /// Check if a line looks like a replacement effect.
@@ -530,6 +607,150 @@ fn is_saga_chapter(lower: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if a line is a keyword with a cost (e.g., "Cycling {2}", "Flashback {3}{R}", "Crew 3").
+/// These are handled by MTGJSON keywords and should be skipped by the Oracle parser.
+fn is_keyword_cost_line(lower: &str) -> bool {
+    let keyword_costs = [
+        "cycling",
+        "flashback",
+        "crew",
+        "ward",
+        "equip", // already handled earlier but as safety
+        "bestow",
+        "embalm",
+        "eternalize",
+        "unearth",
+        "ninjutsu",
+        "prowl",
+        "morph",
+        "megamorph",
+        "madness",
+        "dash",
+        "emerge",
+        "escape",
+        "evoke",
+        "foretell",
+        "mutate",
+        "disturb",
+        "disguise",
+        "blitz",
+        "overload",
+        "spectacle",
+        "surge",
+        "encore",
+        "buyback",
+        "echo",
+        "outlast",
+        "scavenge",
+        "fortify",
+        "prototype",
+        "plot",
+        "craft",
+        "offspring",
+        "impending",
+        "reconfigure",
+        "suspend",
+        "cumulative upkeep",
+        "level up",
+        "channel",
+        "transfigure",
+        "transmute",
+        "forecast",
+        "recover",
+        "reinforce",
+        "retrace",
+        "adapt",
+        "monstrosity",
+        "affinity",
+        "convoke",
+        "delve",
+        "improvise",
+        "miracle",
+        "splice",
+        "entwine",
+    ];
+    keyword_costs
+        .iter()
+        .any(|kw| lower.starts_with(kw) && (lower.len() == kw.len() || lower.as_bytes().get(kw.len()) == Some(&b' ') || lower.as_bytes().get(kw.len()) == Some(&b'\t')))
+}
+
+/// Strip an "ability word — " prefix from a line.
+/// Ability words are italicized flavor prefixes before an em dash, e.g.:
+/// "Landfall — Whenever a land enters..." → "Whenever a land enters..."
+/// "Spell mastery — If there are two or more..." → "If there are two or more..."
+fn strip_ability_word(line: &str) -> Option<String> {
+    // Look for " — " (em dash with spaces) or " — " variants
+    for sep in &[" — ", " – ", " - "] {
+        if let Some(pos) = line.find(sep) {
+            let prefix = &line[..pos];
+            // Ability words are short (1-3 words), no punctuation
+            let word_count = prefix.split_whitespace().count();
+            if word_count >= 1 && word_count <= 4 && !prefix.contains('{') && !prefix.contains(':')
+            {
+                let rest = line[pos + sep.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.
+fn has_unimplemented(def: &AbilityDefinition) -> bool {
+    if matches!(def.effect, Effect::Unimplemented { .. }) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        return has_unimplemented(sub);
+    }
+    false
+}
+
+/// Check if a line starts with an imperative verb that `parse_effect` can handle.
+fn is_imperative_verb(lower: &str) -> bool {
+    let verbs = [
+        "add ",
+        "attach ",
+        "counter ",
+        "create ",
+        "deal ",
+        "destroy ",
+        "discard ",
+        "draw ",
+        "each player ",
+        "each opponent ",
+        "exile ",
+        "explore",
+        "fight ",
+        "gain control ",
+        "gain ",
+        "look at ",
+        "lose ",
+        "mill ",
+        "proliferate",
+        "put ",
+        "return ",
+        "reveal ",
+        "sacrifice ",
+        "scry ",
+        "search ",
+        "shuffle ",
+        "surveil ",
+        "tap ",
+        "untap ",
+        "you gain ",
+        "you lose ",
+        "you draw ",
+        "you may ",
+        "target ",
+        "it deals ",
+        "it gets ",
+    ];
+    verbs.iter().any(|v| lower.starts_with(v))
 }
 
 /// Create an Unimplemented fallback ability.

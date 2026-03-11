@@ -1,6 +1,7 @@
 use super::oracle_target::parse_target;
 use super::oracle_util::{parse_mana_production, parse_number};
 use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter};
+use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -13,10 +14,17 @@ pub fn parse_effect(text: &str) -> Effect {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
-    // --- Mana production: "add {G}" ---
+    // --- Mana production: "add {G}", "add one mana of any color", "add {C}" ---
     if lower.starts_with("add ") {
         if let Some((colors, _)) = parse_mana_production(&text[4..]) {
             return Effect::Mana { produced: colors };
+        }
+        if lower.contains("mana of any color") || lower.contains("one mana of any color") {
+            return Effect::Mana { produced: vec![] };
+        }
+        // {C} — colorless mana (not in ManaColor, produce empty for "any")
+        if lower[4..].trim().starts_with("{c}") {
+            return Effect::Mana { produced: vec![] };
         }
     }
 
@@ -207,6 +215,116 @@ pub fn parse_effect(text: &str) -> Effect {
         return Effect::Proliferate;
     }
 
+    // --- Shuffle ---
+    if lower.starts_with("shuffle ") && lower.contains("library") {
+        return Effect::Unimplemented {
+            name: "shuffle".to_string(),
+            description: Some(text.to_string()),
+        };
+    }
+
+    // --- Reveal ---
+    if lower.starts_with("reveal ") {
+        let count = if lower.contains("the top ") {
+            let after_top = &lower[lower.find("the top ").unwrap() + 8..];
+            parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
+        } else {
+            1
+        };
+        return Effect::Dig {
+            count,
+            destination: None,
+        };
+    }
+
+    // --- Prevent damage ---
+    if lower.starts_with("prevent ") {
+        return Effect::Unimplemented {
+            name: "prevent".to_string(),
+            description: Some(text.to_string()),
+        };
+    }
+
+    // --- Regenerate ---
+    if lower.starts_with("regenerate ") {
+        return Effect::Unimplemented {
+            name: "regenerate".to_string(),
+            description: Some(text.to_string()),
+        };
+    }
+
+    // --- Copy ---
+    if lower.starts_with("copy ") {
+        let (target, _) = parse_target(&text[5..]);
+        return Effect::CopySpell { target };
+    }
+
+    // --- Transform ---
+    if lower.starts_with("transform ") || lower == "transform" {
+        return Effect::Unimplemented {
+            name: "transform".to_string(),
+            description: Some(text.to_string()),
+        };
+    }
+
+    // --- Attach ---
+    if lower.starts_with("attach ") {
+        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
+        let (target, _) = parse_target(&text[to_pos..]);
+        return Effect::Attach { target };
+    }
+
+    // --- Put (mill variant): "put the top N cards ... into ... graveyard" ---
+    if lower.starts_with("put the top ") && lower.contains("graveyard") {
+        let after = &lower[12..];
+        let count = parse_number(after).map(|(n, _)| n).unwrap_or(1);
+        return Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        };
+    }
+
+    // --- Put card on top of library ---
+    if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
+        return Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+        };
+    }
+
+    // --- Subject stripping: "each player/opponent" → delegate to verb ---
+    if lower.starts_with("each player ") || lower.starts_with("each opponent ") {
+        if let Some(verb_start) = find_verb_after_subject(&lower) {
+            let rest = &text[verb_start..];
+            let deconjugated = deconjugate_verb(rest);
+            return parse_effect(&deconjugated);
+        }
+    }
+
+    // --- "you may " prefix stripping ---
+    if lower.starts_with("you may ") {
+        return parse_effect(&text[8..]);
+    }
+
+    // --- "it " prefix: "it gets +N/+M" / "it deals N damage" ---
+    if lower.starts_with("it ") {
+        return parse_effect(&text[3..]);
+    }
+
+    // --- "that creature/player" prefix stripping ---
+    if lower.starts_with("that creature ") {
+        return parse_effect(&text[14..]);
+    }
+    if lower.starts_with("that player ") {
+        return parse_effect(&text[12..]);
+    }
+
+    // --- "they " prefix stripping ---
+    if lower.starts_with("they ") {
+        return parse_effect(&text[5..]);
+    }
+
     // --- Fallback ---
     let verb = lower.split_whitespace().next().unwrap_or("unknown");
     Effect::Unimplemented {
@@ -340,12 +458,23 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
 }
 
 fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
+    // "create a token that's a copy of {target}"
+    if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
+        let copy_pos = lower
+            .find("copy of ")
+            .map(|p| p + 8)
+            .unwrap_or(lower.len());
+        let (target, _) = parse_target(&_text[copy_pos..]);
+        return Some(Effect::CopySpell { target });
+    }
+
     // "create N {P/T} {color} {type} creature token(s) [with {keywords}]"
     let after = &lower[7..]; // skip "create "
     let (count, rest) = parse_number(after).unwrap_or((1, after));
-    // Try to find P/T pattern
+
+    // Try to find P/T pattern directly after count
     if let Some((p, t)) = parse_pt_modifier(rest) {
-        let type_name = "Token".to_string(); // simplified
+        let type_name = "Token".to_string();
         return Some(Effect::Token {
             name: type_name,
             power: p,
@@ -356,11 +485,102 @@ fn try_parse_token(lower: &str, _text: &str) -> Option<Effect> {
             count,
         });
     }
+
+    // Handle "create a N/N {color} {creature_type} creature token"
+    // where P/T appears after a/an and optional adjectives
+    if let Some(pt_pos) = find_pt_pattern(rest) {
+        if let Some((p, t)) = parse_pt_modifier(&rest[pt_pos..]) {
+            let after_pt = &rest[pt_pos..];
+            let after_slash = after_pt
+                .find(|c: char| c.is_whitespace())
+                .map(|i| after_pt[i..].trim())
+                .unwrap_or("");
+            let color = extract_color_word(after_slash);
+            let creature_type = extract_creature_type(after_slash);
+            return Some(Effect::Token {
+                name: creature_type.clone(),
+                power: p,
+                toughness: t,
+                types: vec!["Creature".to_string()],
+                colors: color.into_iter().collect(),
+                keywords: vec![],
+                count,
+            });
+        }
+    }
+
     // Fallback: unstructured token
     Some(Effect::Unimplemented {
         name: "create".to_string(),
         description: Some(lower.to_string()),
     })
+}
+
+/// Find the byte offset of a P/T pattern (e.g., "1/1", "2/2") within text.
+fn find_pt_pattern(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    for (i, window) in bytes.windows(3).enumerate() {
+        if window[0].is_ascii_digit() && window[1] == b'/' && window[2].is_ascii_digit() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Extract a color word from token description text.
+fn extract_color_word(text: &str) -> Option<ManaColor> {
+    let lower = text.to_lowercase();
+    if lower.contains("white") {
+        Some(ManaColor::White)
+    } else if lower.contains("blue") {
+        Some(ManaColor::Blue)
+    } else if lower.contains("black") {
+        Some(ManaColor::Black)
+    } else if lower.contains("red") {
+        Some(ManaColor::Red)
+    } else if lower.contains("green") {
+        Some(ManaColor::Green)
+    } else {
+        None
+    }
+}
+
+/// Extract creature type from token description (word before "creature token").
+fn extract_creature_type(text: &str) -> String {
+    let lower = text.to_lowercase();
+    if let Some(pos) = lower.find("creature token") {
+        let before = lower[..pos].trim();
+        if let Some(last_word) = before.split_whitespace().last() {
+            let capitalized =
+                last_word[..1].to_uppercase() + &last_word[1..];
+            return capitalized;
+        }
+    }
+    "Token".to_string()
+}
+
+/// Strip third-person 's' from the first word: "discards a card" → "discard a card".
+fn deconjugate_verb(text: &str) -> String {
+    let text = text.trim();
+    let first_space = text.find(' ').unwrap_or(text.len());
+    let verb = &text[..first_space];
+    let rest = &text[first_space..];
+    let base = if verb.ends_with('s') && !verb.ends_with("ss") {
+        &verb[..verb.len() - 1]
+    } else {
+        verb
+    };
+    format!("{}{}", base, rest)
+}
+
+/// Find the byte offset of the verb after "each player/opponent" subjects.
+fn find_verb_after_subject(lower: &str) -> Option<usize> {
+    for prefix in &["each opponent ", "each player "] {
+        if lower.starts_with(prefix) {
+            return Some(prefix.len());
+        }
+    }
+    None
 }
 
 fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
@@ -494,5 +714,129 @@ mod tests {
         );
         // First sentence contains the em dash, should parse (possibly as unimplemented)
         assert!(def.sub_ability.is_some());
+    }
+
+    #[test]
+    fn effect_shuffle_library() {
+        let e = parse_effect("Shuffle your library");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented { ref name, .. } if name == "shuffle"
+        ));
+    }
+
+    #[test]
+    fn effect_reveal_top_cards() {
+        let e = parse_effect("Reveal the top 3 cards of your library");
+        assert!(matches!(e, Effect::Dig { count: 3, .. }));
+    }
+
+    #[test]
+    fn effect_prevent_damage() {
+        let e = parse_effect("Prevent the next 3 damage");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented { ref name, .. } if name == "prevent"
+        ));
+    }
+
+    #[test]
+    fn effect_regenerate() {
+        let e = parse_effect("Regenerate target creature");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented { ref name, .. } if name == "regenerate"
+        ));
+    }
+
+    #[test]
+    fn effect_copy_spell() {
+        let e = parse_effect("Copy target spell");
+        assert!(matches!(e, Effect::CopySpell { .. }));
+    }
+
+    #[test]
+    fn effect_transform() {
+        let e = parse_effect("Transform this creature");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented { ref name, .. } if name == "transform"
+        ));
+    }
+
+    #[test]
+    fn effect_attach() {
+        let e = parse_effect("Attach this to target creature");
+        assert!(matches!(e, Effect::Attach { .. }));
+    }
+
+    #[test]
+    fn effect_each_opponent_discards() {
+        let e = parse_effect("Each opponent discards a card");
+        assert!(matches!(e, Effect::Discard { count: 1, .. }));
+    }
+
+    #[test]
+    fn effect_you_may_draw() {
+        let e = parse_effect("You may draw a card");
+        assert!(matches!(e, Effect::Draw { count: 1 }));
+    }
+
+    #[test]
+    fn effect_it_gets_pump() {
+        let e = parse_effect("It gets +2/+2 until end of turn");
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: 2,
+                toughness: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_they_draw() {
+        let e = parse_effect("They draw two cards");
+        assert!(matches!(e, Effect::Draw { count: 2 }));
+    }
+
+    #[test]
+    fn effect_add_mana_any_color() {
+        let e = parse_effect("Add one mana of any color");
+        assert!(matches!(e, Effect::Mana { ref produced } if produced.is_empty()));
+    }
+
+    #[test]
+    fn effect_put_top_cards_into_graveyard() {
+        let e = parse_effect("Put the top 3 cards of your library into your graveyard");
+        assert!(matches!(e, Effect::Mill { count: 3, .. }));
+    }
+
+    #[test]
+    fn effect_create_colored_token() {
+        let e = parse_effect("Create a 1/1 white Soldier creature token");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                power: 1,
+                toughness: 1,
+                count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_that_creature_gets() {
+        let e = parse_effect("That creature gets +1/+1 until end of turn");
+        assert!(matches!(
+            e,
+            Effect::Pump {
+                power: 1,
+                toughness: 1,
+                ..
+            }
+        ));
     }
 }
