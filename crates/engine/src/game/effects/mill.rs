@@ -1,12 +1,11 @@
-use crate::game::zones;
+use crate::game::{players, zones};
 use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// Mill target player: move top N cards from their library to their graveyard.
-/// Target is resolved from ability.targets (first TargetRef::Player), or defaults to opponent of controller.
+/// Target is resolved from ability.targets (first TargetRef::Player), or defaults to next player after controller.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -17,7 +16,7 @@ pub fn resolve(
         _ => 1,
     };
 
-    // Find target player: first TargetRef::Player, or opponent of controller
+    // Find target player: first TargetRef::Player, or default to next player (N-player safe)
     let target_player = ability
         .targets
         .iter()
@@ -28,10 +27,7 @@ pub fn resolve(
                 None
             }
         })
-        .unwrap_or({
-            // Default to opponent: if controller is 0, target is 1, and vice versa
-            PlayerId(if ability.controller.0 == 0 { 1 } else { 0 })
-        });
+        .unwrap_or_else(|| players::next_player(state, ability.controller));
 
     let player = state
         .players
