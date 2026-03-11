@@ -1,376 +1,363 @@
 # Phase 28: Native Ability Data Model - Research
 
 **Researched:** 2026-03-10
-**Domain:** Rust type system design, serde data migration, card data pipeline
+**Domain:** Rust type system refactoring, serde data model migration, card data pipeline
 **Confidence:** HIGH
 
 ## Summary
 
-Phase 28 eliminates all Forge scripting DSL remnants from the runtime data model. The current system has typed enums (`Effect`, `TriggerMode`, `StaticMode`, `ReplacementEvent`) introduced in Phase 21, but these wrap `HashMap<String, String>` params bags for trigger conditions, static ability effects, replacement behavior, and SubAbility chains. At runtime, 15,930 triggers use `Execute` params pointing to raw Forge SVar strings (`"DB$ Draw | NumCards$ 1"`) that get parsed via `parse_ability()` -- a Forge string parser that should be fully gated behind `forge-compat`.
+Phase 28 eliminates all Forge scripting DSL remnants from the engine runtime. The current codebase uses typed `Effect` enums (38 variants) but falls back to `HashMap<String, String>` for trigger/static/replacement parameters, SubAbility chains via SVar string references, Forge-style filter strings (`"Creature.Other+YouCtrl"`), and `remaining_params` catch-all bags. The phase replaces every `HashMap<String, String>` with typed struct fields, every Forge filter string with a `TargetFilter` enum, every SVar chain with inlined `Option<Box<AbilityDefinition>>`, and every `String` cost/zone/color field with the existing typed enums.
 
-The transformation is large (32,274 card files, 158 trigger param keys, 165 static param keys, 72 replacement param keys, 623 remaining_params keys) but mechanical. The engine only *consumes* roughly 25-30 distinct param keys at runtime. The vast majority of params are metadata (AI hints, descriptions, conditions the engine doesn't implement yet) that can be categorized as `Option<T>` typed fields or moved to an `unimplemented: HashMap<String, String>` catch-all that is explicitly NOT used at runtime (purely for data preservation during migration).
+The codebase is well-positioned for this refactoring. The typed `Effect` enum, `ManaCost`, `ManaColor`, `Zone`, `Keyword`, `TriggerMode`, `StaticMode`, and `ReplacementEvent` enums already exist. The primary work is: (1) designing typed fields for the ~30 trigger param keys, ~25 static param keys, and ~15 replacement param keys currently stored as `HashMap<String, String>`, (2) creating the `TargetFilter` enum to replace Forge filter strings, (3) writing a migration binary to convert 32,274 JSON ability files, and (4) updating all 22+ runtime consumer files.
 
-**Primary recommendation:** Work incrementally -- convert the ~25 runtime-consumed param keys to typed struct fields first, then migrate the remaining keys to typed `Option<T>` fields or a separate metadata struct, and finally run a batch migration script across all 32K JSON files.
+**Primary recommendation:** Execute incrementally -- type definitions first, then runtime consumers, then JSON migration, then test and cleanup. The type changes are the foundation everything else depends on.
 
 <user_constraints>
-
 ## User Constraints (from CONTEXT.md)
 
 ### Locked Decisions
-
-- **No `remaining_params` catch-all.** The `remaining_params: HashMap<String, String>` field on `AbilityDefinition` must be eliminated entirely. Every parameter currently flowing through `remaining_params` (619 unique Forge-style keys) must be mapped to typed fields on the appropriate struct.
-- **No `Effect::Other` with Forge params.** The `Effect::Other { api_type, params }` variant must be removed or replaced with specific typed variants for every effect the engine actually handles. Effects the engine doesn't handle yet should be represented as `Effect::Unimplemented { name: String }` or similar -- NOT as a bag of Forge strings.
-- **No SVar strings.** The `svars: HashMap<String, String>` field on `CardFace` must be eliminated. All SubAbility chaining currently done via `Execute` -> raw SVar string -> `parse_ability()` must be converted to typed SubAbility references resolved at data-load time.
-- **No `parse_ability()` at runtime.** The `parser::ability` module (currently ungated) must be gated behind `forge-compat` or removed entirely. Zero Forge string parsing at runtime.
-- **No Forge parameter key names.** Keys like `Execute`, `ValidCard`, `SubAbility`, `TriggerDescription`, `AddKeyword`, `Affected`, etc. must not appear as string keys in any runtime data structure. They become typed struct fields.
+- Zero `HashMap<String, String>` anywhere in the type system -- no `remaining_params`, no `params` on definitions, no `GenericEffect { params }`, no `Cleanup { params }`, no `Mana { params }`, no `Effect::Other`
+- `TargetFilter` typed enum replacing all Forge filter strings (structure defined in CONTEXT.md)
+- `AbilityCost` expanded with `PayLife`, `Discard`, `Exile`, `TapCreatures`, typed `ManaCost` for Mana variant
+- SubAbility chains inlined as `Option<Box<AbilityDefinition>>` resolved at JSON load time
+- All Effect variants with String zone/color fields become typed (`Zone`, `ManaColor`, `Keyword`)
+- `CardFace.keywords: Vec<String>` -> `Vec<Keyword>`, `power/toughness: Option<String>` -> `Option<PtValue>`
+- `svars: HashMap<String, String>` removed from `CardFace`, `GameObject`, `ResolvedAbility`
+- `ResolvedAbility.params: HashMap<String, String>` removed
+- `parse_ability()` gated behind `forge-compat`
+- All compat methods (`api_type()`, `to_params()`, `from_raw()`, `params()`) deleted entirely
+- `Effect::Other` removed entirely (not replaced with Unimplemented)
+- All 32,274 `data/abilities/*.json` migrated to native typed schema
+- `ActiveContinuousEffect.mode: String` -> `StaticMode`, `params: HashMap` -> Claude's discretion (recommended: `ContinuousModification` enum)
+- New types: `TargetFilter`, `Duration`, `PtValue`, `DevotionCheck`
 
 ### Claude's Discretion
-
-- Exact typed struct designs for trigger/static/replacement definitions
-- Whether to process the migration incrementally (triggers -> statics -> replacements -> abilities) or all at once
-- How to handle the long tail of rarely-used Forge params -- typed `Option<T>` fields vs grouped sub-structs
-- Whether SubAbility chains are inlined (nested structs) or referenced by index/name
-- Schema versioning strategy for the JSON files
-- How to handle cards whose abilities the engine doesn't yet fully implement (typed `Unimplemented` variant vs omission)
+- Whether to process migration incrementally (triggers -> statics -> replacements -> abilities) or all at once
+- Exact design of `ContinuousModification` enum for ActiveContinuousEffect
+- Schema versioning strategy for JSON files
+- How to handle cards whose abilities the engine doesn't yet fully implement
+- Exact design of `DevotionCheck` struct
+- Exact AbilityDefinition field mapping from remaining_params keys
+- Whether TargetFilter needs additional filter properties beyond those listed
+- Exact Duration enum variants beyond the known four
 
 ### Deferred Ideas (OUT OF SCOPE)
-
 None -- this phase is the final step in data model independence.
-
 </user_constraints>
+
+<phase_requirements>
+## Phase Requirements
+
+| ID | Description | Research Support |
+|----|-------------|-----------------|
+| NAT-01 | `TriggerDefinition`, `StaticDefinition`, `ReplacementDefinition` use typed struct fields instead of `params: HashMap<String, String>` | Trigger params analysis (15K Execute, 15K TriggerDescription, 11K ValidCard, etc.), static params (6.5K Description, 4.3K Affected, 1.8K AddPower), replacement params (1.5K Description, 1.1K ReplaceWith) -- all mappable to typed fields |
+| NAT-02 | `svars: HashMap<String, String>` eliminated from `CardFace` and `GameObject` -- SubAbility chains resolved at data-load time | 5,137 SubAbility + 15,158 Execute references in ability files; triggers.rs `build_triggered_ability()` and effects/mod.rs `resolve_ability_chain()` are the two runtime SVar consumers |
+| NAT-03 | `remaining_params` field removed from `AbilityDefinition` | 16,874 abilities have remaining_params; top keys are SpellDescription (17K), SubAbility (5K), TgtPrompt (3.5K), Defined (2K) -- mappable to typed fields on AbilityDefinition |
+| NAT-04 | `TargetSpec` replaced with typed `TargetFilter` enum | filter.rs implements Forge-style filter matching; 17 `.params.` accesses in layers.rs read `Affected` filter strings; TargetSpec has 6 variants with String-based filters |
+| NAT-05 | `parser::ability::parse_ability()` gated behind `forge-compat` | Currently ungated, called from triggers.rs line 176 and effects/mod.rs line 163 -- both resolve SVars at runtime. After SubAbility inlining, these call sites are eliminated |
+| NAT-06 | All 32K `data/abilities/*.json` files migrated to native typed JSON schema | 32,274 files; 12,876 with triggers, 5,815 with statics, 1,443 with replacements; migration binary converts HashMap params to typed struct fields + TargetFilter |
+</phase_requirements>
 
 ## Standard Stack
 
 ### Core
 | Library | Version | Purpose | Why Standard |
 |---------|---------|---------|--------------|
-| serde | current | JSON serialization/deserialization | Already used throughout, #[serde(tag, default, flatten)] |
-| schemars | current | JSON Schema generation from Rust types | Already integrated, auto-generates schema.json |
-| serde_json | current | JSON parsing and writing | Already used for ability files |
+| serde | 1.x | JSON serialization of all new types | Already used throughout; `#[serde(tag = "type")]` for discriminated unions |
+| schemars | 0.8.x | JSON Schema generation from Rust types | Already used; schema.json auto-generated from `AbilityFile` |
+| serde_json | 1.x | JSON parsing in migration binary | Already used for card data pipeline |
 
 ### Supporting
 | Library | Version | Purpose | When to Use |
 |---------|---------|---------|-------------|
-| rayon | already in deps | Parallel iteration for migration script | Processing 32K files in batch |
-| insta | already in deps | Snapshot testing | Verify JSON format changes |
+| thiserror | 1.x | Error types for migration failures | Already in use; extend for migration errors |
+| indicatif | 0.17.x | Progress bar for 32K file migration | Optional quality-of-life for migration binary |
 
-No new dependencies required -- this is purely a type system refactor using existing infrastructure.
+### Alternatives Considered
+None -- the stack is fully determined by existing project choices.
 
 ## Architecture Patterns
 
-### Current Architecture (What Must Change)
-
+### Recommended Project Structure
 ```
-data/abilities/*.json
-    |
-    v
-AbilityFile (serde) --> CardFace { svars: HashMap, triggers: Vec<TriggerDef{params: HashMap}>, ... }
-    |
-    v
-GameObject { svars: HashMap, trigger_definitions: Vec<TriggerDef{params: HashMap}>, ... }
-    |
-    v (at runtime, when trigger fires)
-build_triggered_ability() --> parse_ability(svar_string) --> ResolvedAbility { params: HashMap, svars: HashMap }
-    |
-    v (during resolution)
-resolve_ability_chain() --> ability.params.get("SubAbility") --> ability.svars.get(name) --> parse_ability()
-```
-
-### Target Architecture
-
-```
-data/abilities/*.json (new format: typed fields, no params HashMaps)
-    |
-    v
-AbilityFile (serde) --> CardFace { triggers: Vec<TriggerDef{...typed fields...}>, ... }
-                                   (NO svars field)
-    |
-    v
-GameObject { trigger_definitions: Vec<TriggerDef{...typed fields...}>, ... }
-              (NO svars field)
-    |
-    v (at runtime, when trigger fires)
-build_triggered_ability() --> trigger_def.execute (typed Option<Box<AbilityDefinition>>)
-                              --> ResolvedAbility { effect: Effect, sub_ability: Option<Box<...>>, ... }
-    |
-    v (during resolution)
-resolve_ability_chain() --> ability.sub_ability --> resolve recursively (no string parsing)
+crates/engine/src/types/
+├── ability.rs           # Effect, AbilityDefinition, AbilityCost, TargetFilter (MAJOR changes)
+├── card.rs              # CardFace (svars removed, keywords Vec<Keyword>, PtValue)
+├── keywords.rs          # Keyword enum (cost params -> ManaCost)
+├── layers.rs            # ActiveContinuousEffect (typed ContinuousModification)
+├── statics.rs           # StaticMode (unchanged)
+├── triggers.rs          # TriggerMode (unchanged)
+├── replacements.rs      # ReplacementEvent (unchanged)
+├── mana.rs              # ManaCost (already typed, reused)
+├── zones.rs             # Zone (already typed, reused)
+├── duration.rs          # NEW: Duration enum
+├── filter.rs            # NEW: TargetFilter enum (or in ability.rs)
+crates/engine/src/game/
+├── filter.rs            # REWRITTEN: typed TargetFilter matching instead of string parsing
+├── layers.rs            # REWRITTEN: typed ContinuousModification instead of HashMap params
+├── triggers.rs          # REWRITTEN: typed TriggerDefinition fields, no SVar resolution
+├── effects/mod.rs       # REWRITTEN: typed sub_ability chain, no SVar parsing
+├── effects/effect.rs    # REWRITTEN: typed static_abilities instead of SVar parsing
+├── deck_loading.rs      # Simplified: no svars copy
+crates/engine/src/bin/
+├── migrate_abilities.rs # NEW: migration binary
 ```
 
-### Pattern 1: Typed Definition Structs
+### Pattern 1: Discriminated Union per Definition Type
+**What:** Each definition type (Trigger, Static, Replacement) gets a typed struct with enum-specific fields instead of HashMap
+**When to use:** For all definition types
 
-**What:** Replace `params: HashMap<String, String>` with typed struct fields on each definition type.
-
-**Approach:** Only the ~25 keys the engine actually reads at runtime need typed fields. The remaining keys (AI hints, descriptions, unimplemented conditions) go into grouped metadata sub-structs or are dropped if purely Forge-specific.
-
-**Trigger example -- keys actually consumed at runtime:**
+TriggerDefinition currently:
 ```rust
 pub struct TriggerDefinition {
     pub mode: TriggerMode,
-    // Zone transition params (ChangesZone triggers)
-    pub origin: Option<String>,       // was params["Origin"]
-    pub destination: Option<String>,   // was params["Destination"]
-    // Target/source filtering
-    pub valid_card: Option<String>,    // was params["ValidCard"]
-    pub valid_source: Option<String>,  // was params["ValidSource"]
-    pub valid_player: Option<String>,  // was params["ValidActivatingPlayer"] / params["ValidPlayer"]
-    pub valid_token: Option<String>,   // was params["ValidToken"]
-    // Counter specifics
-    pub counter_type: Option<String>,  // was params["CounterType"]
-    // Damage
-    pub damage_amount: Option<u32>,    // was params["DamageAmount"]
-    pub combat_damage: Option<bool>,   // was params["CombatDamage"]
-    // Phase trigger
-    pub phase: Option<String>,         // was params["Phase"]
-    // Ability to execute when triggered
-    pub execute: Option<Box<AbilityDefinition>>,  // was params["Execute"] + svars lookup + parse_ability()
-    // Description (kept for UI/logging, not runtime logic)
-    pub description: Option<String>,   // was params["TriggerDescription"]
-    // Trigger zones
-    pub trigger_zones: Option<String>, // was params["TriggerZones"]
-    // Metadata the engine does not consume at runtime
-    pub metadata: Option<TriggerMetadata>,
-}
-
-pub struct TriggerMetadata {
-    // AI hints, optional deciders, conditions the engine doesn't implement
-    pub ai_logic: Option<String>,
-    pub optional_decider: Option<String>,
-    // ... other non-runtime keys as needed
+    pub params: HashMap<String, String>,  // REMOVED
 }
 ```
 
-### Pattern 2: Static Definition Typed Fields
+TriggerDefinition after:
+```rust
+pub struct TriggerDefinition {
+    pub mode: TriggerMode,
+    pub execute: Option<Box<AbilityDefinition>>,  // resolved from SVar at load time
+    pub valid_card: Option<TargetFilter>,          // "ValidCard" -> typed
+    pub origin: Option<Zone>,                       // "Origin" -> typed
+    pub destination: Option<Zone>,                  // "Destination" -> typed
+    pub trigger_zones: Vec<Zone>,                   // "TriggerZones" -> typed
+    pub valid_player: Option<String>,               // "ValidActivatingPlayer"/"ValidPlayer"
+    pub phase: Option<Phase>,                       // "Phase" -> typed
+    pub optional: bool,                             // "OptionalDecider" presence
+    pub combat_damage: bool,                        // "CombatDamage" flag
+    pub description: Option<String>,                // "TriggerDescription"
+}
+```
 
-**Keys consumed at runtime by layers.rs and static_abilities.rs:**
+StaticDefinition currently:
 ```rust
 pub struct StaticDefinition {
     pub mode: StaticMode,
-    // Layer system fields (consumed by layers.rs)
-    pub affected: Option<String>,       // was params["Affected"]
-    pub add_power: Option<i32>,         // was params["AddPower"]
-    pub add_toughness: Option<i32>,     // was params["AddToughness"]
-    pub set_power: Option<i32>,         // was params["SetPower"]
-    pub set_toughness: Option<i32>,     // was params["SetToughness"]
-    pub add_keyword: Option<String>,    // was params["AddKeyword"]
-    pub remove_keyword: Option<String>, // was params["RemoveKeyword"]
-    pub add_type: Option<String>,       // was params["AddType"]
-    pub remove_type: Option<String>,    // was params["RemoveType"]
-    pub set_color: Option<String>,      // was params["SetColor"]
-    pub add_color: Option<String>,      // was params["AddColor"]
-    pub add_ability: Option<String>,    // was params["AddAbility"]
-    pub remove_all_abilities: Option<bool>, // was params.contains_key("RemoveAllAbilities")
-    // Devotion check (layers.rs)
-    pub check_svar: Option<String>,     // was params["CheckSVar"]
-    pub svar_compare: Option<String>,   // was params["SVarCompare"]
-    // Rule modification fields
-    pub cost: Option<String>,           // was params["Cost"] (for Ward)
-    pub target: Option<String>,         // was params["Target"] (for Protection)
-    // Description
-    pub description: Option<String>,
-    // Metadata
-    pub metadata: Option<StaticMetadata>,
+    pub params: HashMap<String, String>,  // REMOVED
 }
 ```
 
-### Pattern 3: Replacement Definition Typed Fields
-
-**Keys consumed at runtime by replacement.rs:**
+StaticDefinition after:
 ```rust
-pub struct ReplacementDefinition {
-    pub event: ReplacementEvent,
-    // Zone fields
-    pub active_zones: Option<String>,    // was params["ActiveZones"]
-    pub origin: Option<String>,          // was params["Origin$"]
-    pub destination: Option<String>,     // was params["Destination$"]
-    pub new_destination: Option<String>, // was params["NewDestination$"]
-    // Source/target filtering
-    pub valid_card: Option<String>,      // was params["ValidCard"]
-    pub valid_source: Option<String>,    // was params["ValidSource"]
-    pub valid_player: Option<String>,    // was params["ValidPlayer"]
-    // Behavior
-    pub prevent: Option<bool>,           // was params["Prevent"] == "True"
-    pub exile: Option<bool>,             // was params["Exile"] == "True"
-    pub double: Option<bool>,            // was params["Double"] == "True"
-    pub new_amount: Option<String>,      // was params["NewAmount$"]
-    pub new_count: Option<String>,       // was params["NewCount$"]
-    pub new_name: Option<String>,        // was params["NewName$"]
-    pub damage_type: Option<String>,     // was params["DamageType$"]
-    pub layer: Option<String>,           // was params["Layer"]
-    // Description
+pub struct StaticDefinition {
+    pub mode: StaticMode,
+    pub affected: Option<TargetFilter>,        // "Affected" -> typed
+    pub modifications: Vec<ContinuousModification>,  // replaces AddPower/AddKeyword/etc params
+    pub condition: Option<StaticCondition>,     // CheckSVar/SVarCompare/IsPresent
+    pub affected_zone: Option<Zone>,           // "AffectedZone"
     pub description: Option<String>,
-    // Metadata
-    pub metadata: Option<ReplacementMetadata>,
 }
 ```
 
-### Pattern 4: SubAbility Chain Resolution at Load Time
-
-**What:** Convert `Execute` -> SVar string -> runtime `parse_ability()` into typed `Option<Box<AbilityDefinition>>` resolved when the JSON is loaded.
-
-**Current flow (runtime):**
-```
-trigger fires -> trig_def.params["Execute"] = "TrigDraw"
-              -> obj.svars["TrigDraw"] = "DB$ Draw | NumCards$ 1"
-              -> parse_ability("DB$ Draw | NumCards$ 1")
-              -> AbilityDefinition { effect: Draw { count: 1 }, ... }
-```
-
-**Target flow (load time):**
-```
-JSON loaded -> trigger.execute = Some(Box::new(AbilityDefinition {
-                  effect: Draw { count: 1 },
-                  ...
-              }))
-
-trigger fires -> trigger.execute.as_ref() -> already typed, no parsing
-```
-
-The migration script resolves all SVar references at migration time. The `execute` field on `TriggerDefinition` becomes `Option<Box<AbilityDefinition>>`. The `sub_ability` field on `AbilityDefinition` (already present but always `None`) gets populated with resolved chains.
-
-### Pattern 5: Effect::Unimplemented Variant
-
-**What:** Replace `Effect::Other { api_type, params }` with `Effect::Unimplemented { name: String }` for effects the engine doesn't handle.
+### Pattern 2: ContinuousModification Enum (replaces HashMap params on ActiveContinuousEffect)
+**What:** A discriminated union carrying exactly what a continuous effect does
+**When to use:** In StaticDefinition and ActiveContinuousEffect
 
 ```rust
-pub enum Effect {
-    // ... existing 38 typed variants ...
-    /// Effect type recognized but not yet implemented by the engine.
-    /// Cards with only Unimplemented effects are flagged via has_unimplemented_mechanics.
-    Unimplemented { name: String },
+pub enum ContinuousModification {
+    AddPower(i32),
+    AddToughness(i32),
+    SetPower(i32),
+    SetToughness(i32),
+    AddKeyword(Keyword),
+    RemoveKeyword(Keyword),
+    AddAbility(String),         // ability text, genuinely open-ended
+    RemoveAllAbilities,
+    AddType(CoreType),
+    RemoveType(CoreType),
+    SetColor(Vec<ManaColor>),
+    AddColor(ManaColor),
 }
 ```
 
-No HashMap params on this variant. The name is preserved for coverage reporting.
+This replaces `determine_layers_from_params()` and `apply_continuous_effect()` in layers.rs -- each variant knows its layer implicitly.
+
+### Pattern 3: SubAbility Inlining at Load Time
+**What:** SVar references resolved during JSON deserialization/migration into nested `Option<Box<AbilityDefinition>>`
+**When to use:** All SubAbility/Execute chains
+
+Before (runtime):
+```rust
+// triggers.rs build_triggered_ability: looks up Execute SVar, calls parse_ability()
+if let Some(execute_svar) = trig_def.params.get("Execute") {
+    if let Some(svar_value) = svars.get(execute_svar) {
+        if let Ok(ability_def) = parse_ability(svar_value) { ... }
+    }
+}
+```
+
+After (data load time):
+```rust
+// TriggerDefinition.execute is already resolved
+if let Some(ability) = &trig_def.execute {
+    // Direct typed access, no parsing
+}
+```
 
 ### Anti-Patterns to Avoid
-
-- **Partial migration:** Do not leave some definitions using typed fields and others using params HashMaps. Each definition type must be fully converted before merging.
-- **Runtime string parsing:** Do not introduce any new string parsing of ability text at runtime. All parsing must happen at data-load time or in the migration script.
-- **Over-typing rare metadata:** Do not create 600 typed fields for every Forge parameter. Group AI hints, conditions the engine skips, and descriptions into metadata sub-structs or a single `extra: HashMap<String, String>` if needed for round-trip preservation. But this must NOT be used by runtime logic -- it is purely for data migration fidelity.
+- **Moving HashMap keys to `Option<String>` fields:** This is NOT typing. `origin: Option<String>` must be `origin: Option<Zone>`.
+- **Creating a mega-struct with all possible fields:** Each definition type should only carry fields relevant to its mode.
+- **Partial migration:** Leaving some params in HashMap "for later" creates technical debt. The whole point is zero HashMap.
+- **Breaking the WASM boundary:** All new types must derive Serialize/Deserialize. Test round-trip serialization.
 
 ## Don't Hand-Roll
 
 | Problem | Don't Build | Use Instead | Why |
 |---------|-------------|-------------|-----|
-| JSON migration of 32K files | Manual file-by-file editing | Migration binary with serde | Consistency, automation, round-trip validation |
-| SVar chain resolution | Custom parser for chain walking | Existing `parse_ability()` at migration time only | Parser already handles all Forge syntax |
-| JSON Schema generation | Manual schema documentation | `schemars::schema_for!(AbilityFile)` | Schema stays in sync with Rust types automatically |
-| Parallel file processing | Manual threading | `rayon::par_iter` | Already in deps, handles work distribution |
-
-**Key insight:** The migration binary should use the existing Forge parser (`parse_ability()`) to resolve SVars, then emit the result as typed structs. This is the one place where runtime Forge parsing is acceptable -- it runs once, then never again.
+| Mana cost parsing | String manipulation for `{1}{W}` | Existing `ManaCost` / `ManaCostShard` enum + `parse_mtgjson_mana_cost()` | 42 ManaCostShard variants already cover every hybrid/phyrexian/snow case |
+| Zone string matching | `match zone_str { "Battlefield" => ... }` | Existing `Zone` enum with serde | Zone already has 8 variants matching all Forge zone strings |
+| Keyword parsing from strings | Custom parser in migration | Existing `Keyword::from_str()` (Infallible) | 190+ keyword variants with parameterized parsing already implemented |
+| Filter string parsing | Regex or manual splitting | TargetFilter enum with serde deserialization | Forge filter syntax has known grammar; typed enum is simpler and safer |
+| JSON schema updates | Manual schema.json editing | `schemars::schema_for!(AbilityFile)` | Already wired up in schema/mod.rs test |
 
 ## Common Pitfalls
 
-### Pitfall 1: Breaking Existing Tests
-**What goes wrong:** Changing TriggerDefinition/StaticDefinition structs breaks every test that constructs them, plus all snapshot tests.
-**Why it happens:** Tests in triggers.rs, layers.rs, static_abilities.rs, deck_loading.rs, replacement.rs all create definitions with `params: HashMap::from([...])`.
-**How to avoid:** Change types and all tests in the same commit. Use a compatibility constructor if needed for transition.
-**Warning signs:** `cargo test --all` failures after struct changes.
+### Pitfall 1: Breaking Serialization Compatibility During Migration
+**What goes wrong:** Changing struct fields breaks existing JSON deserialization, meaning the engine can't load cards until ALL 32K files are migrated
+**Why it happens:** New typed fields don't match old JSON format
+**How to avoid:** Migration binary runs FIRST to produce new-format JSON. Use `#[serde(default)]` liberally on new optional fields. Consider a two-phase approach: add new fields with defaults, migrate JSON, then remove old fields.
+**Warning signs:** `serde_json::from_str` failures on ability JSON files
 
-### Pitfall 2: SVar Chain Depth and Cycles
-**What goes wrong:** Some cards chain SVars deeply (Execute -> SubAbility -> SubAbility -> ...). The migration script could infinite-loop on circular references.
-**Why it happens:** Forge allows arbitrary SVar naming that could theoretically self-reference.
-**How to avoid:** Track visited SVar names during resolution, limit depth to 10 (matching existing `MAX_CHAIN_DEPTH`).
-**Warning signs:** Migration script hanging on specific cards.
+### Pitfall 2: Circular SVar References During Migration
+**What goes wrong:** SVar A references SVar B which references SVar A, causing infinite recursion during inlining
+**Why it happens:** Forge format allows arbitrary SVar cross-references
+**How to avoid:** Track visited SVars during resolution (HashSet<String>). MAX_CHAIN_DEPTH guard (already exists at 10). Log and skip circular cards with `Effect::Unimplemented` marker.
+**Warning signs:** Stack overflow in migration binary
 
-### Pitfall 3: Serialization Format Change Breaks card-data.json Consumers
-**What goes wrong:** `card-data.json` format changes break the frontend (TypeScript types), WASM bridge, and server.
-**Why it happens:** `CardFace` is serialized via `serde` and deserialized in `CardDatabase::from_export()`.
-**How to avoid:** The `from_export()` path uses the same `CardFace` struct. Changing the struct changes the format automatically. But TypeScript adapter/types.ts may need updates if it reads trigger/static/replacement data.
-**Warning signs:** WASM build or server failing to load card-data.json after migration.
+### Pitfall 3: Test Code Using Effect::Other / from_raw() Extensively
+**What goes wrong:** 56 `Effect::Other` usages across 22 test files. Removing `Effect::Other` breaks compilation of almost every test module.
+**Why it happens:** Tests were written using `from_raw()` shortcut instead of typed Effect construction
+**How to avoid:** Must rewrite all 56 test sites to use typed Effect variants. This is significant work but cannot be skipped. Group by file and batch-convert.
+**Warning signs:** Compilation errors in test modules after removing `Effect::Other`
 
-### Pitfall 4: Not Handling Missing SVars During Migration
-**What goes wrong:** A trigger's `Execute` param points to an SVar name that doesn't exist in the card's SVar map.
-**Why it happens:** 15,930 triggers reference SVars. Some SVars may be defined on the card but others may be dynamically generated or missing.
-**How to avoid:** Migration script should handle missing SVars gracefully -- emit `execute: None` with a warning, not a hard error.
-**Warning signs:** Migration script reporting thousands of "SVar not found" errors.
+### Pitfall 4: ActiveContinuousEffect Coupling to Layers.rs
+**What goes wrong:** layers.rs has 17 `.params.` accesses with string-key lookups. Changing ActiveContinuousEffect's structure requires rewriting the entire layer evaluation.
+**Why it happens:** Layer evaluation was written against Forge's HashMap-based data model
+**How to avoid:** Rewrite `gather_active_continuous_effects()`, `determine_layers_from_params()`, and `apply_continuous_effect()` as a unit. Each `ContinuousModification` variant knows its own layer.
+**Warning signs:** Layer evaluation tests failing with wrong P/T values
 
-### Pitfall 5: HashMap Key Ordering Affecting Test Snapshots
-**What goes wrong:** Removing params HashMaps changes JSON field ordering, breaking insta snapshot tests.
-**Why it happens:** HashMaps have nondeterministic ordering; typed fields have deterministic ordering.
-**How to avoid:** Update all affected insta snapshots after the format change. Use `--review` flag.
-**Warning signs:** Snapshot test failures.
+### Pitfall 5: Frontend TypeScript Type Breakage
+**What goes wrong:** tsify auto-generates TS types from Rust structs. Removing `svars`, changing `keywords` from `string[]` to typed, changing Effect shape breaks frontend compilation.
+**Why it happens:** Frontend `types.ts` manually duplicates some types, and tests construct mock objects with old shape
+**How to avoid:** Update `client/src/adapter/types.ts` (line 101: `svars: Record<string, string>` removal, line 96: `keywords: string[]` change). Update test mocks in 5 test files. The tsify-generated types will guide this.
+**Warning signs:** `pnpm run type-check` failures after WASM rebuild
 
-### Pitfall 6: The `to_params()` Bridge Method
-**What goes wrong:** `Effect::to_params()` is used by the runtime SubAbility chain resolver and by `ResolvedAbility` construction. Removing params breaks these paths.
-**Why it happens:** The current architecture flows: typed Effect -> `to_params()` -> HashMap -> string key lookups.
-**How to avoid:** When SubAbility chains are resolved at load time, `to_params()` becomes unnecessary for runtime. Gate it behind `forge-compat` or remove it entirely after all consumers are migrated.
-**Warning signs:** Runtime errors when resolving abilities after removing `to_params()`.
+### Pitfall 6: Effect::to_params() Removal Cascade
+**What goes wrong:** `to_params()` is used in 3 critical runtime paths: `ResolvedAbility::new()`, `build_triggered_ability()`, and `resolve_ability_chain()`. Removing it before those consumers are rewritten causes compilation failure.
+**Why it happens:** `to_params()` was the bridge from typed Effect back to HashMap for consumers that still read params by key
+**How to avoid:** Remove consumers of `to_params()` first (rewrite to read from Effect fields directly), THEN remove `to_params()`. Or remove simultaneously in one wave.
+**Warning signs:** Compilation errors in triggers.rs and effects/mod.rs
 
 ## Code Examples
 
-### Example 1: Current TriggerDefinition in JSON (must change)
-```json
-{
-  "mode": "ChangesZone",
-  "params": {
-    "Origin": "Any",
-    "Execute": "TrigDraw",
-    "TriggerDescription": "When this enters, draw a card.",
-    "ValidCard": "Card.Self",
-    "Destination": "Battlefield"
-  }
-}
-```
-
-### Example 2: Target TriggerDefinition in JSON
-```json
-{
-  "mode": "ChangesZone",
-  "origin": "Any",
-  "destination": "Battlefield",
-  "valid_card": "Card.Self",
-  "description": "When this enters, draw a card.",
-  "execute": {
-    "kind": "Database",
-    "effect": { "type": "Draw", "count": 1 }
-  }
-}
-```
-
-### Example 3: Current StaticDefinition in JSON (must change)
-```json
-{
-  "mode": "Continuous",
-  "params": {
-    "Affected": "Creature.YouCtrl",
-    "AddPower": "1",
-    "AddToughness": "1",
-    "Description": "Creatures you control get +1/+1."
-  }
-}
-```
-
-### Example 4: Target StaticDefinition in JSON
-```json
-{
-  "mode": "Continuous",
-  "affected": "Creature.YouCtrl",
-  "add_power": 1,
-  "add_toughness": 1,
-  "description": "Creatures you control get +1/+1."
-}
-```
-
-### Example 5: Migration Script Pseudocode
+### TargetFilter Enum (from CONTEXT.md, verified against filter.rs needs)
 ```rust
-// Migration binary: reads old format, writes new format
-fn migrate_trigger(old: &OldTriggerDef, svars: &HashMap<String, String>) -> NewTriggerDef {
-    let execute = old.params.get("Execute").and_then(|svar_name| {
-        svars.get(svar_name).and_then(|svar_str| {
-            parse_ability(svar_str).ok().map(|def| Box::new(def))
-        })
-    });
+// Source: CONTEXT.md locked decision + filter.rs analysis
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum TargetFilter {
+    None,
+    Any,
+    Player,
+    Controller,
+    SelfRef,
+    Typed {
+        card_type: Option<CardType>,  // maps to CoreType
+        subtype: Option<String>,
+        controller: Option<ControllerRef>,
+        properties: Vec<FilterProp>,
+    },
+    Not(Box<TargetFilter>),
+    Or(Vec<TargetFilter>),
+    And(Vec<TargetFilter>),
+}
 
-    NewTriggerDef {
-        mode: old.mode.clone(),
-        origin: old.params.get("Origin").cloned(),
-        destination: old.params.get("Destination").cloned(),
-        valid_card: old.params.get("ValidCard").cloned(),
-        execute,
-        description: old.params.get("TriggerDescription").cloned(),
-        // ... map remaining consumed keys
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ControllerRef { You, Opponent }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum FilterProp {
+    Token,
+    Attacking,
+    Tapped,
+    NonType(String),
+    WithKeyword(String),
+    CountersGE { counter_type: String, count: u32 },
+    CmcGE(u32),
+    InZone(Zone),
+    Owned(ControllerRef),
+    Other,            // permissive fallback
+    EnchantedBy,      // needed per filter.rs
+    EquippedBy,       // needed per filter.rs
+}
+```
+
+### Typed AbilityDefinition (from CONTEXT.md)
+```rust
+pub struct AbilityDefinition {
+    pub kind: AbilityKind,
+    pub effect: Effect,
+    pub cost: Option<AbilityCost>,
+    pub sub_ability: Option<Box<AbilityDefinition>>,  // was SVar reference
+    pub duration: Option<Duration>,
+    pub description: Option<String>,                   // was remaining_params["SpellDescription"]
+    pub target_prompt: Option<String>,                 // was remaining_params["TgtPrompt"]
+    pub defined: Option<String>,                       // was remaining_params["Defined"]
+    pub sorcery_speed: bool,                           // was remaining_params["SorcerySpeed"]
+}
+```
+
+### Duration Enum
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Duration {
+    UntilEndOfTurn,
+    UntilYourNextTurn,
+    UntilHostLeavesPlay,
+    Permanent,
+}
+```
+
+### PtValue Type
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum PtValue {
+    Fixed(i32),
+    Variable(String),  // "*", "X", etc.
+}
+```
+
+### Typed filter matching (replacing filter.rs)
+```rust
+// Replaces string-based object_matches_filter()
+pub fn matches_target_filter(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    match filter {
+        TargetFilter::None => false,
+        TargetFilter::Any => true,
+        TargetFilter::SelfRef => object_id == source_id,
+        TargetFilter::Typed { card_type, subtype, controller, properties } => {
+            let obj = match state.objects.get(&object_id) { Some(o) => o, None => return false };
+            // Type check
+            if let Some(ct) = card_type { /* ... */ }
+            // Controller check
+            if let Some(ctrl) = controller { /* ... */ }
+            // All properties must match
+            properties.iter().all(|p| matches_filter_prop(state, obj, object_id, source_id, p))
+        }
+        TargetFilter::Not(inner) => !matches_target_filter(state, object_id, inner, source_id),
+        TargetFilter::Or(filters) => filters.iter().any(|f| matches_target_filter(state, object_id, f, source_id)),
+        TargetFilter::And(filters) => filters.iter().all(|f| matches_target_filter(state, object_id, f, source_id)),
+        _ => true,
     }
 }
 ```
@@ -379,138 +366,181 @@ fn migrate_trigger(old: &OldTriggerDef, svars: &HashMap<String, String>) -> NewT
 
 | Old Approach | Current Approach | When Changed | Impact |
 |--------------|------------------|--------------|--------|
-| `api_type: String` + raw params | Typed `Effect` enum with 38 variants | Phase 21 | Effect dispatch via match, not string lookup |
-| `TriggerMode` as raw string | Typed `TriggerMode` enum | Phase 21 | Trigger registry uses typed keys |
-| Forge `.txt` files as primary source | MTGJSON + ability JSON | Phase 23-24 | Forge files removed, parser gated |
-| `params: HashMap<String, String>` on definitions | **This phase: typed struct fields** | Phase 28 | Zero string key lookups at runtime |
-| `svars: HashMap<String, String>` on CardFace/GameObject | **This phase: resolved at load time** | Phase 28 | Zero Forge string parsing at runtime |
+| `params: HashMap<String, String>` on all definitions | Typed struct fields per definition type | Phase 28 | Eliminates all runtime string-key lookups |
+| `svars: HashMap<String, String>` for SubAbility chains | `sub_ability: Option<Box<AbilityDefinition>>` inlined at load time | Phase 28 | Eliminates runtime SVar resolution + parse_ability() calls |
+| `TargetSpec` with Forge filter strings | `TargetFilter` typed enum | Phase 28 | No more "Creature.Other+YouCtrl" string parsing at runtime |
+| `Vec<String>` for keywords on CardFace | `Vec<Keyword>` typed enum | Phase 28 | Keywords are typed at load time, not string-parsed at use time |
+| `Option<String>` for power/toughness | `Option<PtValue>` | Phase 28 | Variable P/T explicitly typed |
 
-## Key Measurements
-
-These numbers scope the work precisely:
-
-| Metric | Count | Significance |
-|--------|-------|-------------|
-| Total card JSON files | 32,274 | All must be migrated |
-| Triggers with `Execute` param (SVar chains) | 15,930 | Must resolve SVars at migration time |
-| Abilities with `SubAbility`/`Execute` in remaining_params | 5,168 | Must resolve SubAbility chains |
-| Unique trigger param keys | 158 | ~15 consumed at runtime, rest is metadata |
-| Unique static param keys | 165 | ~18 consumed at runtime, rest is metadata |
-| Unique replacement param keys | 72 | ~15 consumed at runtime, rest is metadata |
-| Unique remaining_params keys | 623 | Need categorization: typed fields vs metadata |
-| Files with `svars` usage in `game/` | 22 files | All svars references must be eliminated |
-| Runtime calls to `parse_ability()` | 3 call sites | triggers.rs:176, effects/mod.rs:163, effects/effect.rs:26 |
-
-### Runtime-Consumed Keys (Must Become Typed Fields)
-
-**Triggers (15 keys used by matchers):**
-`Execute`, `Origin`, `Destination`, `ValidCard`, `ValidSource`, `ValidActivatingPlayer`, `ValidPlayer`, `ValidToken`, `CounterType`, `DamageAmount`, `CombatDamage`, `Phase`, `TriggerZones`, `ApiType`, `TriggerDescription`
-
-**Statics (18 keys used by layers.rs/static_abilities.rs):**
-`Affected`, `AddPower`, `AddToughness`, `SetPower`, `SetToughness`, `AddKeyword`, `RemoveKeyword`, `AddType`, `RemoveType`, `SetColor`, `AddColor`, `AddAbility`, `RemoveAllAbilities`, `CheckSVar`, `SVarCompare`, `Cost`, `Target`, `Mode`, `Description`
-
-**Replacements (16 keys used by replacement.rs):**
-`ActiveZones`, `Origin$`, `Destination$`, `NewDestination$`, `ValidCard`, `ValidSource`, `DamageType$`, `Prevent`, `NewAmount$`, `Exile`, `Double`, `NewCount$`, `NewName$`, `Layer`, `ValidCard$`, `ValidPlayer`
-
-**Effects remaining_params (10 keys used at runtime by effect handlers):**
-`SubAbility`, `Execute`, `Defined`, `ConditionCompare`, `ConditionPresent`, `ConditionZone`, `ConditionSVarCompare`, `StaticAbilities`, `Types`, `Power`, `Toughness`
-
-## Recommended Incremental Strategy
-
-### Wave 1: Type System Changes (Rust structs)
-1. Define new typed fields on `TriggerDefinition`, `StaticDefinition`, `ReplacementDefinition`
-2. Change `AbilityDefinition.remaining_params` to typed fields
-3. Replace `Effect::Other` with `Effect::Unimplemented`
-4. Remove `svars` from `CardFace` and `GameObject`
-5. Add `execute: Option<Box<AbilityDefinition>>` to `TriggerDefinition`
-6. Populate `sub_ability` on `AbilityDefinition` (already exists as always-None)
-7. Update all runtime consumers (triggers.rs, layers.rs, static_abilities.rs, replacement.rs, effects/)
-8. Gate `parse_ability()` behind `forge-compat`
-9. Update `to_params()` -- gate or remove
-10. Fix all tests
-
-### Wave 2: Migration Script
-1. Write a migration binary that reads old-format JSON + SVars from Forge
-2. Resolves all SVar chains using `parse_ability()` (behind forge-compat)
-3. Outputs new-format JSON files
-4. Validate round-trip: new format -> deserialize -> serialize -> matches
-
-### Wave 3: Data Migration + Validation
-1. Run migration across all 32,274 files
-2. Regenerate `card-data.json`
-3. Update `schema.json` via schemars test
-4. Run `cargo test --all`
-5. Run coverage report
-6. Verify WASM build and frontend compatibility
+**Deprecated/outdated:**
+- `Effect::to_params()` -- deleted (was compat bridge)
+- `Effect::api_type()` -- already feature-gated, now deleted
+- `ResolvedAbility::from_raw()` -- deleted (was test shortcut)
+- `parse_ability()` -- gated behind `forge-compat` (was runtime parser)
 
 ## Open Questions
 
-1. **Metadata handling strategy**
-   - What we know: 623 unique remaining_params keys, only ~10 consumed at runtime
-   - What's unclear: Whether to drop non-runtime keys entirely or preserve them in a metadata struct
-   - Recommendation: Drop non-runtime keys. They are Forge-specific metadata (AI hints, descriptions, activation limits) that phase.rs doesn't use. This dramatically simplifies the migration. If future engine work needs any of these, the Forge source data is always available for re-extraction.
+1. **Remaining_params keys that need AbilityDefinition fields**
+   - What we know: Top keys are SpellDescription (17K), SubAbility (5K), TgtPrompt (3.5K), Defined (2K), StackDescription (1.2K), ValidTgts (1.1K), KW (1K), AILogic (1K)
+   - What's unclear: How many of these are metadata-only (description, AI hints) vs. mechanically relevant. `Defined`, `TargetMin`/`TargetMax`, `Mode`, `Duration`, `StaticAbilities` are mechanically relevant.
+   - Recommendation: `description`, `target_prompt`, `stack_description` as Option<String>. `defined` as Option<String>. `sorcery_speed` as bool. `duration` as Option<Duration>. `target_min`/`target_max` as Option<u32>. AI-only keys (`AILogic`, `IsCurse`, `Ultimate`) as Option<String> or ignored. `StaticAbilities` resolved at load time into the AbilityDefinition's sub-structures.
 
-2. **JSON field naming convention**
-   - What we know: Rust uses snake_case, current JSON uses CamelCase Forge names
-   - What's unclear: Whether to use snake_case in JSON (serde default) or explicit `#[serde(rename)]`
-   - Recommendation: Use serde's default snake_case. This is the native Rust/serde convention and makes the JSON self-documenting as a phase.rs format, not Forge's.
+2. **Migration order: types-first or JSON-first?**
+   - What we know: Types and JSON must be consistent. Changing types before JSON means temporary deserialization failure.
+   - What's unclear: Whether to use serde's `#[serde(alias)]` / `#[serde(flatten)]` for transition
+   - Recommendation: Write migration binary first (reads old format, writes new format), run it, THEN change Rust types. Or change types with `#[serde(default)]` on new fields so old JSON still parses (missing fields get defaults), migrate JSON, then tighten.
 
-3. **Filter string representation**
-   - What we know: Values like "Creature.YouCtrl", "Card.Self", "Card.OppCtrl" are filter strings used by `object_matches_filter()`
-   - What's unclear: Whether to parse these into typed filter enums now or keep as strings
-   - Recommendation: Keep as `String` for now. Filter parsing is a separate concern and these strings are already consumed by a dedicated filter module. Typing them would be a Phase 29+ concern.
+3. **Cards with unimplemented abilities (`Effect::Other` in JSON)**
+   - What we know: 2,533 abilities use `Effect::Other` with Forge api_type strings like "Venture", "Amass", etc.
+   - What's unclear: Whether to create stub Effect variants or use a single `Effect::Unimplemented { name: String }` marker
+   - Recommendation: Use `Effect::Unimplemented { name: String, description: Option<String> }` as the sole fallback. This is semantically honest -- it says "we know this effect exists but haven't implemented a handler." Unlike `Effect::Other`, it carries no HashMap and cannot be confused with a real implementation.
+
+4. **TargetFilter: `card_type` field type**
+   - What we know: CONTEXT.md says `Option<CardType>` but CardType is `{ supertypes, core_types, subtypes }` (a struct). Filter matching needs core type checks like "Creature", "Permanent", "Land".
+   - What's unclear: Whether to use `Option<CoreType>` or a separate `TypeFilter` enum that includes "Permanent" (which is multi-type)
+   - Recommendation: Use a `TypeFilter` enum: `Creature`, `Land`, `Artifact`, `Enchantment`, `Instant`, `Sorcery`, `Planeswalker`, `Permanent`, `Card`, `Any`. This maps cleanly to existing `is_type_keyword()` and `matches_type()` in filter.rs.
 
 ## Validation Architecture
 
 ### Test Framework
 | Property | Value |
 |----------|-------|
-| Framework | Rust built-in #[test] + insta for snapshots |
-| Config file | Cargo.toml (per-crate test configuration) |
+| Framework | Rust built-in `#[test]` + insta 1.x for snapshots |
+| Config file | Cargo.toml (workspace-level test config) |
 | Quick run command | `cargo test -p engine` |
 | Full suite command | `cargo test --all` |
 
 ### Phase Requirements -> Test Map
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
-| SC-1 | TriggerDef uses typed fields, not params HashMap | unit | `cargo test -p engine -- trigger` | Wave 0 |
-| SC-2 | StaticDef uses typed fields, not params HashMap | unit | `cargo test -p engine -- static` | Wave 0 |
-| SC-3 | ReplacementDef uses typed fields, not params HashMap | unit | `cargo test -p engine -- replacement` | Wave 0 |
-| SC-4 | svars eliminated from CardFace | unit | `cargo test -p engine -- card` | Wave 0 |
-| SC-5 | remaining_params eliminated from AbilityDefinition | unit | `cargo test -p engine -- ability` | Wave 0 |
-| SC-6 | parse_ability() gated behind forge-compat | compile | `cargo test -p engine` (without forge-compat) | Wave 0 |
-| SC-7 | 32K JSON files in new format | integration | `cargo test -p engine -- json` | Wave 2 |
-| SC-8 | card-data.json uses new format | integration | `cargo test --all` | Wave 3 |
-| SC-9 | All existing tests pass | integration | `cargo test --all` | Existing |
+| NAT-01 | TriggerDefinition/StaticDefinition/ReplacementDefinition typed fields | unit | `cargo test -p engine types::ability::tests -x` | Partial (existing tests use HashMap) |
+| NAT-02 | svars eliminated, SubAbility inlined | unit+integration | `cargo test -p engine game::triggers::tests -x` | Partial (triggers.rs tests use svars) |
+| NAT-03 | remaining_params removed from AbilityDefinition | unit | `cargo test -p engine schema::tests -x` | Partial (schema roundtrip tests exist) |
+| NAT-04 | TargetFilter replaces TargetSpec | unit+integration | `cargo test -p engine game::filter::tests -x` | Yes (filter.rs has 10 tests, need rewrite) |
+| NAT-05 | parse_ability() gated behind forge-compat | unit | `cargo test -p engine -- --test-threads=1` (compile without forge-compat) | No -- Wave 0 |
+| NAT-06 | 32K JSON files migrated | integration | `cargo test -p engine database::json_loader::tests -x` | Partial (json_loader tests exist) |
 
 ### Sampling Rate
 - **Per task commit:** `cargo test -p engine`
 - **Per wave merge:** `cargo test --all`
-- **Phase gate:** Full suite green before verification
+- **Phase gate:** Full suite green before `/gsd:verify-work`
 
 ### Wave 0 Gaps
-- [ ] Migration binary `crates/engine/src/bin/migrate_typed.rs` -- reads old format, writes new
-- [ ] Round-trip validation test: old format -> migrate -> new format -> engine loads correctly
-- [ ] Snapshot updates for all affected insta tests
+- [ ] New test for typed TriggerDefinition construction and serialization roundtrip
+- [ ] New test for typed StaticDefinition with ContinuousModification
+- [ ] New test for TargetFilter matching (typed replacement for filter.rs tests)
+- [ ] New test for SubAbility chain resolution without SVar lookup
+- [ ] Migration binary tests (old format -> new format -> round-trip)
+- [ ] Compile-without-forge-compat test to verify parse_ability() gating
+
+## Quantitative Migration Analysis
+
+### Current HashMap Usage (runtime types)
+| Type | Field | Occurrences in Code | Occurrences in Data |
+|------|-------|---------------------|---------------------|
+| TriggerDefinition | params: HashMap | 4 `.params.` + 7 `.svars.` in triggers.rs | 12,876 files with triggers |
+| StaticDefinition | params: HashMap | 17 `.params.` in layers.rs | 5,815 files with statics |
+| ReplacementDefinition | params: HashMap | 1 `.params.` in replacement.rs | 1,443 files with replacements |
+| AbilityDefinition | remaining_params: HashMap | Implicit via compat methods | 16,874 abilities with remaining_params |
+| ResolvedAbility | params: HashMap + svars: HashMap | Used in 22+ files | Runtime only |
+| ActiveContinuousEffect | params: HashMap | 17 accesses in layers.rs | Runtime only |
+| Effect::GenericEffect | params: HashMap | 1 call site (effect.rs) | 546 files |
+| Effect::Cleanup | params: HashMap | 1 call site (cleanup.rs) | 0 files directly |
+| Effect::Mana | params: HashMap | 1 call site (mana.rs) | 1,898 files |
+| Effect::Other | api_type + params: HashMap | 22 files, 56 usages in tests | 2,533 files |
+| CardFace | svars: HashMap | deck_loading.rs line 138 | All files (empty for most) |
+| GameObject | svars: HashMap | game_object.rs line 73 | Runtime only |
+
+### Effect::Other Test Rewrite Scope (56 usages across 22 files)
+| File | Count | Notes |
+|------|-------|-------|
+| engine.rs | 5 | Integration test helpers |
+| life.rs | 4 | GainLife/LoseLife tests |
+| destroy.rs | 4 | Destroy/DestroyAll tests |
+| counter.rs | 4 | Counter tests |
+| bounce.rs | 3 | Bounce tests |
+| change_zone.rs | 3 | ChangeZone tests |
+| cleanup.rs | 3 | Cleanup tests |
+| choose_card.rs | 3 | ChooseCard tests |
+| copy_spell.rs | 3 | CopySpell tests |
+| discard.rs | 3 | Discard tests |
+| fight.rs | 3 | Fight tests |
+| pump.rs | 3 | Pump tests |
+| sacrifice.rs | 2 | Sacrifice tests |
+| casting.rs | 2 | Casting tests |
+| priority.rs | 2 | Priority tests |
+| transform.rs | 2 | Transform tests |
+| token.rs | 1 | Token tests |
+| animate.rs | 1 | Animate tests |
+| stack.rs | 1 | Stack tests |
+| planeswalker.rs | 1 | Planeswalker tests |
+| triggers.rs | 1 | Trigger tests |
+| mod.rs (effects) | 2 | Dispatch tests |
+
+### Trigger Param Key -> Typed Field Mapping
+| Forge Key | Count | Typed Field | Type |
+|-----------|-------|-------------|------|
+| Execute | 15,158 | `execute: Option<Box<AbilityDefinition>>` | Resolved at load time |
+| TriggerDescription | 14,998 | `description: Option<String>` | Metadata only |
+| ValidCard | 10,974 | `valid_card: Option<TargetFilter>` | Typed filter |
+| TriggerZones | 7,899 | `trigger_zones: Vec<Zone>` | Typed zone list |
+| Destination | 6,973 | `destination: Option<Zone>` | Typed zone |
+| Origin | 6,751 | `origin: Option<Zone>` | Typed zone |
+| ValidPlayer | 2,221 | `valid_player: Option<String>` | Player filter |
+| Phase | 2,074 | `phase: Option<Phase>` | Typed phase |
+| OptionalDecider | 1,417 | `optional: bool` | Boolean flag |
+| ValidTarget | 1,091 | `valid_target: Option<TargetFilter>` | Typed filter |
+| ValidActivatingPlayer | 1,080 | (merged into valid_player) | Player filter |
+| ValidSource | 1,034 | `valid_source: Option<TargetFilter>` | Typed filter |
+| CombatDamage | 770 | `combat_damage: bool` | Boolean flag |
+| Secondary | 548 | `secondary: bool` | Boolean flag |
+| IsPresent | 544 | (part of condition) | Condition check |
+| CheckSVar | 409 | (part of condition) | Condition check |
+
+### Static Param Key -> Typed Field/Modification Mapping
+| Forge Key | Count | Typed Representation |
+|-----------|-------|---------------------|
+| Description | 6,471 | `description: Option<String>` on StaticDefinition |
+| Affected | 4,296 | `affected: Option<TargetFilter>` on StaticDefinition |
+| AddPower | 1,794 | `ContinuousModification::AddPower(i32)` |
+| AddKeyword | 1,741 | `ContinuousModification::AddKeyword(Keyword)` |
+| AddToughness | 1,440 | `ContinuousModification::AddToughness(i32)` |
+| ValidCard | 1,367 | Part of condition |
+| EffectZone | 775 | `effect_zone: Option<Zone>` on StaticDefinition |
+| SetPower | 356 | `ContinuousModification::SetPower(i32)` |
+| SetToughness | 304 | `ContinuousModification::SetToughness(i32)` |
+| AddAbility | 322 | `ContinuousModification::AddAbility(String)` |
+| CheckSVar/SVarCompare | 308+ | Part of condition on StaticDefinition |
+| CharacteristicDefining | ~200 | `characteristic_defining: bool` on StaticDefinition |
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- Direct codebase inspection of all affected files (types/ability.rs, types/triggers.rs, types/statics.rs, types/replacements.rs, types/card.rs, game/triggers.rs, game/static_abilities.rs, game/replacement.rs, game/layers.rs, game/effects/mod.rs, game/effects/effect.rs, game/deck_loading.rs, game/game_object.rs, database/json_loader.rs, schema/mod.rs)
-- Analysis of all 32,274 ability JSON files for param key frequency and patterns
-- CONTEXT.md decisions from user discussion session
+- Codebase analysis: `crates/engine/src/types/ability.rs` -- 900+ lines, Effect enum (38 variants + Other), all definition types
+- Codebase analysis: `crates/engine/src/game/layers.rs` -- 770 lines, 17 HashMap param accesses in layer evaluation
+- Codebase analysis: `crates/engine/src/game/triggers.rs` -- 550+ lines, SVar resolution + trigger matching
+- Codebase analysis: `crates/engine/src/game/effects/mod.rs` -- 550+ lines, SubAbility chain resolution
+- Codebase analysis: `crates/engine/src/game/filter.rs` -- 447 lines, Forge-style filter matching
+- Codebase analysis: `crates/engine/src/game/game_object.rs` -- 241 lines, svars field on GameObject
+- Data analysis: 32,274 ability JSON files, quantitative param key frequency analysis
+- CONTEXT.md: User decisions from context session, locked implementation choices
 
 ### Secondary (MEDIUM confidence)
-- STATE.md project history documenting Phase 21-25 decisions
-- REQUIREMENTS.md traceability matrix
+- Codebase analysis: `crates/engine/src/game/deck_loading.rs` -- svars copy behavior
+- Codebase analysis: `crates/engine/src/database/json_loader.rs` -- card loading pipeline
+- Codebase analysis: `crates/engine/src/schema/mod.rs` -- JSON schema generation
+
+### Tertiary (LOW confidence)
+- Estimated migration binary complexity based on SVar chain depth (not measured -- recommend profiling a sample)
+- TargetFilter property completeness (FilterProp enum may need additional variants discovered during migration)
 
 ## Metadata
 
 **Confidence breakdown:**
-- Standard stack: HIGH - no new deps, pure refactor of existing types
-- Architecture: HIGH - struct field replacement is well-understood; runtime consumers fully mapped
-- Pitfalls: HIGH - all runtime param access points identified via grep; SVar chain depth already has limits
-- Migration: MEDIUM - 32K file batch migration is mechanical but any edge case in SVar resolution could require fixes
+- Standard stack: HIGH -- all libraries already in use, no new dependencies
+- Architecture: HIGH -- types and data fully analyzed, quantitative param frequency known
+- Pitfalls: HIGH -- based on direct code inspection of all affected files, counted Effect::Other usages
+- Migration scope: HIGH -- 32,274 files analyzed programmatically with param key frequency counts
 
 **Research date:** 2026-03-10
-**Valid until:** Indefinite (codebase-specific research, no external dependency drift)
+**Valid until:** Indefinite (internal codebase analysis, no external dependency versioning concerns)
