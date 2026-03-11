@@ -16,6 +16,7 @@ use server_core::resolve_deck;
 use server_core::session::SessionManager;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
+use tracing::{debug, error, info, warn};
 
 type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
@@ -35,6 +36,13 @@ struct SocketIdentity {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "phase_server=info".parse().unwrap()),
+        )
+        .init();
+
     let port = std::env::var("PORT").unwrap_or_else(|_| "9374".to_string());
     let data_root = std::env::var("PHASE_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let data_path = Path::new(&data_root);
@@ -48,7 +56,7 @@ async fn main() {
         )
         .expect("Failed to load card database")
     };
-    println!("Loaded {} cards", card_db.card_count());
+    info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
 
     let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
@@ -72,9 +80,10 @@ async fn main() {
                 let mut mgr = bg_state.lock().await;
                 mgr.reconnect.check_expired()
             };
-            for game_code in expired {
+            for game_code in &expired {
+                info!(game = %game_code, "grace period expired, ending game");
                 let conns = bg_connections.lock().await;
-                if let Some(players) = conns.get(&game_code) {
+                if let Some(players) = conns.get(game_code) {
                     let msg = ServerMessage::GameOver {
                         winner: None,
                         reason: "Opponent disconnected (grace period expired)".to_string(),
@@ -91,14 +100,13 @@ async fn main() {
                 lob.check_expired(300)
             };
             if !expired_lobby.is_empty() {
-                // Remove expired games from session manager
+                info!(count = expired_lobby.len(), "expiring stale lobby games");
                 let mut mgr = bg_state.lock().await;
                 for game_code in &expired_lobby {
                     mgr.sessions.remove(game_code);
                 }
                 drop(mgr);
 
-                // Notify lobby subscribers
                 let subs = bg_lobby_subs.lock().await;
                 for game_code in &expired_lobby {
                     let msg = ServerMessage::LobbyGameRemoved {
@@ -128,7 +136,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("failed to bind");
-    println!("phase-server listening on port {}", port);
+    info!(port = %port, "phase-server listening");
     axum::serve(listener, app).await.expect("server error");
 }
 
@@ -171,11 +179,10 @@ async fn handle_socket(
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
 ) {
-    // Channel for sending messages to this client from other tasks
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-    // Increment player count
     let count = player_count.fetch_add(1, Ordering::Relaxed) + 1;
+    info!(online = count, "client connected");
     broadcast_player_count(&lobby_subscribers, count).await;
 
     let mut identity = SocketIdentity {
@@ -187,7 +194,6 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
-            // Forward outbound messages from channel to WebSocket
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     if socket.send(Message::text(json)).await.is_err() {
@@ -196,7 +202,6 @@ async fn handle_socket(
                 }
             }
 
-            // Read inbound messages from WebSocket
             result = socket.recv() => {
                 match result {
                     Some(Ok(msg)) => {
@@ -209,6 +214,7 @@ async fn handle_socket(
                         let client_msg: ClientMessage = match serde_json::from_str(&text) {
                             Ok(m) => m,
                             Err(e) => {
+                                warn!(error = %e, "failed to parse client message");
                                 let err_msg = ServerMessage::Error {
                                     message: format!("Invalid message: {}", e),
                                 };
@@ -240,11 +246,15 @@ async fn handle_socket(
     }
 
     // Socket closed -- handle disconnect
+    info!(
+        game = ?identity.game_code,
+        player = ?identity.player_id,
+        "client disconnected"
+    );
     if let (Some(game_code), Some(player_id)) = (&identity.game_code, &identity.player_id) {
         let mut mgr = state.lock().await;
         mgr.handle_disconnect(game_code, *player_id);
 
-        // Notify opponent
         let opponent = PlayerId(1 - player_id.0);
         let conns = connections.lock().await;
         if let Some(opp_sender) = conns.get(game_code).and_then(|m| m.get(&opponent)) {
@@ -252,13 +262,11 @@ async fn handle_socket(
         }
     }
 
-    // Remove from lobby subscribers if subscribed
     if identity.lobby_subscribed {
         let mut subs = lobby_subscribers.lock().await;
         subs.retain(|s| !s.is_closed());
     }
 
-    // Decrement player count and broadcast
     let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
     broadcast_player_count(&lobby_subscribers, count).await;
 }
@@ -296,9 +304,11 @@ async fn handle_client_message(
 ) {
     match client_msg {
         ClientMessage::CreateGame { deck } => {
+            info!(deck_size = deck.main_deck.len(), "CreateGame");
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
+                    error!(error = %e, "CreateGame: deck resolve failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -309,12 +319,12 @@ async fn handle_client_message(
 
             let mut mgr = state.lock().await;
             let (game_code, player_token) = mgr.create_game(resolved);
+            info!(game = %game_code, "game created");
 
             identity.game_code = Some(game_code.clone());
             identity.player_id = Some(PlayerId(0));
             identity.player_token = Some(player_token.clone());
 
-            // Register in connections
             let mut conns = connections.lock().await;
             conns
                 .entry(game_code.clone())
@@ -331,9 +341,11 @@ async fn handle_client_message(
         }
 
         ClientMessage::JoinGame { game_code, deck } => {
+            info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
+                    error!(game = %game_code, error = %e, "JoinGame: deck resolve failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -345,18 +357,17 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game(&game_code, resolved) {
                 Ok((player_token, filtered_state)) => {
+                    info!(game = %game_code, "player joined, game starting");
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(PlayerId(1));
                     identity.player_token = Some(player_token.clone());
 
-                    // Register in connections
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
                         .or_default()
                         .insert(PlayerId(1), tx.clone());
 
-                    // Send GameStarted to joiner (no display names in legacy flow)
                     let msg = ServerMessage::GameStarted {
                         state: filtered_state,
                         your_player: PlayerId(1),
@@ -366,21 +377,24 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    // Send GameStarted to creator via channel
                     let p0_state = server_core::filter_state_for_player(
                         &mgr.sessions.get(&game_code).unwrap().state,
                         PlayerId(0),
                     );
                     if let Some(p0_sender) = conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
                     {
+                        info!(game = %game_code, "sending GameStarted to host");
                         let _ = p0_sender.send(ServerMessage::GameStarted {
                             state: p0_state,
                             your_player: PlayerId(0),
                             opponent_name: None,
                         });
+                    } else {
+                        warn!(game = %game_code, "host channel not found in connections");
                     }
                 }
                 Err(e) => {
+                    error!(game = %game_code, error = %e, "JoinGame failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -393,6 +407,7 @@ async fn handle_client_message(
             let game_code = match &identity.game_code {
                 Some(c) => c.clone(),
                 None => {
+                    warn!("Action received but not in a game");
                     let msg = ServerMessage::Error {
                         message: "Not in a game".to_string(),
                     };
@@ -415,9 +430,11 @@ async fn handle_client_message(
                 }
             };
 
+            debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
             let mut mgr = state.lock().await;
             match mgr.handle_action(&game_code, &player_token, action) {
                 Ok((p0_state, p1_state, events)) => {
+                    debug!(game = %game_code, events = events.len(), "action applied");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
                         if let Some(s) = players.get(&PlayerId(0)) {
@@ -435,6 +452,7 @@ async fn handle_client_message(
                     }
                 }
                 Err(e) => {
+                    warn!(game = %game_code, error = %e, "action rejected");
                     let msg = ServerMessage::ActionRejected { reason: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -447,6 +465,7 @@ async fn handle_client_message(
             game_code,
             player_token,
         } => {
+            info!(game = %game_code, "Reconnect attempt");
             let mut mgr = state.lock().await;
             match mgr.handle_reconnect(&game_code, &player_token) {
                 Ok(filtered_state) => {
@@ -460,11 +479,11 @@ async fn handle_client_message(
                         Some(opp_name.clone())
                     };
 
+                    info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(player);
                     identity.player_token = Some(player_token);
 
-                    // Re-register in connections
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
@@ -480,12 +499,12 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    // Notify opponent
                     if let Some(opp_sender) = conns.get(&game_code).and_then(|m| m.get(&opponent)) {
                         let _ = opp_sender.send(ServerMessage::OpponentReconnected);
                     }
                 }
                 Err(e) => {
+                    error!(game = %game_code, error = %e, "reconnect failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -495,17 +514,17 @@ async fn handle_client_message(
         }
 
         ClientMessage::SubscribeLobby => {
+            debug!("lobby subscription");
             identity.lobby_subscribed = true;
 
-            // Add this socket's sender to lobby subscribers
             {
                 let mut subs = lobby_subscribers.lock().await;
                 subs.push(tx.clone());
             }
 
-            // Send current lobby state
             let lob = lobby.lock().await;
             let games = lob.public_games();
+            debug!(games = games.len(), "sending lobby state");
             let _ = tx.send(ServerMessage::LobbyUpdate { games });
 
             let count = player_count.load(Ordering::Relaxed);
@@ -513,12 +532,9 @@ async fn handle_client_message(
         }
 
         ClientMessage::UnsubscribeLobby => {
+            debug!("lobby unsubscribe");
             identity.lobby_subscribed = false;
             let mut subs = lobby_subscribers.lock().await;
-            // Remove closed channels and this socket's sender
-            // We identify by checking if the sender is closed after we drop it
-            // Since we can't compare senders directly, retain only non-closed ones
-            // and mark this socket as unsubscribed so disconnect cleanup skips it
             subs.retain(|s| !s.is_closed());
         }
 
@@ -529,9 +545,18 @@ async fn handle_client_message(
             password,
             timer_seconds,
         } => {
+            info!(
+                display_name = %display_name,
+                public = public,
+                has_password = password.is_some(),
+                timer = ?timer_seconds,
+                deck_size = deck.main_deck.len(),
+                "CreateGameWithSettings"
+            );
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
+                    error!(error = %e, "CreateGameWithSettings: deck resolve failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -543,23 +568,21 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             let (game_code, player_token) =
                 mgr.create_game_with_settings(resolved, display_name.clone(), timer_seconds);
+            info!(game = %game_code, host = %display_name, "game created via lobby");
 
             identity.game_code = Some(game_code.clone());
             identity.player_id = Some(PlayerId(0));
             identity.player_token = Some(player_token.clone());
 
-            // Register in connections
             let mut conns = connections.lock().await;
             conns
                 .entry(game_code.clone())
                 .or_default()
                 .insert(PlayerId(0), tx.clone());
 
-            // Register in lobby
             let mut lob = lobby.lock().await;
             lob.register_game(&game_code, display_name, public, password, timer_seconds);
 
-            // Send GameCreated to the host
             let msg = ServerMessage::GameCreated {
                 game_code: game_code.clone(),
                 player_token,
@@ -568,7 +591,6 @@ async fn handle_client_message(
                 let _ = socket.send(Message::text(json)).await;
             }
 
-            // If public, notify lobby subscribers
             if public {
                 let games = lob.public_games();
                 if let Some(game) = games.into_iter().find(|g| g.game_code == game_code) {
@@ -580,7 +602,6 @@ async fn handle_client_message(
                 }
             }
 
-            // Broadcast updated player count
             let count = player_count.load(Ordering::Relaxed);
             broadcast_player_count(lobby_subscribers, count).await;
         }
@@ -591,12 +612,13 @@ async fn handle_client_message(
             display_name,
             password,
         } => {
-            // Check password first
+            info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
             {
                 let lob = lobby.lock().await;
                 match lob.verify_password(&game_code, password.as_deref()) {
                     Ok(()) => {}
                     Err(e) if e == "password_required" => {
+                        info!(game = %game_code, "password required, prompting client");
                         let msg = ServerMessage::PasswordRequired {
                             game_code: game_code.clone(),
                         };
@@ -606,6 +628,7 @@ async fn handle_client_message(
                         return;
                     }
                     Err(e) => {
+                        warn!(game = %game_code, error = %e, "password verification failed");
                         let msg = ServerMessage::Error { message: e };
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = socket.send(Message::text(json)).await;
@@ -618,6 +641,7 @@ async fn handle_client_message(
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
+                    error!(game = %game_code, error = %e, "JoinGameWithPassword: deck resolve failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -629,23 +653,21 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game_with_name(&game_code, resolved, display_name) {
                 Ok((player_token, filtered_state)) => {
+                    info!(game = %game_code, "player joined via lobby, game starting");
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(PlayerId(1));
                     identity.player_token = Some(player_token.clone());
 
-                    // Register in connections
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
                         .or_default()
                         .insert(PlayerId(1), tx.clone());
 
-                    // Get display names for opponent_name injection
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let host_name = session.display_names[0].clone();
                     let joiner_name = session.display_names[1].clone();
 
-                    // Send GameStarted to joiner (sees host's name)
                     let joiner_opp_name = if host_name.is_empty() {
                         None
                     } else {
@@ -660,7 +682,6 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    // Send GameStarted to host via channel (sees joiner's name)
                     let p0_state = server_core::filter_state_for_player(
                         &mgr.sessions.get(&game_code).unwrap().state,
                         PlayerId(0),
@@ -672,18 +693,19 @@ async fn handle_client_message(
                     };
                     if let Some(p0_sender) = conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
                     {
+                        info!(game = %game_code, "sending GameStarted to host");
                         let _ = p0_sender.send(ServerMessage::GameStarted {
                             state: p0_state,
                             your_player: PlayerId(0),
                             opponent_name: host_opp_name,
                         });
+                    } else {
+                        warn!(game = %game_code, "host channel not found in connections");
                     }
 
-                    // Unregister from lobby
                     let mut lob = lobby.lock().await;
                     lob.unregister_game(&game_code);
 
-                    // Notify lobby subscribers
                     broadcast_to_lobby_subscribers(
                         lobby_subscribers,
                         ServerMessage::LobbyGameRemoved {
@@ -692,11 +714,11 @@ async fn handle_client_message(
                     )
                     .await;
 
-                    // Broadcast updated player count
                     let count = player_count.load(Ordering::Relaxed);
                     broadcast_player_count(lobby_subscribers, count).await;
                 }
                 Err(e) => {
+                    error!(game = %game_code, error = %e, "JoinGameWithPassword failed");
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -723,9 +745,9 @@ async fn handle_client_message(
                 None => return,
             };
 
+            info!(game = %game_code, player = ?player_id, "player conceded");
             let opponent = PlayerId(1 - player_id.0);
 
-            // Send Conceded notification to both players
             let conceded_msg = ServerMessage::Conceded { player: player_id };
             let game_over_msg = ServerMessage::GameOver {
                 winner: Some(opponent),
@@ -741,7 +763,6 @@ async fn handle_client_message(
             }
             drop(conns);
 
-            // Clean up session
             let mut mgr = state.lock().await;
             mgr.sessions.remove(&game_code);
         }
@@ -756,6 +777,7 @@ async fn handle_client_message(
                 None => return,
             };
 
+            debug!(game = %game_code, player = ?player_id, emote = %emote, "emote");
             let opponent = PlayerId(1 - player_id.0);
             let msg = ServerMessage::Emote {
                 from_player: player_id,

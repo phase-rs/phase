@@ -123,6 +123,10 @@ export function MultiplayerPage() {
           );
           setView("waiting");
         } else if (msg.type === "GameStarted") {
+          // Close this pre-game WS before navigating — GameProvider will
+          // reconnect using the saved session token.
+          ws.close();
+          hostWsRef.current = null;
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
           navigate(`/game/${gameId}?mode=host`);

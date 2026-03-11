@@ -65,6 +65,7 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly mode: "host" | "join",
     private readonly deckData: DeckData,
     private readonly joinGameCode?: string,
+    private readonly joinPassword?: string,
   ) {}
 
   get gameCode(): string | null {
@@ -107,11 +108,14 @@ export class WebSocketAdapter implements EngineAdapter {
             data: { deck: this.deckData },
           });
         } else {
+          const displayName = useMultiplayerStore.getState().displayName;
           this.send({
-            type: "JoinGame",
+            type: "JoinGameWithPassword",
             data: {
               game_code: this.joinGameCode!,
               deck: this.deckData,
+              display_name: displayName || "Player",
+              password: this.joinPassword ?? null,
             },
           });
         }
@@ -297,6 +301,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this.initResolve();
           this.initResolve = null;
           this.initReject = null;
+        } else {
+          // Reconnect path — no initResolve pending, so emit state change
+          // so GameProvider's event listener populates the store.
+          this.emit({ type: "stateChanged", state: data.state, events: [] });
         }
         break;
       }

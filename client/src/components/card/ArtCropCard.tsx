@@ -35,6 +35,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
   const frameColor = getFrameColor(obj.color);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);
+  const devotionValue = obj.devotion ?? null;
 
   // --- Dynamic Text Sizing Logic ---
   let ptNumClass = "text-[14px]";
@@ -132,7 +133,18 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         </div>
       </div>
 
-      {/* 5. P/T BOX */}
+      {/* 5. GOLDEN DEVOTION/TRACKER BADGE */}
+      {!isToken && devotionValue != null && (
+        <div className="absolute -bottom-[2px] -left-[2px] z-20 flex items-center justify-center">
+          <div className="w-[18px] h-[18px] rounded-[2px] bg-gradient-to-br from-[#f2cc59] to-[#c78b1e] border border-[#4a350d] flex items-center justify-center shadow-[inset_0_1px_1px_rgba(255,255,255,0.7),inset_0_-1px_1px_rgba(0,0,0,0.3),0_2px_4px_rgba(0,0,0,0.8)]">
+             <span className="font-bold text-[#1a1304] text-[12px] leading-none drop-shadow-[0_1px_0_rgba(255,255,255,0.3)] mt-[1px]">
+               {devotionValue}
+             </span>
+          </div>
+        </div>
+      )}
+
+      {/* 6. P/T BOX */}
       {ptDisplay && (
         <div className="absolute -bottom-[3px] -right-[3px] z-20">
           <div className="rounded-[6px] bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">

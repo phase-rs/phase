@@ -3,13 +3,16 @@ import { motion, AnimatePresence } from "framer-motion";
 import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 
 interface OpponentHandProps {
   showCards?: boolean;
 }
 
 export function OpponentHand({ showCards = false }: OpponentHandProps) {
-  const opponent = useGameStore((s) => s.gameState?.players[1]);
+  const myId = usePlayerId();
+  const opponentId = myId === 0 ? 1 : 0;
+  const opponent = useGameStore((s) => s.gameState?.players[opponentId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
 

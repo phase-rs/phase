@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import type { GameObject } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
@@ -38,6 +39,8 @@ export function GameBoard() {
   const canUndo = useGameStore((s) => s.stateHistory.length > 0);
   const undo = useGameStore((s) => s.undo);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
+  const myId = usePlayerId();
+  const opponentId = myId === 0 ? 1 : 0;
 
   const { opponent, player } = useMemo(() => {
     if (!gameState) return { opponent: null, player: null };
@@ -47,10 +50,10 @@ export function GameBoard() {
       .filter(Boolean);
 
     const playerObjects = battlefieldObjects.filter(
-      (obj) => obj.controller === 0,
+      (obj) => obj.controller === myId,
     );
     const opponentObjects = battlefieldObjects.filter(
-      (obj) => obj.controller === 1,
+      (obj) => obj.controller === opponentId,
     );
 
     const partitionAndGroup = (objects: GameObject[]) => {
@@ -70,7 +73,7 @@ export function GameBoard() {
       player: partitionAndGroup(playerObjects),
       opponent: partitionAndGroup(opponentObjects),
     };
-  }, [gameState]);
+  }, [gameState, myId, opponentId]);
 
   // Reorder player creatures so assigned blockers align with their target attackers
   const sortedPlayerCreatures = useMemo(

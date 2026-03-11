@@ -6,6 +6,7 @@ import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction } from "../../adapter/types.ts";
 
@@ -13,7 +14,8 @@ import type { GameAction } from "../../adapter/types.ts";
 const DRAG_PLAY_THRESHOLD = -20;
 
 export function PlayerHand() {
-  const player = useGameStore((s) => s.gameState?.players[0]);
+  const playerId = usePlayerId();
+  const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.waitingFor);
   // Use dispatchAction (animation pipeline) instead of store dispatch
@@ -33,7 +35,7 @@ export function PlayerHand() {
   });
 
   const hasPriority =
-    waitingFor?.type === "Priority" && waitingFor.data.player === 0;
+    waitingFor?.type === "Priority" && waitingFor.data.player === playerId;
 
   // Build a set of card_ids that have PlayLand or CastSpell legal actions.
   // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.

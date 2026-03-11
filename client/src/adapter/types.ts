@@ -108,6 +108,7 @@ export interface GameObject {
   entered_battlefield_turn: number | null;
   has_unimplemented_mechanics?: boolean;
   has_summoning_sickness?: boolean;
+  devotion?: number;
   back_face?: {
     name: string;
     power: number | null;

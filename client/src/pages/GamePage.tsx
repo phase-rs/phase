@@ -360,14 +360,14 @@ function GamePageContent({
       {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
       <div className="fixed bottom-4 left-4 z-30 flex items-end gap-2">
         <GraveyardPile
-          playerId={0}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
+          playerId={playerId}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId })}
         />
-        <LibraryPile playerId={0} />
+        <LibraryPile playerId={playerId} />
         <ZoneIndicator
           zone="exile"
-          playerId={0}
-          onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
+          playerId={playerId}
+          onClick={() => setViewingZone({ zone: "exile", playerId })}
         />
       </div>
 
@@ -375,13 +375,13 @@ function GamePageContent({
       <div className="fixed right-2 top-2 z-30 flex items-start gap-2">
         <ZoneIndicator
           zone="exile"
-          playerId={1}
-          onClick={() => setViewingZone({ zone: "exile", playerId: 1 })}
+          playerId={playerId === 0 ? 1 : 0}
+          onClick={() => setViewingZone({ zone: "exile", playerId: playerId === 0 ? 1 : 0 })}
         />
-        <LibraryPile playerId={1} />
+        <LibraryPile playerId={playerId === 0 ? 1 : 0} />
         <GraveyardPile
-          playerId={1}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
+          playerId={playerId === 0 ? 1 : 0}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId: playerId === 0 ? 1 : 0 })}
         />
       </div>
 
