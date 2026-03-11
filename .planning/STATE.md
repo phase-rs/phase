@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 29-04-PLAN.md
+stopped_at: Completed 29-05-PLAN.md
 last_updated: "2026-03-11T18:09:00Z"
-last_activity: 2026-03-11 — Phase 29 Plan 02 complete (N-Player Priority, Turns, Elimination)
+last_activity: 2026-03-11 — Phase 29 Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 46
-  completed_plans: 35
-  percent: 76
+  completed_plans: 36
+  percent: 78
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-11)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 29 Support N Players — Plan 02 complete (Priority, Turns, Elimination)
+**Current focus:** Phase 29 Support N Players — Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
 
 ## Current Position
 
-Phase: 29 — Plan 04 of 16 complete
+Phase: 29 — Plan 05 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 03 complete (N-Player Combat)
+Last activity: 2026-03-11 — Phase 29 Plan 05 complete (Remove PlayerId(1-x) from Core Engine)
 
-Progress: [███████████████░░░░░] 35/46 plans (76%)
+Progress: [████████████████░░░░] 36/46 plans (78%)
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [███████████████░░░░░] 35/46 p
 | Phase 29 P01 | 7min | 2 tasks | 6 files |
 | Phase 29 P02 | 11min | 2 tasks | 11 files |
 | Phase 29 P03 | 25min | 2 tasks | 11 files |
+| Phase 29 P05 | 3min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,8 @@ Recent decisions affecting current work:
 - [29-04]: commander_cast_count as HashMap<ObjectId, u32> on GameState for per-commander tax tracking (partner support)
 - [29-04]: Zone redirection in move_to_zone() at lowest level -- catches all zone changes including SBA-driven ones
 - [29-04]: Commander tax adds to generic mana cost rather than separate payment step
+- [29-05]: engine.rs DeclareBlockers uses WaitingFor player field instead of recomputing defending player
+- [29-05]: opponent() removed from priority.rs (zero external callers in engine crate)
 
 ### Roadmap Evolution
 
@@ -207,6 +210,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T19:30:00Z
-Stopped at: Completed 29-03-PLAN.md
-Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-05-PLAN.md
+Last session: 2026-03-11T18:23:00Z
+Stopped at: Completed 29-05-PLAN.md
+Resume file: .planning/phases/29-support-n-players-in-engine-and-on-board-in-react-for-various-formats/29-06-PLAN.md
