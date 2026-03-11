@@ -130,10 +130,6 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
     }
   }, []);
 
-  const handleExport = useCallback(() => {
-    // Export handled by DeckList component directly
-  }, []);
-
   const handleSave = () => {
     if (!deckName.trim()) return;
     const data = JSON.stringify({ ...deck, commander: commanders, format });
@@ -294,7 +290,6 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
             deck={deck}
             onRemoveCard={handleRemoveCard}
             onImport={handleImport}
-            onExport={handleExport}
             onCardHover={onCardHover}
             warnings={warnings}
             format={format}

@@ -1,12 +1,12 @@
 import { useRef, useState } from "react";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { parseDeckFile, detectAndParseDeck, exportDeckFile } from "../../services/deckParser";
+import { parseDeckFile, detectAndParseDeck, exportDeck } from "../../services/deckParser";
+import type { ExportFormat } from "../../services/deckParser";
 
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
-  onExport: () => void;
   onCardHover?: (cardName: string | null) => void;
   warnings?: string[];
   format?: string;
@@ -112,7 +112,6 @@ export function DeckList({
   deck,
   onRemoveCard,
   onImport,
-  onExport,
   onCardHover,
   warnings = [],
   format: _format,
@@ -120,6 +119,9 @@ export function DeckList({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("dck");
+  const [copied, setCopied] = useState(false);
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
   const mainGroups = groupByType(deck.main);
@@ -142,16 +144,22 @@ export function DeckList({
     setShowPasteModal(false);
   };
 
-  const handleExport = () => {
-    const content = exportDeckFile(deck);
-    const blob = new Blob([content], { type: "text/plain" });
+  const exportText = showExportModal ? exportDeck(deck, exportFormat) : "";
+
+  const handleSaveToFile = () => {
+    const blob = new Blob([exportText], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "deck.dck";
+    a.download = exportFormat === "mtga" ? "deck.txt" : "deck.dck";
     a.click();
     URL.revokeObjectURL(url);
-    onExport();
+  };
+
+  const handleCopyToClipboard = async () => {
+    await navigator.clipboard.writeText(exportText);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -170,10 +178,10 @@ export function DeckList({
             Import
           </button>
           <button
-            onClick={handleExport}
+            onClick={() => setShowExportModal(true)}
             disabled={mainTotal === 0}
             className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-600 disabled:opacity-40"
-            title="Export deck as .dck file"
+            title="Export deck"
           >
             Export
           </button>
@@ -268,6 +276,71 @@ export function DeckList({
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
                   Parse
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => {
+              setShowExportModal(false);
+              setCopied(false);
+            }}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-white">Export Deck</h3>
+              <div className="flex rounded bg-gray-800 p-0.5 text-xs">
+                <button
+                  onClick={() => { setExportFormat("dck"); setCopied(false); }}
+                  className={`rounded px-2 py-1 ${exportFormat === "dck" ? "bg-gray-600 text-white" : "text-gray-400 hover:text-gray-200"}`}
+                >
+                  .dck
+                </button>
+                <button
+                  onClick={() => { setExportFormat("mtga"); setCopied(false); }}
+                  className={`rounded px-2 py-1 ${exportFormat === "mtga" ? "bg-gray-600 text-white" : "text-gray-400 hover:text-gray-200"}`}
+                >
+                  MTGA
+                </button>
+              </div>
+            </div>
+            <textarea
+              value={exportText}
+              readOnly
+              rows={12}
+              className="mb-3 w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
+              autoFocus
+              onFocus={(e) => e.target.select()}
+            />
+            <div className="flex justify-between">
+              <button
+                onClick={handleSaveToFile}
+                className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+              >
+                Save to File
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowExportModal(false);
+                    setCopied(false);
+                  }}
+                  className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+                >
+                  Close
+                </button>
+                <button
+                  onClick={handleCopyToClipboard}
+                  className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+                >
+                  {copied ? "Copied!" : "Copy"}
                 </button>
               </div>
             </div>

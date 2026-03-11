@@ -190,3 +190,43 @@ export function exportDeckFile(deck: ParsedDeck): string {
 
   return lines.join("\n") + "\n";
 }
+
+export type ExportFormat = "dck" | "mtga";
+
+/**
+ * Export a ParsedDeck to MTGA text format.
+ * Uses simplified format without set/collector number since we don't store that data.
+ */
+export function exportMtgaDeck(deck: ParsedDeck): string {
+  const lines: string[] = [];
+
+  if (deck.commander && deck.commander.length > 0) {
+    lines.push("Commander");
+    for (const name of deck.commander) {
+      lines.push(`1 ${name}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("Deck");
+  for (const entry of deck.main) {
+    lines.push(`${entry.count} ${entry.name}`);
+  }
+
+  if (deck.sideboard.length > 0) {
+    lines.push("");
+    lines.push("Sideboard");
+    for (const entry of deck.sideboard) {
+      lines.push(`${entry.count} ${entry.name}`);
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Export a ParsedDeck in the specified format.
+ */
+export function exportDeck(deck: ParsedDeck, format: ExportFormat): string {
+  return format === "mtga" ? exportMtgaDeck(deck) : exportDeckFile(deck);
+}
