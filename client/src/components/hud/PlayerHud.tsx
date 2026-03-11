@@ -17,7 +17,7 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
 
   return (
-    <div className="relative z-20 flex shrink-0 items-center justify-center gap-3 py-1">
+    <div data-player-hud={playerId} className="relative z-20 flex shrink-0 items-center justify-center gap-3 py-1">
       <PhaseIndicatorLeft />
       <div className={`flex items-center gap-2 rounded-full px-3 py-1 transition-all duration-300 ${isMyTurn ? "bg-black/50 ring-[3px] ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5),0_0_6px_rgba(52,211,153,0.4)]" : "bg-black/50"}`}>
         <LifeTotal playerId={0} size="lg" />

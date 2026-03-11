@@ -92,6 +92,20 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [getPosition],
   );
 
+  /** Query the actual DOM position of a player's HUD element. */
+  const getPlayerHudPosition = useCallback(
+    (playerId: number): { x: number; y: number } => {
+      const el = document.querySelector(`[data-player-hud="${playerId}"]`);
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+      // Fallback: center of screen
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    },
+    [],
+  );
+
   const processEffect = useCallback(
     (effect: StepEffect) => {
       const data = effect.data as Record<string, unknown>;
@@ -114,11 +128,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             }
           } else if (target && "Player" in target) {
             isPlayerTarget = true;
-            const playerId = target.Player;
-            pos = {
-              x: window.innerWidth - 140,
-              y: playerId === 0 ? window.innerHeight - 120 : 80,
-            };
+            pos = getPlayerHudPosition(target.Player);
             if (vfxQuality !== "minimal") {
               particleRef.current?.playerDamage(pos.x, pos.y, amount);
             }
@@ -152,8 +162,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         case "LifeChanged": {
           const amount = (data.amount as number) ?? 0;
           const playerId = (data.player_id as number) ?? 0;
-          const y = playerId === 0 ? window.innerHeight - 120 : 80;
-          const x = window.innerWidth - 140;
+          const { x, y } = getPlayerHudPosition(playerId);
 
           const id = ++floatIdCounter;
           setActiveFloats((prev) => [
@@ -258,10 +267,22 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         case "AttackersDeclared": {
           if (vfxQuality !== "minimal") {
             const attackerIds = (data.attacker_ids as number[]) ?? [];
+            const defendingPlayer = data.defending_player as number | undefined;
+            const defenderPos = defendingPlayer != null
+              ? getPlayerHudPosition(defendingPlayer)
+              : null;
             for (const attackerId of attackerIds) {
               const pos = getObjectPosition(attackerId);
               if (pos) {
                 particleRef.current?.attackBurst(pos.x, pos.y);
+                // Fire projectile toward the defending player's HUD
+                if (defenderPos) {
+                  particleRef.current?.projectile(
+                    pos.x, pos.y,
+                    defenderPos.x, defenderPos.y,
+                    250,
+                  );
+                }
               }
             }
           }
@@ -355,6 +376,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [
       getPosition,
       getObjectPosition,
+      getPlayerHudPosition,
       vfxQuality,
       speedMultiplier,
       containerRef,
