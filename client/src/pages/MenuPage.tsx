@@ -41,18 +41,28 @@ export function MenuPage() {
     }
 
     const saved = loadActiveGame();
-    if (saved && loadGame(saved.id)) {
-      setActiveGame(saved);
-    } else if (saved) {
-      // Metadata exists but game state is gone — clean up stale entry
-      clearActiveGame();
+    if (saved) {
+      const hasState = saved.mode === "online"
+        ? sessionStorage.getItem("phase-ws-session") !== null
+        : loadGame(saved.id) !== null;
+      if (hasState) {
+        setActiveGame(saved);
+      } else {
+        // Metadata exists but game state is gone — clean up stale entry
+        clearActiveGame();
+      }
     }
   }, []);
 
   const handleResumeGame = () => {
     if (!activeGame) return;
     useGameStore.setState({ gameId: activeGame.id });
-    navigate(`/game/${activeGame.id}?mode=${activeGame.mode}&difficulty=${activeGame.difficulty}`);
+    if (activeGame.mode === "online") {
+      // Reconnect via session token
+      navigate(`/game/${activeGame.id}?mode=host`);
+    } else {
+      navigate(`/game/${activeGame.id}?mode=${activeGame.mode}&difficulty=${activeGame.difficulty}`);
+    }
   };
 
   const hasSavedGame = activeGame !== null;

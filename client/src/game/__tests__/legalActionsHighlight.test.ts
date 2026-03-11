@@ -201,7 +201,7 @@ describe("legal actions → card highlighting pipeline", () => {
     ];
     const adapter = createMockAdapter(state, legalActions);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     expect(useGameStore.getState().legalActions).toEqual(legalActions);
   });
@@ -218,7 +218,7 @@ describe("legal actions → card highlighting pipeline", () => {
       .mockResolvedValueOnce(initialActions)
       .mockResolvedValueOnce(postDispatchActions);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     expect(useGameStore.getState().legalActions).toEqual(initialActions);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
@@ -279,7 +279,7 @@ describe("legal actions → card highlighting pipeline", () => {
     ];
     const adapter = createMockAdapter(state, legalActions);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     const { legalActions: stored, gameState } = useGameStore.getState();
     const playableCardIds = new Set<number>();

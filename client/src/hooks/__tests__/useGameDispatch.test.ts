@@ -110,7 +110,7 @@ describe("useGameDispatch", () => {
 
     // State should be updated immediately (no timer needed)
     expect(useGameStore.getState().gameState).toBe(mockState);
-    expect(useAnimationStore.getState().steps).toHaveLength(0);
+    expect(useAnimationStore.getState().queue).toHaveLength(0);
   });
 
   it("serializes rapid dispatches", async () => {

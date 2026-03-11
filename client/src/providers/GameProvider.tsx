@@ -15,7 +15,7 @@ import { hostRoom, joinRoom } from "../network/connection";
 import { createPeerSession } from "../network/peer";
 import type { ParsedDeck } from "../services/deckParser";
 import { detectServerUrl } from "../services/serverDetection";
-import { useGameStore, loadGame } from "../stores/gameStore";
+import { useGameStore, loadGame, clearActiveGame } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 function loadActiveDeck(): ParsedDeck | null {
@@ -292,6 +292,9 @@ export function GameProvider({
               ...(needAdapter ? { adapter: wsAdapter } : {}),
             });
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            if (event.state.waiting_for.type === "GameOver") {
+              clearActiveGame();
+            }
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
             useMultiplayerStore.getState().setConnectionStatus("disconnected");

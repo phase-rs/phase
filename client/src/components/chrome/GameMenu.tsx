@@ -93,10 +93,7 @@ export function GameMenu({
           />
           <MenuButton
             label="Main Menu"
-            onClick={() => {
-              clearGame(gameId);
-              navigate("/");
-            }}
+            onClick={() => navigate("/")}
           />
         </div>
       )}

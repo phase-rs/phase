@@ -12,7 +12,7 @@ import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
 import type { ParsedDeck } from "../services/deckParser";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
-import { useGameStore } from "../stores/gameStore";
+import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
 function seedStarterDecks(): void {
@@ -128,6 +128,7 @@ export function MultiplayerPage() {
           ws.close();
           hostWsRef.current = null;
           const gameId = crypto.randomUUID();
+          saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
           useGameStore.setState({ gameId });
           navigate(`/game/${gameId}?mode=host`);
         } else if (msg.type === "Error") {
@@ -170,6 +171,7 @@ export function MultiplayerPage() {
 
       sessionStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
+      saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
       useGameStore.setState({ gameId });
       const params = new URLSearchParams({ mode: "join", code });
       if (password) {

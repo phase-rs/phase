@@ -146,7 +146,7 @@ describe("WasmAdapter", () => {
 
       const { restore_game_state } = await import("../../wasm/engine_wasm");
       adapter.restoreState(mockState);
-      expect(restore_game_state).toHaveBeenCalledWith(mockState);
+      expect(restore_game_state).toHaveBeenCalledWith(JSON.stringify(mockState));
     });
 
     it("throws if not initialized", () => {

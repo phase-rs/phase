@@ -173,10 +173,10 @@ describe("shouldAutoPass", () => {
     ).toBe(true);
   });
 
-  it("auto-passes with empty legal actions array", () => {
+  it("does not auto-pass with empty legal actions array (actions not yet computed)", () => {
     expect(
       shouldAutoPass(createState(), priority(0), [], false, []),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   // Engine handles combat gating via has_potential_attackers at BeginCombat,

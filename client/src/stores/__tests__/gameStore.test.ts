@@ -137,7 +137,7 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
     expect(useGameStore.getState().gameState?.turn_number).toBe(2);
 
-    act(() => useGameStore.getState().undo());
+    await act(() => useGameStore.getState().undo());
 
     const store = useGameStore.getState();
     expect(store.gameState?.turn_number).toBe(1);

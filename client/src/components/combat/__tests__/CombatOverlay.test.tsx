@@ -56,7 +56,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
     exile: [],
     rng_seed: 42,
     combat: null,
-    waiting_for: { type: "DeclareAttackers", data: { player: 0 } },
+    waiting_for: { type: "DeclareAttackers", data: { player: 0, valid_attacker_ids: [100, 101] } },
     lands_played_this_turn: 0,
     max_lands_per_turn: 1,
     priority_pass_count: 0,
@@ -77,8 +77,10 @@ describe("CombatOverlay", () => {
       blockerAssignments: new Map(),
       combatClickHandler: null,
     });
+    const gameState = createGameState();
     useGameStore.setState({
-      gameState: createGameState(),
+      gameState,
+      waitingFor: gameState.waiting_for,
     });
   });
 

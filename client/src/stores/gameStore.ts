@@ -6,7 +6,7 @@ import { ACTIVE_GAME_KEY, GAME_KEY_PREFIX } from "../constants/storage";
 
 export interface ActiveGameMeta {
   id: string;
-  mode: "ai" | "local";
+  mode: "ai" | "local" | "online";
   difficulty: string;
 }
 
