@@ -17,6 +17,7 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "framer-motion": "^12.35.1",
     "idb-keyval": "^6.2.2",
     "peerjs": "^1.5.5",

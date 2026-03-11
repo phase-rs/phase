@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             game: Mutex::new(None),
         })
