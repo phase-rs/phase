@@ -19,6 +19,8 @@ pub struct GameSession {
     pub player_tokens: [String; 2],
     pub connected: [bool; 2],
     pub decks: [Option<Vec<DeckEntry>>; 2],
+    pub display_names: [String; 2],
+    pub timer_seconds: Option<u32>,
 }
 
 impl GameSession {
@@ -69,6 +71,35 @@ impl SessionManager {
             player_tokens: [player_token.clone(), String::new()],
             connected: [true, false],
             decks: [Some(deck), None],
+            display_names: [String::new(), String::new()],
+            timer_seconds: None,
+        };
+
+        self.token_to_game
+            .insert(player_token.clone(), game_code.clone());
+        self.sessions.insert(game_code.clone(), session);
+
+        (game_code, player_token)
+    }
+
+    /// Create a new game session with lobby settings. Returns (game_code, player_token).
+    pub fn create_game_with_settings(
+        &mut self,
+        deck: Vec<DeckEntry>,
+        display_name: String,
+        timer_seconds: Option<u32>,
+    ) -> (String, String) {
+        let game_code = generate_game_code();
+        let player_token = generate_player_token();
+
+        let session = GameSession {
+            game_code: game_code.clone(),
+            state: GameState::new_two_player(rand::rng().random()),
+            player_tokens: [player_token.clone(), String::new()],
+            connected: [true, false],
+            decks: [Some(deck), None],
+            display_names: [display_name, String::new()],
+            timer_seconds,
         };
 
         self.token_to_game
@@ -97,6 +128,47 @@ impl SessionManager {
         session.player_tokens[1] = player_token.clone();
         session.connected[1] = true;
         session.decks[1] = Some(deck);
+
+        self.token_to_game
+            .insert(player_token.clone(), game_code.to_string());
+
+        // Load deck data into game state before starting
+        let player_deck = session.decks[0].clone().unwrap_or_default();
+        let opponent_deck = session.decks[1].clone().unwrap_or_default();
+        let payload = DeckPayload {
+            player_deck,
+            opponent_deck,
+        };
+        load_deck_into_state(&mut session.state, &payload);
+
+        // Initialize the game via engine
+        let _result = start_game(&mut session.state);
+
+        let filtered = filter_state_for_player(&session.state, PlayerId(1));
+        Ok((player_token, filtered))
+    }
+
+    /// Join an existing game with a display name. Returns (player_token, initial_state_for_joiner) on success.
+    pub fn join_game_with_name(
+        &mut self,
+        game_code: &str,
+        deck: Vec<DeckEntry>,
+        display_name: String,
+    ) -> Result<(String, GameState), String> {
+        let session = self
+            .sessions
+            .get_mut(game_code)
+            .ok_or_else(|| format!("Game not found: {}", game_code))?;
+
+        if !session.player_tokens[1].is_empty() {
+            return Err("Game is already full".to_string());
+        }
+
+        let player_token = generate_player_token();
+        session.player_tokens[1] = player_token.clone();
+        session.connected[1] = true;
+        session.decks[1] = Some(deck);
+        session.display_names[1] = display_name;
 
         self.token_to_game
             .insert(player_token.clone(), game_code.to_string());
