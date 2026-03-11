@@ -67,10 +67,14 @@ pub enum ServerMessage {
         state: GameState,
         your_player: PlayerId,
         opponent_name: Option<String>,
+        #[serde(default)]
+        legal_actions: Vec<GameAction>,
     },
     StateUpdate {
         state: GameState,
         events: Vec<GameEvent>,
+        #[serde(default)]
+        legal_actions: Vec<GameAction>,
     },
     ActionRejected {
         reason: String,
@@ -317,6 +321,7 @@ mod tests {
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
+            legal_actions: vec![GameAction::PassPriority],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -324,10 +329,12 @@ mod tests {
             ServerMessage::GameStarted {
                 your_player,
                 opponent_name,
+                legal_actions,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
+                assert_eq!(legal_actions.len(), 1);
             }
             _ => panic!("wrong variant"),
         }
@@ -340,6 +347,7 @@ mod tests {
             state,
             your_player: PlayerId(1),
             opponent_name: None,
+            legal_actions: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -347,10 +355,12 @@ mod tests {
             ServerMessage::GameStarted {
                 your_player,
                 opponent_name,
+                legal_actions,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(1));
                 assert_eq!(opponent_name, None);
+                assert!(legal_actions.is_empty());
             }
             _ => panic!("wrong variant"),
         }

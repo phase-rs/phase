@@ -25,7 +25,7 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[] }
+  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalActions: GameAction[] }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number };
@@ -48,6 +48,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private ws: WebSocket | null = null;
   private gameState: GameState | null = null;
   private _playerId: PlayerId | null = null;
+  private _legalActions: GameAction[] = [];
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
   private pendingResolve: ((events: GameEvent[]) => void) | null = null;
@@ -176,9 +177,7 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<GameAction[]> {
-    // In multiplayer, legal actions would need server-side support.
-    // For now, return empty — auto-pass and highlights are WASM-only features.
-    return [];
+    return this._legalActions;
   }
 
   restoreState(_state: GameState): void {
@@ -292,9 +291,10 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; legal_actions?: GameAction[] };
         this.gameState = data.state;
         this._playerId = data.your_player;
+        this._legalActions = data.legal_actions ?? [];
         useMultiplayerStore.getState().setActivePlayerId(data.your_player);
         useMultiplayerStore.getState().setOpponentDisplayName(data.opponent_name ?? null);
         if (this.initResolve) {
@@ -304,20 +304,21 @@ export class WebSocketAdapter implements EngineAdapter {
         } else {
           // Reconnect path — no initResolve pending, so emit state change
           // so GameProvider's event listener populates the store.
-          this.emit({ type: "stateChanged", state: data.state, events: [] });
+          this.emit({ type: "stateChanged", state: data.state, events: [], legalActions: this._legalActions });
         }
         break;
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state: GameState; events: GameEvent[] };
+        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[] };
         this.gameState = data.state;
+        this._legalActions = data.legal_actions ?? [];
         if (this.pendingResolve) {
           this.pendingResolve(data.events);
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
-          this.emit({ type: "stateChanged", state: data.state, events: data.events });
+          this.emit({ type: "stateChanged", state: data.state, events: data.events, legalActions: this._legalActions });
         }
         break;
       }

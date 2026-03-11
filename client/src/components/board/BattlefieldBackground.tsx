@@ -1,6 +1,7 @@
 import { useMemo, useRef } from "react";
 
 import type { ManaColor } from "../../adapter/types.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { BoardBackground } from "../../stores/preferencesStore.ts";
@@ -30,11 +31,12 @@ export function BattlefieldBackground() {
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const autoImageRef = useRef<string | null>(null);
 
+  const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
   const dominantColor = useMemo(() => {
     if (!gameState) return null;
-    return getDominantManaColor(gameState.battlefield, gameState.objects, 0);
-  }, [gameState]);
+    return getDominantManaColor(gameState.battlefield, gameState.objects, playerId);
+  }, [gameState, playerId]);
 
   const bgImage = resolveBattlefieldImage(boardBackground, dominantColor, autoImageRef);
 

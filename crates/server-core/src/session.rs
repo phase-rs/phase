@@ -13,6 +13,25 @@ use rand::Rng;
 use crate::filter::filter_state_for_player;
 use crate::reconnect::ReconnectManager;
 
+/// Returns the player who must act for the given WaitingFor, or None if the game is over.
+pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
+    match waiting_for {
+        WaitingFor::Priority { player }
+        | WaitingFor::MulliganDecision { player, .. }
+        | WaitingFor::MulliganBottomCards { player, .. }
+        | WaitingFor::ManaPayment { player }
+        | WaitingFor::TargetSelection { player, .. }
+        | WaitingFor::DeclareAttackers { player, .. }
+        | WaitingFor::DeclareBlockers { player, .. }
+        | WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EquipTarget { player, .. }
+        | WaitingFor::ScryChoice { player, .. }
+        | WaitingFor::DigChoice { player, .. }
+        | WaitingFor::SurveilChoice { player, .. } => Some(*player),
+        WaitingFor::GameOver { .. } => None,
+    }
+}
+
 pub struct GameSession {
     pub game_code: String,
     pub state: GameState,
@@ -190,13 +209,13 @@ impl SessionManager {
     }
 
     /// Handle a game action from a player.
-    /// Returns (filtered_state_p0, filtered_state_p1, events) on success.
+    /// Returns (filtered_state_p0, filtered_state_p1, events, legal_actions_for_next_actor) on success.
     pub fn handle_action(
         &mut self,
         game_code: &str,
         player_token: &str,
         action: GameAction,
-    ) -> Result<(GameState, GameState, Vec<GameEvent>), String> {
+    ) -> Result<(GameState, GameState, Vec<GameEvent>, Vec<GameAction>), String> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -241,8 +260,9 @@ impl SessionManager {
 
         let p0_state = filter_state_for_player(&session.state, PlayerId(0));
         let p1_state = filter_state_for_player(&session.state, PlayerId(1));
+        let new_legal_actions = get_legal_actions(&session.state);
 
-        Ok((p0_state, p1_state, result.events))
+        Ok((p0_state, p1_state, result.events, new_legal_actions))
     }
 
     /// Mark a player as disconnected.

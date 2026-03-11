@@ -44,7 +44,7 @@ export function CardImage({
       <img
         src={src}
         alt={cardName}
-        className={`${baseClasses} shadow-lg object-cover`}
+        className={`${baseClasses} shadow-lg object-contain`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
         draggable={false}
       />

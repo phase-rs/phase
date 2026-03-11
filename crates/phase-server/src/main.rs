@@ -10,6 +10,7 @@ use axum::routing::get;
 use axum::Router;
 use engine::database::CardDatabase;
 use engine::types::player::PlayerId;
+use phase_ai::get_legal_actions;
 use server_core::lobby::LobbyManager;
 use server_core::protocol::{ClientMessage, ServerMessage};
 use server_core::resolve_deck;
@@ -362,6 +363,12 @@ async fn handle_client_message(
                     identity.player_id = Some(PlayerId(1));
                     identity.player_token = Some(player_token.clone());
 
+                    let session = mgr.sessions.get(&game_code).unwrap();
+                    let legal_actions = get_legal_actions(&session.state);
+                    let actor = server_core::acting_player(&session.state.waiting_for);
+                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions.clone() } else { vec![] };
+                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions } else { vec![] };
+
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
@@ -372,6 +379,7 @@ async fn handle_client_message(
                         state: filtered_state,
                         your_player: PlayerId(1),
                         opponent_name: None,
+                        legal_actions: p1_legals,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -388,6 +396,7 @@ async fn handle_client_message(
                             state: p0_state,
                             your_player: PlayerId(0),
                             opponent_name: None,
+                            legal_actions: p0_legals,
                         });
                     } else {
                         warn!(game = %game_code, "host channel not found in connections");
@@ -433,20 +442,28 @@ async fn handle_client_message(
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
             let mut mgr = state.lock().await;
             match mgr.handle_action(&game_code, &player_token, action) {
-                Ok((p0_state, p1_state, events)) => {
+                Ok((p0_state, p1_state, events, legal_actions)) => {
                     debug!(game = %game_code, events = events.len(), "action applied");
+                    let actor = server_core::acting_player(
+                        &mgr.sessions.get(&game_code).unwrap().state.waiting_for,
+                    );
+                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions.clone() } else { vec![] };
+                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions } else { vec![] };
+
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
                         if let Some(s) = players.get(&PlayerId(0)) {
                             let _ = s.send(ServerMessage::StateUpdate {
                                 state: p0_state,
                                 events: events.clone(),
+                                legal_actions: p0_legals,
                             });
                         }
                         if let Some(s) = players.get(&PlayerId(1)) {
                             let _ = s.send(ServerMessage::StateUpdate {
                                 state: p1_state,
                                 events,
+                                legal_actions: p1_legals,
                             });
                         }
                     }
@@ -479,6 +496,10 @@ async fn handle_client_message(
                         Some(opp_name.clone())
                     };
 
+                    let legal_actions_all = get_legal_actions(&session.state);
+                    let actor = server_core::acting_player(&session.state.waiting_for);
+                    let player_legals = if actor == Some(player) { legal_actions_all } else { vec![] };
+
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(player);
@@ -494,6 +515,7 @@ async fn handle_client_message(
                         state: filtered_state,
                         your_player: player,
                         opponent_name,
+                        legal_actions: player_legals,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -658,15 +680,19 @@ async fn handle_client_message(
                     identity.player_id = Some(PlayerId(1));
                     identity.player_token = Some(player_token.clone());
 
+                    let session = mgr.sessions.get(&game_code).unwrap();
+                    let host_name = session.display_names[0].clone();
+                    let joiner_name = session.display_names[1].clone();
+                    let legal_actions = get_legal_actions(&session.state);
+                    let actor = server_core::acting_player(&session.state.waiting_for);
+                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions.clone() } else { vec![] };
+                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions } else { vec![] };
+
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
                         .or_default()
                         .insert(PlayerId(1), tx.clone());
-
-                    let session = mgr.sessions.get(&game_code).unwrap();
-                    let host_name = session.display_names[0].clone();
-                    let joiner_name = session.display_names[1].clone();
 
                     let joiner_opp_name = if host_name.is_empty() {
                         None
@@ -677,6 +703,7 @@ async fn handle_client_message(
                         state: filtered_state,
                         your_player: PlayerId(1),
                         opponent_name: joiner_opp_name,
+                        legal_actions: p1_legals,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -698,6 +725,7 @@ async fn handle_client_message(
                             state: p0_state,
                             your_player: PlayerId(0),
                             opponent_name: host_opp_name,
+                            legal_actions: p0_legals,
                         });
                     } else {
                         warn!(game = %game_code, "host channel not found in connections");

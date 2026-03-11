@@ -1,5 +1,6 @@
 import type { GameAction, GameEvent } from "../adapter/types";
 import { normalizeEvents } from "../animation/eventNormalizer";
+import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
 import { SPEED_MULTIPLIERS } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
@@ -59,8 +60,8 @@ async function processAction(action: GameAction): Promise<void> {
   // 4. Flash turn banner directly (bypasses animation queue for reliability)
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent && "data" in turnEvent) {
-    const playerId = (turnEvent.data as { player_id: number }).player_id;
-    useUiStore.getState().flashTurnBanner(playerId === 0 ? "YOUR TURN" : "THEIR TURN");
+    const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
+    useUiStore.getState().flashTurnBanner(turnPlayerId === getPlayerId() ? "YOUR TURN" : "THEIR TURN");
   }
 
   // 5. Normalize events into animation steps

@@ -10,4 +10,4 @@ pub use filter::filter_state_for_player;
 pub use lobby::LobbyManager;
 pub use protocol::{ClientMessage, DeckData, LobbyGame, ServerMessage};
 pub use reconnect::ReconnectManager;
-pub use session::SessionManager;
+pub use session::{acting_player, SessionManager};

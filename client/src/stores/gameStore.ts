@@ -30,6 +30,7 @@ interface GameStoreActions {
   setAdapter: (adapter: EngineAdapter) => void;
   setGameState: (state: GameState) => void;
   setWaitingFor: (waitingFor: WaitingFor | null) => void;
+  setLegalActions: (actions: GameAction[]) => void;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -201,6 +202,10 @@ export const useGameStore = create<GameStore>()(
 
     setWaitingFor: (waitingFor) => {
       set({ waitingFor });
+    },
+
+    setLegalActions: (actions) => {
+      set({ legalActions: actions });
     },
   })),
 );

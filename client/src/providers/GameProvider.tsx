@@ -280,6 +280,7 @@ export function GameProvider({
             }
             store.setGameState(event.state);
             store.setWaitingFor(event.state.waiting_for);
+            store.setLegalActions(event.legalActions);
             useMultiplayerStore.getState().setConnectionStatus("connected");
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
