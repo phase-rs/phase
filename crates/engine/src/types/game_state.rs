@@ -670,11 +670,7 @@ mod tests {
 
     #[test]
     fn new_with_standard_config_matches_new_two_player() {
-        let from_new = GameState::new(
-            crate::types::format::FormatConfig::standard(),
-            2,
-            42,
-        );
+        let from_new = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
         let from_legacy = GameState::new_two_player(42);
         assert_eq!(from_new.players.len(), from_legacy.players.len());
         assert_eq!(from_new.players[0].life, from_legacy.players[0].life);
@@ -685,65 +681,44 @@ mod tests {
 
     #[test]
     fn new_with_commander_config_creates_four_players_with_40_life() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::commander(),
-            4,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::commander(), 4, 0);
         assert_eq!(state.players.len(), 4);
         for player in &state.players {
             assert_eq!(player.life, 40);
         }
-        assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]);
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
     }
 
     #[test]
     fn new_initializes_seat_order() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::standard(),
-            2,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 0);
         assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1)]);
     }
 
     #[test]
     fn new_initializes_eliminated_players_empty() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::standard(),
-            2,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 0);
         assert!(state.eliminated_players.is_empty());
     }
 
     #[test]
     fn new_initializes_commander_damage_empty() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::commander(),
-            4,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::commander(), 4, 0);
         assert!(state.commander_damage.is_empty());
     }
 
     #[test]
     fn new_initializes_priority_passes_empty() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::standard(),
-            2,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 0);
         assert!(state.priority_passes.is_empty());
     }
 
     #[test]
     fn player_is_eliminated_defaults_to_false() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::standard(),
-            2,
-            0,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 0);
         for player in &state.players {
             assert!(!player.is_eliminated);
         }
@@ -753,16 +728,15 @@ mod tests {
     fn new_two_player_has_seat_order_and_format_config() {
         let state = GameState::new_two_player(0);
         assert_eq!(state.seat_order, vec![PlayerId(0), PlayerId(1)]);
-        assert_eq!(state.format_config, crate::types::format::FormatConfig::standard());
+        assert_eq!(
+            state.format_config,
+            crate::types::format::FormatConfig::standard()
+        );
     }
 
     #[test]
     fn game_state_with_new_fields_serializes_and_roundtrips() {
-        let state = GameState::new(
-            crate::types::format::FormatConfig::commander(),
-            4,
-            42,
-        );
+        let state = GameState::new(crate::types::format::FormatConfig::commander(), 4, 42);
         let serialized = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);

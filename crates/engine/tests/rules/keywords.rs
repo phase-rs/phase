@@ -15,11 +15,12 @@ fn run_combat(
     use engine::game::combat::AttackTarget;
     use engine::types::player::PlayerId;
     runner.pass_both_players();
-    let attacks: Vec<_> = attacker_ids.iter().map(|&id| (id, AttackTarget::Player(PlayerId(1)))).collect();
+    let attacks: Vec<_> = attacker_ids
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(PlayerId(1))))
+        .collect();
     runner
-        .act(GameAction::DeclareAttackers {
-            attacks,
-        })
+        .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
     runner
         .act(GameAction::DeclareBlockers {
@@ -258,7 +259,10 @@ fn vigilance_attacker_does_not_tap() {
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attacks: vec![(attacker_id, engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)))],
+            attacks: vec![(
+                attacker_id,
+                engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)),
+            )],
         })
         .expect("Vigilance creature should be able to attack");
 
