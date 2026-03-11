@@ -5,6 +5,7 @@ import type {
   GameState,
   PlayerId,
 } from "./types";
+
 import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import type { PeerSession } from "../network/peer";
@@ -19,7 +20,7 @@ export type P2PAdapterEvent =
   | { type: "opponentDisconnected"; reason: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "error"; message: string }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[] };
+  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalActions: GameAction[] };
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
@@ -101,16 +102,18 @@ export class P2PHostAdapter implements EngineAdapter {
 
     const events = this.wasm.initializeGame(deckPayload);
     const state = await this.wasm.getState();
+    const legalActions = await this.wasm.getLegalActions();
 
     // Host is player 0
     useMultiplayerStore.getState().setActivePlayerId(0);
 
-    // Send initial state to guest (filtered)
+    // Send initial state to guest (filtered) with legal actions
     const filteredState = filterStateForGuest(state);
     this.session.send({
       type: "game_setup",
       state: filteredState,
       events,
+      legalActions,
     });
 
     return events;
@@ -119,13 +122,15 @@ export class P2PHostAdapter implements EngineAdapter {
   async submitAction(action: GameAction): Promise<GameEvent[]> {
     const events = await this.wasm.submitAction(action);
     const state = await this.wasm.getState();
+    const legalActions = await this.wasm.getLegalActions();
 
-    // Send filtered state update to guest
+    // Send filtered state update to guest with legal actions
     const filteredState = filterStateForGuest(state);
     this.session.send({
       type: "state_update",
       state: filteredState,
       events,
+      legalActions,
     });
 
     return events;
@@ -166,17 +171,19 @@ export class P2PHostAdapter implements EngineAdapter {
         try {
           const events = await this.wasm.submitAction(msg.action);
           const state = await this.wasm.getState();
+          const legalActions = await this.wasm.getLegalActions();
 
-          // Send filtered state back to guest
+          // Send filtered state back to guest with legal actions
           const filteredState = filterStateForGuest(state);
           this.session.send({
             type: "state_update",
             state: filteredState,
             events,
+            legalActions,
           });
 
           // Emit state update locally so host UI updates for opponent actions
-          this.emit({ type: "stateChanged", state, events });
+          this.emit({ type: "stateChanged", state, events, legalActions });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           this.session.send({ type: "action_rejected", reason });
@@ -200,6 +207,7 @@ export class P2PHostAdapter implements EngineAdapter {
  */
 export class P2PGuestAdapter implements EngineAdapter {
   private gameState: GameState | null = null;
+  private legalActions: GameAction[] = [];
   private listeners: P2PAdapterEventListener[] = [];
   private pendingResolve: ((events: GameEvent[]) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
@@ -272,8 +280,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<GameAction[]> {
-    // Host validates actions; guest doesn't need local legal action list
-    return [];
+    return this.legalActions;
   }
 
   getAiAction(_difficulty: string): GameAction | null {
@@ -289,6 +296,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (this.disconnectUnsub) this.disconnectUnsub();
     this.session.close();
     this.gameState = null;
+    this.legalActions = [];
     this.pendingResolve = null;
     this.pendingReject = null;
     this.listeners = [];
@@ -298,19 +306,21 @@ export class P2PGuestAdapter implements EngineAdapter {
     switch (msg.type) {
       case "game_setup": {
         this.gameState = msg.state;
+        this.legalActions = msg.legalActions;
         this.gameSetupResolve(msg.events);
         break;
       }
 
       case "state_update": {
         this.gameState = msg.state;
+        this.legalActions = msg.legalActions;
         if (this.pendingResolve) {
           this.pendingResolve(msg.events);
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
           // Unsolicited update (opponent's action result)
-          this.emit({ type: "stateChanged", state: msg.state, events: msg.events });
+          this.emit({ type: "stateChanged", state: msg.state, events: msg.events, legalActions: msg.legalActions });
         }
         break;
       }

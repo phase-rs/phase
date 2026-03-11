@@ -192,6 +192,7 @@ export function GameProvider({
                 useGameStore.setState({
                   gameState: event.state,
                   waitingFor: event.state.waiting_for,
+                  legalActions: event.legalActions,
                 });
               }
               onP2PEventRef.current?.(event);
@@ -217,6 +218,7 @@ export function GameProvider({
                 useGameStore.setState({
                   gameState: event.state,
                   waitingFor: event.state.waiting_for,
+                  legalActions: event.legalActions,
                 });
               }
               onP2PEventRef.current?.(event);

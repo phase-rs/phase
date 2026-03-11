@@ -26,6 +26,11 @@ export function shouldAutoPass(
   // Phase stops only gate initial priority (empty stack)
   if (state.stack.length === 0 && phaseStops.includes(state.phase)) return false;
 
+  // If legal actions haven't been computed yet, don't auto-pass.
+  // The engine always includes at least PassPriority when a player has priority,
+  // so an empty array means the actions haven't arrived (e.g. P2P latency).
+  if (legalActions.length === 0) return false;
+
   // If the only legal action is PassPriority, always auto-pass.
   // The engine gates combat correctly via has_potential_attackers at BeginCombat,
   // so the frontend doesn't need to duplicate that check here.

@@ -2,9 +2,9 @@ import type { GameAction, GameEvent, GameState } from "../adapter/types";
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown }
-  | { type: "game_setup"; state: GameState; events: GameEvent[] }
+  | { type: "game_setup"; state: GameState; events: GameEvent[]; legalActions: GameAction[] }
   | { type: "action"; action: GameAction }
-  | { type: "state_update"; state: GameState; events: GameEvent[] }
+  | { type: "state_update"; state: GameState; events: GameEvent[]; legalActions: GameAction[] }
   | { type: "action_rejected"; reason: string }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
