@@ -459,6 +459,11 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
     // Run state-based actions after every action (except during mulligan/game over)
     if matches!(waiting_for, WaitingFor::Priority { .. }) {
         sba::check_state_based_actions(state, &mut events);
+
+        // Check exile returns -- must happen after SBAs (which may move sources off battlefield)
+        // and before triggers (so returned permanents get ETB triggers)
+        check_exile_returns(state, &mut events);
+
         // SBA might have set game over
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             let wf = state.waiting_for.clone();
@@ -468,16 +473,15 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             });
         }
 
-        // Process triggers after action + SBA events
+        // Process triggers after action + SBA + exile return events
         let stack_before = state.stack.len();
         triggers::process_triggers(state, &events);
 
         // Check if a trigger needs target selection from the player
-        if state.pending_trigger.is_some() {
-            let trigger = state.pending_trigger.as_ref().unwrap();
-            let target_filter =
-                triggers::extract_target_filter_from_effect(&trigger.ability.effect);
-            if let Some(filter) = target_filter {
+        if let Some(trigger) = state.pending_trigger.as_ref() {
+            if let Some(filter) =
+                triggers::extract_target_filter_from_effect(&trigger.ability.effect)
+            {
                 let legal = super::targeting::find_legal_targets_typed(
                     state,
                     filter,
@@ -809,6 +813,51 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
         events,
         waiting_for,
     }
+}
+
+/// Check if any exile-return sources have left the battlefield.
+/// If so, move the exiled cards back to the battlefield.
+fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+
+    for event in events.iter() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Zone::Battlefield,
+            ..
+        } = event
+        {
+            // Find exile links where this object was the source
+            for link in &state.exile_links {
+                if link.source_id == *object_id {
+                    to_return.push(link.clone());
+                }
+            }
+        }
+    }
+
+    if to_return.is_empty() {
+        return;
+    }
+
+    // Return exiled cards to the battlefield
+    for link in &to_return {
+        // Only return if the card is still in exile
+        let still_in_exile = state
+            .objects
+            .get(&link.exiled_id)
+            .map(|obj| obj.zone == Zone::Exile)
+            .unwrap_or(false);
+        if still_in_exile {
+            zones::move_to_zone(state, link.exiled_id, Zone::Battlefield, events);
+        }
+    }
+
+    // Remove processed links
+    let returned_ids: Vec<_> = to_return.iter().map(|l| l.exiled_id).collect();
+    state
+        .exile_links
+        .retain(|link| !returned_ids.contains(&link.exiled_id));
 }
 
 #[cfg(all(test, feature = "forge-compat"))]
@@ -2764,11 +2813,10 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, TargetFilter, TargetRef,
-        TriggerDefinition, TypeFilter,
+        ControllerRef, Effect, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::CardId;
 
     #[test]
     fn trigger_target_selection_select_targets_pushes_to_stack() {
@@ -2968,7 +3016,7 @@ mod exile_return_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::game_state::ExileLink;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::CardId;
 
     #[test]
     fn exile_return_source_leaves_battlefield_returns_exiled_card() {

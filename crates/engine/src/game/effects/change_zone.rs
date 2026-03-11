@@ -42,6 +42,19 @@ pub fn resolve(
                         if to == Zone::Battlefield || from_zone == Zone::Battlefield {
                             state.layers_dirty = true;
                         }
+                        // Track exile-until-leaves links
+                        if to == Zone::Exile {
+                            if let Some(crate::types::ability::Duration::UntilHostLeavesPlay) =
+                                &ability.duration
+                            {
+                                state
+                                    .exile_links
+                                    .push(crate::types::game_state::ExileLink {
+                                        exiled_id: object_id,
+                                        source_id: ability.source_id,
+                                    });
+                            }
+                        }
                     }
                 }
                 ReplacementResult::Prevented => {}
