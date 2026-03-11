@@ -170,7 +170,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 requires 22 + 23. Phase 25 requires 24. Phase 26 requires 25.
+Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 requires 22 + 23. Phase 25 requires 24. Phase 26 requires 25. Phase 28 requires 26. Phase 27 requires 28.
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -195,7 +195,20 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
   5. `parser::ability::parse_ability()` gated behind `forge-compat` — zero Forge string parsing at runtime
   6. All 32K `data/abilities/*.json` files migrated to native typed JSON schema
   7. `cargo test --all` passes and `card-data.json` uses the new format
-**Plans**: TBD
+**Plans**: 5 plans
+
+**Execution Order:**
+Wave 1: Plan 01 (type definitions)
+Wave 2: Plans 02 + 03 (parallel — layers/filter subsystem, triggers/effects subsystem)
+Wave 3: Plan 04 (migration binary + JSON migration)
+Wave 4: Plan 05 (frontend + CI verification + human verify)
+
+Plans:
+- [ ] 28-01-PLAN.md — Type system overhaul: TargetFilter, Duration, PtValue, ContinuousModification, typed definition structs, Effect cleanup
+- [ ] 28-02-PLAN.md — Layers/filter/deck_loading rewrite: typed ContinuousModification, TargetFilter matching, svars removal
+- [ ] 28-03-PLAN.md — Triggers/effects/parser rewrite: typed TriggerDefinition, SubAbility chain, Effect::Other removal, forge-compat gating
+- [ ] 28-04-PLAN.md — Migration binary + 32K JSON file migration + json_loader update + schema regeneration
+- [ ] 28-05-PLAN.md — Frontend type updates, WASM rebuild, full CI verification, human gameplay verification
 
 ### Phase 27: Aura Casting, Triggered Ability Targeting, and "Until Leaves" Exile Return
 **Goal**: Implement full Aura spell support (targeting + attachment), triggered ability target selection, and "until source leaves the battlefield" exile return tracking
