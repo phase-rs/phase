@@ -156,3 +156,193 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
+    use crate::types::player::PlayerId;
+
+    fn setup() -> GameState {
+        GameState::new_two_player(42)
+    }
+
+    fn create_aura_on_stack(
+        state: &mut GameState,
+        target_id: ObjectId,
+    ) -> ObjectId {
+        let aura_id = create_object(
+            state,
+            CardId(100),
+            PlayerId(0),
+            "Pacifism".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.keywords.push(Keyword::Enchant(
+                crate::types::ability::TargetFilter::Typed {
+                    card_type: Some(crate::types::ability::TypeFilter::Creature),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                },
+            ));
+        }
+
+        let resolved = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "Aura".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(target_id)],
+            aura_id,
+            PlayerId(0),
+        );
+
+        state.stack.push(StackEntry {
+            id: aura_id,
+            source_id: aura_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(100),
+                ability: resolved,
+            },
+        });
+
+        aura_id
+    }
+
+    #[test]
+    fn aura_resolving_attaches_to_target() {
+        let mut state = setup();
+
+        // Create a creature on the battlefield
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Create an Aura spell targeting the creature
+        let aura_id = create_aura_on_stack(&mut state, creature);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // Aura should be on the battlefield
+        assert!(state.battlefield.contains(&aura_id));
+        // Aura should be attached to the creature
+        assert_eq!(
+            state.objects.get(&aura_id).unwrap().attached_to,
+            Some(creature)
+        );
+        // Creature should list the Aura in its attachments
+        assert!(state
+            .objects
+            .get(&creature)
+            .unwrap()
+            .attachments
+            .contains(&aura_id));
+    }
+
+    #[test]
+    fn aura_fizzles_when_target_left_battlefield() {
+        let mut state = setup();
+
+        // Create a creature, then remove it from battlefield before resolution
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let aura_id = create_aura_on_stack(&mut state, creature);
+
+        // Remove creature from battlefield before resolution
+        state.battlefield.retain(|&id| id != creature);
+        if let Some(obj) = state.objects.get_mut(&creature) {
+            obj.zone = Zone::Graveyard;
+        }
+        state.players[1].graveyard.push(creature);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // Aura should fizzle to graveyard (not to battlefield)
+        assert!(!state.battlefield.contains(&aura_id));
+        assert!(state.players[0].graveyard.contains(&aura_id));
+    }
+
+    #[test]
+    fn non_aura_permanent_resolving_no_attachment() {
+        let mut state = setup();
+
+        // Create a non-Aura enchantment on the stack
+        let ench_id = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Intangible Virtue".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&ench_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        let resolved = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "GlobalEnchantment".to_string(),
+                description: None,
+            },
+            vec![],
+            ench_id,
+            PlayerId(0),
+        );
+
+        state.stack.push(StackEntry {
+            id: ench_id,
+            source_id: ench_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(60),
+                ability: resolved,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // Should be on battlefield, not attached to anything
+        assert!(state.battlefield.contains(&ench_id));
+        assert_eq!(state.objects.get(&ench_id).unwrap().attached_to, None);
+    }
+}
