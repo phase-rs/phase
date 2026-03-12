@@ -2,6 +2,14 @@ import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "
 import { toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
+function canGroup(obj: GameObject): boolean {
+  return obj.attachments.length === 0 && Object.keys(obj.counters).length === 0;
+}
+
+function groupKey(obj: GameObject): string {
+  return `${obj.name}::${obj.tapped}`;
+}
+
 export interface BattlefieldPartition {
   creatures: ObjectId[];
   lands: ObjectId[];
@@ -34,12 +42,36 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
 }
 
 export function groupByName(objects: GameObject[]): GroupedPermanent[] {
-  return objects.map((obj) => ({
-    name: obj.name,
-    ids: [obj.id],
-    count: 1,
-    representative: toCardProps(obj),
-  }));
+  const groups = new Map<string, GameObject[]>();
+
+  for (const obj of objects) {
+    if (!canGroup(obj)) {
+      // Ungroupable objects (attachments, counters) get their own entry
+      groups.set(`__solo_${obj.id}`, [obj]);
+      continue;
+    }
+
+    const key = groupKey(obj);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(obj);
+    } else {
+      groups.set(key, [obj]);
+    }
+  }
+
+  const result: GroupedPermanent[] = [];
+
+  for (const members of groups.values()) {
+    result.push({
+      name: members[0].name,
+      ids: members.map((m) => m.id),
+      count: members.length,
+      representative: toCardProps(members[0]),
+    });
+  }
+
+  return result;
 }
 
 /** Group attackers by their defending player target. */
