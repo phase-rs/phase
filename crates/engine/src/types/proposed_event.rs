@@ -159,6 +159,28 @@ impl ProposedEvent {
             ProposedEvent::CreateToken { owner, .. } => *owner,
         }
     }
+
+    /// Returns the primary object affected by this event, if any.
+    pub fn affected_object_id(&self) -> Option<ObjectId> {
+        match self {
+            ProposedEvent::ZoneChange { object_id, .. }
+            | ProposedEvent::Tap { object_id, .. }
+            | ProposedEvent::Untap { object_id, .. }
+            | ProposedEvent::Destroy { object_id, .. }
+            | ProposedEvent::AddCounter { object_id, .. }
+            | ProposedEvent::RemoveCounter { object_id, .. }
+            | ProposedEvent::Discard { object_id, .. }
+            | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            ProposedEvent::Damage { target, .. } => match target {
+                TargetRef::Object(oid) => Some(*oid),
+                TargetRef::Player(_) => None,
+            },
+            ProposedEvent::Draw { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::CreateToken { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1357,6 +1357,21 @@ pub fn find_applicable_replacements(
             if let Some(handler) = registry.get(&repl_def.event) {
                 let empty_params = HashMap::new();
                 if (handler.matcher)(event, &empty_params, obj.id, state) {
+                    // Enforce valid_card filter: if set, the event's affected object
+                    // must match the filter (e.g., SelfRef means only this card's own events)
+                    if let Some(ref filter) = repl_def.valid_card {
+                        let matches = event
+                            .affected_object_id()
+                            .map(|oid| {
+                                super::filter::matches_target_filter(
+                                    state, oid, filter, obj.id,
+                                )
+                            })
+                            .unwrap_or(false);
+                        if !matches {
+                            continue;
+                        }
+                    }
                     candidates.push(rid);
                 }
             }
