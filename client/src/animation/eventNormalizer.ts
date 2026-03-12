@@ -28,7 +28,6 @@ const GROUPABLE_TYPES = new Set([
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
   "TurnStarted",
-  "AttackersDeclared",
   "BlockersDeclared",
 ]);
 
@@ -52,6 +51,23 @@ export function normalizeEvents(events: GameEvent[]): AnimationStep[] {
 
   for (const event of events) {
     if (NON_VISUAL_EVENTS.has(event.type)) {
+      continue;
+    }
+
+    // Split AttackersDeclared into one step per attacker for staggered animation.
+    // Each step fires VFX (burst + projectile) for a single attacker sequentially.
+    if (event.type === "AttackersDeclared") {
+      const duration = EVENT_DURATIONS["AttackersDeclared"] ?? DEFAULT_DURATION;
+      const { attacker_ids, defending_player } = event.data as {
+        attacker_ids: number[];
+        defending_player: number;
+      };
+      for (const attackerId of attacker_ids) {
+        steps.push({
+          effects: [{ type: "AttackersDeclared", data: { attacker_ids: [attackerId], defending_player }, duration }],
+          duration,
+        });
+      }
       continue;
     }
 

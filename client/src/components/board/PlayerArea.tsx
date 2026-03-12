@@ -5,6 +5,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
+import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
@@ -17,10 +18,7 @@ const LAND_COL_STYLE = {
   "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 0.75)`,
   "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2})`,
   "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2} * 1.4)`,
-  width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`,
 } as React.CSSProperties;
-
-const LAND_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`;
 
 /** Scale for enchantment/artifact column (right) */
 const OTHER_SCALE = 0.85;
@@ -30,10 +28,7 @@ const OTHER_COL_STYLE = {
   "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} * 0.75)`,
   "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
   "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE} * 1.4)`,
-  width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`,
 } as React.CSSProperties;
-
-const OTHER_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`;
 
 export type PlayerAreaMode = "full" | "focused" | "compact";
 
@@ -99,31 +94,30 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       className={`relative flex min-h-0 flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
       data-testid={`player-area-${playerId}`}
     >
-      {/* Lands -- left column */}
+      {/* Lands -- left column, flows top-to-bottom then wraps into additional columns */}
       <div
-        className="absolute left-0 top-0 bottom-0 z-10 flex flex-col overflow-visible px-1 py-2"
+        className="z-10 flex h-full flex-shrink-0 flex-col flex-wrap gap-2 px-1 py-2"
         style={LAND_COL_STYLE}
       >
-        {partitioned && (
-          <BattlefieldRow groups={partitioned.lands} rowType="lands" />
-        )}
+        {partitioned?.lands.map((g) => (
+          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
+        ))}
         {landColumnExtra}
       </div>
-      {/* Creatures -- center area */}
+      {/* Creatures -- center area, gets remaining space */}
       <div
         className={`flex flex-1 flex-col ${mode === "full" ? "pt-2 pb-4" : "justify-end py-2"} gap-1`}
-        style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: OTHER_COL_WIDTH }}
       >
         <BattlefieldRow groups={creatures} rowType="creatures" />
       </div>
       {/* Enchantments/artifacts -- right column */}
       <div
-        className="absolute right-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
+        className="z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2"
         style={OTHER_COL_STYLE}
       >
-        {partitioned && (
-          <BattlefieldRow groups={partitioned.other} rowType="other" />
-        )}
+        {partitioned?.other.map((g) => (
+          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
+        ))}
       </div>
       {/* Commander display overlay */}
       {isCommander && (

@@ -94,15 +94,27 @@ describe("normalizeEvents", () => {
     expect(steps[0].effects[0].type).toBe("TurnStarted");
   });
 
-  it("AttackersDeclared gets its own step", () => {
+  it("AttackersDeclared creates one step per attacker for staggered animation", () => {
     const events: GameEvent[] = [
       { type: "AttackersDeclared", data: { attacker_ids: [1, 2], defending_player: 1 } },
     ];
 
     const steps = normalizeEvents(events);
-    expect(steps).toHaveLength(1);
+    expect(steps).toHaveLength(2);
     expect(steps[0].effects[0].type).toBe("AttackersDeclared");
+    expect(steps[0].effects[0].data).toEqual({ attacker_ids: [1], defending_player: 1 });
+    expect(steps[1].effects[0].data).toEqual({ attacker_ids: [2], defending_player: 1 });
     expect(steps[0].duration).toBe(300);
+  });
+
+  it("AttackersDeclared with single attacker creates one step", () => {
+    const events: GameEvent[] = [
+      { type: "AttackersDeclared", data: { attacker_ids: [5], defending_player: 0 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].data).toEqual({ attacker_ids: [5], defending_player: 0 });
   });
 
   it("BlockersDeclared gets its own step", () => {
