@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    EffectKind, DamageAmount, Effect, EffectError, ResolvedAbility, TargetFilter,
-    TargetRef,
+    DamageAmount, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -91,15 +90,8 @@ pub fn resolve(
                 // Damage was prevented, skip
             }
             ReplacementResult::NeedsChoice(player) => {
-                let candidate_count = state
-                    .pending_replacement
-                    .as_ref()
-                    .map(|p| p.candidates.len())
-                    .unwrap_or(0);
-                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                    player,
-                    candidate_count,
-                };
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
         }

@@ -235,19 +235,46 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             match super::replacement::continue_replacement(state, index, &mut events) {
-                super::replacement::ReplacementResult::Execute(_) => WaitingFor::Priority {
-                    player: state.active_player,
-                },
-                super::replacement::ReplacementResult::NeedsChoice(player) => {
-                    let candidate_count = state
-                        .pending_replacement
-                        .as_ref()
-                        .map(|p| p.candidates.len())
-                        .unwrap_or(0);
-                    WaitingFor::ReplacementChoice {
-                        player,
-                        candidate_count,
+                super::replacement::ReplacementResult::Execute(event) => {
+                    // Execute the resolved proposed event (e.g., zone change after
+                    // replacement choice like shock land pay-life decision)
+                    let mut zone_change_object_id = None;
+                    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                        object_id,
+                        to,
+                        from,
+                        ..
+                    } = event
+                    {
+                        zones::move_to_zone(state, object_id, to, &mut events);
+                        if to == Zone::Battlefield {
+                            if let Some(obj) = state.objects.get_mut(&object_id) {
+                                obj.tapped = false;
+                                obj.entered_battlefield_turn = Some(state.turn_number);
+                            }
+                        }
+                        if to == Zone::Battlefield || from == Zone::Battlefield {
+                            state.layers_dirty = true;
+                        }
+                        zone_change_object_id = Some(object_id);
                     }
+
+                    // Apply post-replacement side effect (e.g., pay life or enter tapped)
+                    if let Some(effect_def) = state.post_replacement_effect.take() {
+                        apply_post_replacement_effect(
+                            state,
+                            &effect_def,
+                            zone_change_object_id,
+                            &mut events,
+                        );
+                    }
+
+                    WaitingFor::Priority {
+                        player: state.active_player,
+                    }
+                }
+                super::replacement::ReplacementResult::NeedsChoice(player) => {
+                    super::replacement::replacement_choice_waiting_for(player, state)
                 }
                 super::replacement::ReplacementResult::Prevented => WaitingFor::Priority {
                     player: state.active_player,
@@ -586,6 +613,40 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
     })
 }
 
+/// Apply a post-replacement side effect after a zone change has been executed.
+/// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
+fn apply_post_replacement_effect(
+    state: &mut GameState,
+    effect_def: &crate::types::ability::AbilityDefinition,
+    object_id: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::ability::Effect;
+    match &effect_def.effect {
+        Effect::LoseLife { amount } => {
+            if let Some(p) = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == state.active_player)
+            {
+                p.life -= *amount;
+                events.push(GameEvent::LifeChanged {
+                    player_id: state.active_player,
+                    amount: -(*amount),
+                });
+            }
+        }
+        Effect::Tap { .. } => {
+            if let Some(obj_id) = object_id {
+                if let Some(obj) = state.objects.get_mut(&obj_id) {
+                    obj.tapped = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_play_land(
     state: &mut GameState,
     card_id: CardId,
@@ -628,13 +689,58 @@ fn handle_play_land(
         .copied()
         .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
 
-    // Move from hand to battlefield
-    zones::move_to_zone(state, object_id, Zone::Battlefield, events);
+    // Route through the replacement pipeline (handles ETB replacements like shock lands)
+    let proposed = crate::types::proposed_event::ProposedEvent::ZoneChange {
+        object_id,
+        from: Zone::Hand,
+        to: Zone::Battlefield,
+        cause: None,
+        applied: std::collections::HashSet::new(),
+    };
 
-    // Set tapped=false (lands enter untapped by default)
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.tapped = false;
-        obj.entered_battlefield_turn = Some(state.turn_number);
+    match super::replacement::replace_event(state, proposed, events) {
+        super::replacement::ReplacementResult::Execute(event) => {
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                object_id, to, ..
+            } = event
+            {
+                zones::move_to_zone(state, object_id, to, events);
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    obj.tapped = false;
+                    obj.entered_battlefield_turn = Some(state.turn_number);
+                }
+            }
+        }
+        super::replacement::ReplacementResult::Prevented => {
+            // Land play was prevented — don't increment counters
+            return Ok(WaitingFor::Priority {
+                player: state.priority_player,
+            });
+        }
+        super::replacement::ReplacementResult::NeedsChoice(player) => {
+            // A replacement needs player choice (e.g., shock land "pay 2 life?").
+            // Increment counters now — the land play is committed, only the ETB
+            // effect is pending.
+            state.lands_played_this_turn += 1;
+            if let Some(p) = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == state.priority_player)
+            {
+                p.lands_played_this_turn += 1;
+            }
+            state.priority_passes.clear();
+            state.priority_pass_count = 0;
+
+            events.push(GameEvent::LandPlayed {
+                object_id,
+                player_id: state.priority_player,
+            });
+
+            return Ok(super::replacement::replacement_choice_waiting_for(
+                player, state,
+            ));
+        }
     }
 
     // Increment land counter

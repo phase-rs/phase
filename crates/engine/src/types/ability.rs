@@ -1008,12 +1008,28 @@ pub struct StaticDefinition {
     pub description: Option<String>,
 }
 
+/// Whether a replacement effect is mandatory or offers the affected player a choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ReplacementMode {
+    /// Always applies (default). Used for "enters tapped", "prevent damage", etc.
+    #[default]
+    Mandatory,
+    /// Player may accept or decline. `execute` runs on accept; `decline` runs on decline.
+    Optional {
+        #[serde(default)]
+        decline: Option<Box<AbilityDefinition>>,
+    },
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
     #[serde(default)]
     pub execute: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    pub mode: ReplacementMode,
     #[serde(default)]
     pub valid_card: Option<TargetFilter>,
     #[serde(default)]
@@ -1297,6 +1313,7 @@ mod tests {
                 target_prompt: None,
                 sorcery_speed: false,
             })),
+            mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(
                 "If damage would be dealt to ~, prevent it and gain 1 life.".to_string(),

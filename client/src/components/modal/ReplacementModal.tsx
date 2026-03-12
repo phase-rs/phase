@@ -11,6 +11,9 @@ export function ReplacementModal() {
   const candidateCount = isReplacementChoice
     ? waitingFor.data.candidate_count
     : 0;
+  const candidateDescriptions: string[] = isReplacementChoice
+    ? (waitingFor.data.candidate_descriptions ?? [])
+    : [];
 
   const handleChoose = useCallback(
     (index: number) => {
@@ -51,17 +54,20 @@ export function ReplacementModal() {
           </p>
 
           <div className="flex flex-col gap-2">
-            {candidates.map((index) => (
-              <button
-                key={index}
-                onClick={() => handleChoose(index)}
-                className="rounded-lg bg-gray-800 px-4 py-3 text-left transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
-              >
-                <span className="font-semibold text-white">
-                  Replacement Effect {index + 1}
-                </span>
-              </button>
-            ))}
+            {candidates.map((index) => {
+              const desc = candidateDescriptions[index];
+              return (
+                <button
+                  key={index}
+                  onClick={() => handleChoose(index)}
+                  className="rounded-lg bg-gray-800 px-4 py-3 text-left transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
+                >
+                  <span className="font-semibold text-white">
+                    {desc || `Replacement Effect ${index + 1}`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </motion.div>
       </motion.div>

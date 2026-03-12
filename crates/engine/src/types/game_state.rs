@@ -105,6 +105,8 @@ pub enum WaitingFor {
     ReplacementChoice {
         player: PlayerId,
         candidate_count: usize,
+        #[serde(default)]
+        candidate_descriptions: Vec<String>,
     },
     EquipTarget {
         player: PlayerId,
@@ -206,6 +208,10 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// Transient: effect to resolve after a replacement choice's zone change completes.
+    /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
 
     // Layer system
     pub layers_dirty: bool,
@@ -276,6 +282,10 @@ pub struct PendingReplacement {
     pub proposed: ProposedEvent,
     pub candidates: Vec<ReplacementId>,
     pub depth: u16,
+    /// When true, the replacement is Optional — index 0 = accept, index 1 = decline.
+    /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
+    #[serde(default)]
+    pub is_optional: bool,
 }
 
 impl GameState {
@@ -311,6 +321,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            post_replacement_effect: None,
             layers_dirty: true,
             next_timestamp: 1,
             day_night: None,
@@ -531,6 +542,7 @@ mod tests {
             WaitingFor::ReplacementChoice {
                 player: PlayerId(0),
                 candidate_count: 2,
+                candidate_descriptions: vec![],
             },
             WaitingFor::EquipTarget {
                 player: PlayerId(0),

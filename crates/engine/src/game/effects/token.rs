@@ -4,7 +4,7 @@ use std::str::FromStr;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    EffectKind, CountValue, Effect, EffectError, PtValue, ResolvedAbility,
+    CountValue, Effect, EffectError, EffectKind, PtValue, ResolvedAbility,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -389,15 +389,8 @@ pub fn resolve(
                 continue;
             }
             ReplacementResult::NeedsChoice(player) => {
-                let candidate_count = state
-                    .pending_replacement
-                    .as_ref()
-                    .map(|p| p.candidates.len())
-                    .unwrap_or(0);
-                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                    player,
-                    candidate_count,
-                };
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
         }
@@ -681,9 +674,13 @@ mod tests {
     fn emits_effect_resolved_event() {
         let (_, events) = resolve_token("w_1_1_soldier");
 
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Token, .. })
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Token,
+                ..
+            }
+        )));
     }
 
     #[test]

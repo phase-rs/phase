@@ -947,6 +947,7 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 3,
+            candidate_descriptions: vec![],
         };
         let actions = get_legal_actions(&state);
         assert_eq!(actions.len(), 3);

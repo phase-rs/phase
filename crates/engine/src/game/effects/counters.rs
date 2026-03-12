@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    EffectKind, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -80,15 +80,8 @@ pub fn resolve_add(
             }
             ReplacementResult::Prevented => {}
             ReplacementResult::NeedsChoice(player) => {
-                let candidate_count = state
-                    .pending_replacement
-                    .as_ref()
-                    .map(|p| p.candidates.len())
-                    .unwrap_or(0);
-                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                    player,
-                    candidate_count,
-                };
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
         }
@@ -238,15 +231,8 @@ pub fn resolve_remove(
             }
             ReplacementResult::Prevented => {}
             ReplacementResult::NeedsChoice(player) => {
-                let candidate_count = state
-                    .pending_replacement
-                    .as_ref()
-                    .map(|p| p.candidates.len())
-                    .unwrap_or(0);
-                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                    player,
-                    candidate_count,
-                };
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
         }

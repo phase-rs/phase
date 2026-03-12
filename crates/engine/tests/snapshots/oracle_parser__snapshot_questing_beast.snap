@@ -69,6 +69,9 @@ expression: result
     {
       "event": "DamageDone",
       "execute": null,
+      "mode": {
+        "type": "Mandatory"
+      },
       "valid_card": null,
       "description": "Combat damage that would be dealt by creatures you control can't be prevented."
     }

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
+use crate::types::ability::ReplacementMode;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingReplacement};
+use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{ProposedEvent, ReplacementId};
@@ -36,6 +37,46 @@ pub type ReplacementApplier = fn(
 pub struct ReplacementHandlerEntry {
     pub matcher: ReplacementMatcher,
     pub applier: ReplacementApplier,
+}
+
+/// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
+/// Centralizes candidate count and description extraction so callers don't repeat this logic.
+pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> WaitingFor {
+    let (candidate_count, candidate_descriptions) = state
+        .pending_replacement
+        .as_ref()
+        .map(|p| {
+            let count = if p.is_optional { 2 } else { p.candidates.len() };
+            let descs: Vec<String> = if p.is_optional {
+                let accept_desc = p
+                    .candidates
+                    .first()
+                    .and_then(|rid| state.objects.get(&rid.source))
+                    .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
+                    .and_then(|repl| repl.description.clone())
+                    .unwrap_or_else(|| "Accept".to_string());
+                vec![accept_desc, "Decline".to_string()]
+            } else {
+                p.candidates
+                    .iter()
+                    .filter_map(|rid| {
+                        state
+                            .objects
+                            .get(&rid.source)
+                            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                            .and_then(|repl| repl.description.clone())
+                    })
+                    .collect()
+            };
+            (count, descs)
+        })
+        .unwrap_or((0, vec![]));
+
+    WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        candidate_descriptions,
+    }
 }
 
 // --- Stub handlers (for 21 recognized-but-unimplemented types) ---
@@ -115,9 +156,9 @@ fn moved_applier(
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
+        to,
         cause,
         applied,
-        ..
     } = event
     {
         // NewDestination$ specifies where to redirect
@@ -132,11 +173,11 @@ fn moved_applier(
                 });
             }
         }
-        // If no NewDestination$, return event unchanged
+        // No redirection — pass through unchanged
         ApplyResult::Modified(ProposedEvent::ZoneChange {
             object_id,
             from,
-            to: from, // fallback: stay in origin
+            to,
             cause,
             applied,
         })
@@ -1274,13 +1315,36 @@ pub fn find_applicable_replacements(
 ) -> Vec<ReplacementId> {
     let mut candidates = Vec::new();
 
-    // Scan battlefield + command zone objects for replacement_definitions
+    // MTG Rule 614.12: Self-replacement effects on a card entering the battlefield
+    // apply even though the card isn't on the battlefield yet. We must scan the
+    // entering card in addition to battlefield/command zone permanents.
+    let entering_object_id = match event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    };
+
     let zones_to_scan = [Zone::Battlefield, Zone::Command];
     for obj in state.objects.values() {
-        if !zones_to_scan.contains(&obj.zone) {
+        let in_scanned_zone = zones_to_scan.contains(&obj.zone);
+        let is_entering = entering_object_id == Some(obj.id);
+
+        if !in_scanned_zone && !is_entering {
             continue;
         }
+
         for (index, repl_def) in obj.replacement_definitions.iter().enumerate() {
+            // Cards not yet on battlefield can only apply self-replacement effects
+            if is_entering
+                && !in_scanned_zone
+                && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+            {
+                continue;
+            }
+
             let rid = ReplacementId {
                 source: obj.id,
                 index,
@@ -1359,8 +1423,27 @@ fn pipeline_loop(
 
         if candidates.len() == 1 {
             let rid = candidates[0];
-            proposed.mark_applied(rid);
 
+            // Check if this single candidate is Optional — if so, present as a choice
+            let is_optional = state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .map(|repl| matches!(repl.mode, ReplacementMode::Optional { .. }))
+                .unwrap_or(false);
+
+            if is_optional {
+                let affected = proposed.affected_player(state);
+                state.pending_replacement = Some(PendingReplacement {
+                    proposed,
+                    candidates,
+                    depth,
+                    is_optional: true,
+                });
+                return ReplacementResult::NeedsChoice(affected);
+            }
+
+            proposed.mark_applied(rid);
             match apply_single_replacement(state, proposed, rid, registry, events) {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
@@ -1372,6 +1455,7 @@ fn pipeline_loop(
                 proposed,
                 candidates,
                 depth,
+                is_optional: false,
             });
             return ReplacementResult::NeedsChoice(affected);
         }
@@ -1409,6 +1493,43 @@ pub fn continue_replacement(
 
     let registry = build_replacement_registry();
 
+    // Optional replacement: index 0 = accept, index 1 = decline
+    if pending.is_optional {
+        let rid = pending.candidates[0];
+        let mut proposed = pending.proposed;
+        proposed.mark_applied(rid);
+
+        // Extract the accept/decline effects before applying
+        let (accept_effect, decline_effect) = state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .map(|repl| {
+                let accept = repl.execute.clone();
+                let decline = match &repl.mode {
+                    ReplacementMode::Optional { decline } => decline.clone(),
+                    _ => None,
+                };
+                (accept, decline)
+            })
+            .unwrap_or((None, None));
+
+        if chosen_index == 0 {
+            // Accept: apply the replacement, store accept effect for post-zone-change
+            match apply_single_replacement(state, proposed, rid, &registry, events) {
+                Ok(new_event) => proposed = new_event,
+                Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
+                Err(ApplyResult::Modified(_)) => unreachable!(),
+            }
+            state.post_replacement_effect = accept_effect;
+        } else {
+            // Decline: skip the replacement, store decline effect for post-zone-change
+            state.post_replacement_effect = decline_effect;
+        }
+
+        return pipeline_loop(state, proposed, pending.depth + 1, &registry, events);
+    }
+
     if chosen_index >= pending.candidates.len() {
         return ReplacementResult::Execute(pending.proposed);
     }
@@ -1440,6 +1561,7 @@ mod tests {
         ReplacementDefinition {
             event,
             execute: None,
+            mode: ReplacementMode::Mandatory,
             valid_card: None,
             description: None,
         }

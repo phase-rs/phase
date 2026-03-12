@@ -625,6 +625,7 @@ mod tests {
         face.replacements = vec![crate::types::ability::ReplacementDefinition {
             event: crate::types::replacements::ReplacementEvent::DamageDone,
             execute: None,
+            mode: crate::types::ability::ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: None,
         }];

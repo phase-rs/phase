@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectKind, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -57,15 +57,8 @@ pub fn resolve(
             // Draw was prevented, skip
         }
         ReplacementResult::NeedsChoice(player) => {
-            let candidate_count = state
-                .pending_replacement
-                .as_ref()
-                .map(|p| p.candidates.len())
-                .unwrap_or(0);
-            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                player,
-                candidate_count,
-            };
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
         }
     }
@@ -156,8 +149,12 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::CardDrawn { .. })));
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Draw, .. })
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Draw,
+                ..
+            }
+        )));
     }
 }
