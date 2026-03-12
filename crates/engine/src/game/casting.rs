@@ -558,19 +558,25 @@ fn pay_and_push(
     auto_tap_lands(state, player, cost, events);
 
     // Auto-pay mana cost
+    {
+        let player_data = state.players.iter().find(|p| p.id == player).expect("player exists");
+        if !mana_payment::can_pay(&player_data.mana_pool, cost) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    // Compute hand color demand to guide hybrid mana spending
+    let hand_demand = mana_payment::compute_hand_color_demand(state, player, object_id);
     let player_data = state
         .players
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-
-    if !mana_payment::can_pay(&player_data.mana_pool, cost) {
-        return Err(EngineError::ActionNotAllowed(
-            "Cannot pay mana cost".to_string(),
-        ));
-    }
-    let _ = mana_payment::pay_cost(&mut player_data.mana_pool, cost)
-        .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    let _ =
+        mana_payment::pay_cost_with_demand(&mut player_data.mana_pool, cost, Some(&hand_demand))
+            .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
     // Record commander cast before moving (need to check zone before move)
     let was_in_command_zone = state

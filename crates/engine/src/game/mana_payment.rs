@@ -6,6 +6,71 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaPool, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
 
+/// Color demand array indexed by WUBRG (White=0, Blue=1, Black=2, Red=3, Green=4).
+pub type ColorDemand = [u32; 5];
+
+fn mana_type_to_demand_index(mt: ManaType) -> Option<usize> {
+    match mt {
+        ManaType::White => Some(0),
+        ManaType::Blue => Some(1),
+        ManaType::Black => Some(2),
+        ManaType::Red => Some(3),
+        ManaType::Green => Some(4),
+        ManaType::Colorless => None,
+    }
+}
+
+/// Count how many colored pips the other cards in hand demand (WUBRG).
+/// Used to decide which hybrid color to spend — spend the least-demanded one.
+pub fn compute_hand_color_demand(
+    state: &GameState,
+    player_id: PlayerId,
+    excluding: ObjectId,
+) -> ColorDemand {
+    let mut demand = [0u32; 5];
+    let player = match state.players.iter().find(|p| p.id == player_id) {
+        Some(p) => p,
+        None => return demand,
+    };
+    for &obj_id in &player.hand {
+        if obj_id == excluding {
+            continue;
+        }
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if let ManaCost::Cost { shards, .. } = &obj.mana_cost {
+                for shard in shards {
+                    match shard_to_mana_type(*shard) {
+                        ShardRequirement::Single(mt) => {
+                            if let Some(i) = mana_type_to_demand_index(mt) {
+                                demand[i] += 1;
+                            }
+                        }
+                        ShardRequirement::Hybrid(a, b)
+                        | ShardRequirement::HybridPhyrexian(a, b) => {
+                            // Both colors count as demanded (either could be needed)
+                            if let Some(i) = mana_type_to_demand_index(a) {
+                                demand[i] += 1;
+                            }
+                            if let Some(i) = mana_type_to_demand_index(b) {
+                                demand[i] += 1;
+                            }
+                        }
+                        ShardRequirement::TwoGenericHybrid(mt)
+                        | ShardRequirement::Phyrexian(mt)
+                        | ShardRequirement::ColorlessHybrid(mt) => {
+                            if let Some(i) = mana_type_to_demand_index(mt) {
+                                demand[i] += 1;
+                            }
+                        }
+                        ShardRequirement::Snow | ShardRequirement::X => {}
+                    }
+                }
+            }
+        }
+    }
+    demand
+}
+
 #[derive(Debug, Clone, Error, PartialEq)]
 pub enum PaymentError {
     #[error("Insufficient mana")]
@@ -115,6 +180,14 @@ pub fn pay_cost(
     pool: &mut ManaPool,
     cost: &ManaCost,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    pay_cost_with_demand(pool, cost, None)
+}
+
+pub fn pay_cost_with_demand(
+    pool: &mut ManaPool,
+    cost: &ManaCost,
+    hand_demand: Option<&ColorDemand>,
+) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     match cost {
         ManaCost::NoCost => Ok((Vec::new(), Vec::new())),
         ManaCost::Cost { shards, generic } => {
@@ -129,7 +202,7 @@ pub fn pay_cost(
                         spent.push(unit);
                     }
                     ShardRequirement::Hybrid(a, b) => {
-                        let color = auto_pay_hybrid(pool, a, b);
+                        let color = auto_pay_hybrid(pool, a, b, hand_demand);
                         let unit = pool.spend(color).ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
@@ -172,7 +245,7 @@ pub fn pay_cost(
                     }
                     ShardRequirement::HybridPhyrexian(a, b) => {
                         // Try to pay with mana first (prefer the more available color)
-                        let color = auto_pay_hybrid(pool, a, b);
+                        let color = auto_pay_hybrid(pool, a, b, hand_demand);
                         if let Some(unit) = pool.spend(color) {
                             spent.push(unit);
                         } else {
@@ -196,10 +269,37 @@ pub fn pay_cost(
     }
 }
 
-/// For a hybrid shard like W/U, returns the color with more available mana in the pool.
-fn auto_pay_hybrid(pool: &ManaPool, a: ManaType, b: ManaType) -> ManaType {
+/// For a hybrid shard like W/U, returns the best color to spend.
+/// When hand demand is available, spends the color *least needed* by other cards in hand.
+/// Falls back to spending whichever color has more in the pool (preserving the scarcer color).
+fn auto_pay_hybrid(
+    pool: &ManaPool,
+    a: ManaType,
+    b: ManaType,
+    hand_demand: Option<&ColorDemand>,
+) -> ManaType {
+    // Only consider colors actually available in pool
     let count_a = pool.count_color(a);
     let count_b = pool.count_color(b);
+
+    if count_a == 0 {
+        return b;
+    }
+    if count_b == 0 {
+        return a;
+    }
+
+    // If hand demand info is available, spend the less-demanded color
+    if let Some(demand) = hand_demand {
+        let demand_a = mana_type_to_demand_index(a).map(|i| demand[i]).unwrap_or(0);
+        let demand_b = mana_type_to_demand_index(b).map(|i| demand[i]).unwrap_or(0);
+        if demand_a != demand_b {
+            // Spend the color the hand needs LESS
+            return if demand_a < demand_b { a } else { b };
+        }
+    }
+
+    // Tiebreaker: spend whichever we have more of (preserve the scarcer color)
     if count_a >= count_b {
         a
     } else {
@@ -582,6 +682,51 @@ mod tests {
         };
         let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
         assert_eq!(spent[0].color, ManaType::Colorless);
+    }
+
+    // --- hand-demand-aware hybrid tests ---
+
+    #[test]
+    fn pay_cost_hybrid_spends_least_demanded_color() {
+        // Pool: 2 white, 2 blue. Equal pool counts.
+        // Hand demand: blue is needed more (demand[1]=3) than white (demand[0]=1).
+        // So we should spend WHITE (the less demanded color) to preserve blue.
+        let mut pool = pool_with(&[(ManaType::White, 2), (ManaType::Blue, 2)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::WhiteBlue],
+            generic: 0,
+        };
+        let demand: ColorDemand = [1, 3, 0, 0, 0]; // W=1, U=3
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        assert_eq!(spent[0].color, ManaType::White);
+    }
+
+    #[test]
+    fn pay_cost_hybrid_falls_back_to_pool_on_equal_demand() {
+        // Pool: 3 white, 1 blue. Demand is equal.
+        // Should fall back to pool-count heuristic: spend white (more available).
+        let mut pool = pool_with(&[(ManaType::White, 3), (ManaType::Blue, 1)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::WhiteBlue],
+            generic: 0,
+        };
+        let demand: ColorDemand = [2, 2, 0, 0, 0]; // Equal
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        assert_eq!(spent[0].color, ManaType::White);
+    }
+
+    #[test]
+    fn pay_cost_hybrid_skips_unavailable_color() {
+        // Pool: 0 white, 2 blue. White is less demanded but unavailable.
+        // Should spend blue (only option).
+        let mut pool = pool_with(&[(ManaType::Blue, 2)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::WhiteBlue],
+            generic: 0,
+        };
+        let demand: ColorDemand = [0, 5, 0, 0, 0]; // Blue highly demanded but only option
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        assert_eq!(spent[0].color, ManaType::Blue);
     }
 
     // --- land_subtype_to_mana_type tests ---
