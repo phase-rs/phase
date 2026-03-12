@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectKind, EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};

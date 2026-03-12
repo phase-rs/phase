@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectKind, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -73,9 +73,13 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Cleanup, .. })
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Cleanup,
+                ..
+            }
+        )));
     }
 
     #[test]

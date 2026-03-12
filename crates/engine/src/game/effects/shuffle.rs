@@ -1,6 +1,6 @@
 use rand::seq::SliceRandom;
 
-use crate::types::ability::{EffectKind, EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -76,9 +76,13 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Shuffle, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Shuffle,
+                ..
+            }
+        )));
     }
 
     #[test]

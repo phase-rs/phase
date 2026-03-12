@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    EffectKind, CountValue, Effect, EffectError, ManaProduction, ResolvedAbility,
+    CountValue, Effect, EffectError, EffectKind, ManaProduction, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -221,9 +221,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Mana, .. })
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Mana,
+                ..
+            }
+        )));
     }
 
     #[test]

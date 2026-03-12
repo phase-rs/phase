@@ -754,8 +754,7 @@ fn strip_ability_word(line: &str) -> Option<String> {
             let prefix = &line[..pos];
             // Ability words are short (1-3 words), no punctuation
             let word_count = prefix.split_whitespace().count();
-            if (1..=4).contains(&word_count) && !prefix.contains('{') && !prefix.contains(':')
-            {
+            if (1..=4).contains(&word_count) && !prefix.contains('{') && !prefix.contains(':') {
                 let rest = line[pos + sep.len()..].trim();
                 if !rest.is_empty() {
                     return Some(rest.to_string());

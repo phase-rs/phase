@@ -192,7 +192,6 @@ pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
     summary.total_cards > 0 && summary.supported_cards == summary.total_cards
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

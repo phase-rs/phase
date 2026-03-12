@@ -1,7 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    EffectKind, Effect, EffectError, ResolvedAbility, StaticDefinition, TargetFilter,
-    TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;

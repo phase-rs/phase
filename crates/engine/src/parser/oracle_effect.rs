@@ -407,9 +407,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
 
     let clause = trimmed[4..].trim();
     let (without_where_x, where_x_expression) = strip_trailing_where_x(clause);
-    let clause = without_where_x
-        .trim()
-        .trim_end_matches(['.', '"']);
+    let clause = without_where_x.trim().trim_end_matches(['.', '"']);
 
     if let Some(produced) = parse_mana_production_clause(clause) {
         return Some(Effect::Mana { produced });
@@ -417,10 +415,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
         let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
-        let rest = rest
-            .trim()
-            .trim_end_matches(['.', '"'])
-            .trim();
+        let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
         if rest_lower.starts_with("mana of any one color")
@@ -610,10 +605,7 @@ fn apply_where_x_count_expression(
 }
 
 fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
-    let mut rest = text
-        .trim()
-        .trim_end_matches(['.', '"'])
-        .trim();
+    let mut rest = text.trim().trim_end_matches(['.', '"']).trim();
     if rest.is_empty() {
         return None;
     }
