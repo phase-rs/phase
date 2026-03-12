@@ -36,6 +36,8 @@ pub struct Player {
     pub has_drawn_this_turn: bool,
     pub lands_played_this_turn: u8,
     pub poison_counters: u32,
+    #[serde(default)]
+    pub life_gained_this_turn: u32,
 
     // Elimination tracking (N-player support)
     #[serde(default)]
@@ -58,6 +60,7 @@ impl Default for Player {
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,
+            life_gained_this_turn: 0,
             is_eliminated: false,
             can_look_at_top_of_library: false,
         }

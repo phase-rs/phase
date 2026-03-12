@@ -38,7 +38,8 @@ expression: result
       "valid_target": null,
       "valid_source": null,
       "description": "When ~ is put into a graveyard from the battlefield",
-      "constraint": null
+      "constraint": null,
+      "condition": null
     }
   ],
   "statics": [

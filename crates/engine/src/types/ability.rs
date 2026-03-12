@@ -787,6 +787,15 @@ pub struct AbilityDefinition {
     pub sorcery_speed: bool,
 }
 
+/// Intervening-if condition for triggered abilities.
+/// Checked both when the trigger would fire and when it resolves on the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum TriggerCondition {
+    /// "if you gained life this turn" / "if you've gained N or more life this turn"
+    LifeGainedThisTurn { minimum: u32 },
+}
+
 /// Rate-limiting constraint for triggered abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -829,6 +838,8 @@ pub struct TriggerDefinition {
     pub description: Option<String>,
     #[serde(default)]
     pub constraint: Option<TriggerConstraint>,
+    #[serde(default)]
+    pub condition: Option<TriggerCondition>,
 }
 
 /// Static ability definition with typed fields. Zero params HashMap.
@@ -1091,6 +1102,7 @@ mod tests {
             valid_source: None,
             description: Some("When ~ dies, draw a card.".to_string()),
             constraint: None,
+            condition: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

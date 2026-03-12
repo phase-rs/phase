@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TriggerDefinition,
+    AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -62,6 +62,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller)
                         {
                             continue;
+                        }
+                        // Check intervening-if condition (fire-time)
+                        if let Some(ref condition) = trig_def.condition {
+                            if !check_trigger_condition(state, condition, controller) {
+                                continue;
+                            }
                         }
                         // Build the ResolvedAbility from the trigger definition
                         let ability = build_triggered_ability(trig_def, obj_id, controller);
@@ -125,6 +131,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             valid_source: None,
                             description: Some("Prowess".to_string()),
                             constraint: None,
+                            condition: None,
                         };
                         pending.push(PendingTrigger {
                             source_id: obj_id,
@@ -178,6 +185,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 ability.targets = legal;
                 let entry_id = ObjectId(state.next_object_id);
                 state.next_object_id += 1;
+                let condition = trigger.trigger_def.condition.clone();
                 let entry = StackEntry {
                     id: entry_id,
                     source_id: trigger.source_id,
@@ -185,6 +193,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     kind: StackEntryKind::TriggeredAbility {
                         source_id: trigger.source_id,
                         ability,
+                        condition,
                     },
                 };
                 stack::push_to_stack(state, entry, &mut events_out);
@@ -197,6 +206,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             // No targeting needed -- push to stack as normal
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
+            let condition = trigger.trigger_def.condition.clone();
             let entry = StackEntry {
                 id: entry_id,
                 source_id: trigger.source_id,
@@ -204,6 +214,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 kind: StackEntryKind::TriggeredAbility {
                     source_id: trigger.source_id,
                     ability: trigger.ability,
+                    condition,
                 },
             };
             stack::push_to_stack(state, entry, &mut events_out);
@@ -232,6 +243,23 @@ fn check_trigger_constraint(
         TriggerConstraint::OncePerTurn => !state.triggers_fired_this_turn.contains(&key),
         TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
+    }
+}
+
+/// Check whether an intervening-if condition is satisfied.
+/// Used both at fire-time and resolution-time.
+pub(crate) fn check_trigger_condition(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+) -> bool {
+    match condition {
+        TriggerCondition::LifeGainedThisTurn { minimum } => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .map(|p| p.life_gained_this_turn >= *minimum)
+            .unwrap_or(false),
     }
 }
 
@@ -1484,6 +1512,7 @@ pub mod tests {
             valid_source: None,
             description: None,
             constraint: None,
+            condition: None,
         }
     }
 
@@ -1616,6 +1645,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -1655,6 +1685,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -1904,6 +1935,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -1922,7 +1954,7 @@ pub mod tests {
         assert_eq!(entry.source_id, trigger_creature);
         assert_eq!(entry.controller, PlayerId(0));
         match &entry.kind {
-            StackEntryKind::TriggeredAbility { source_id, ability } => {
+            StackEntryKind::TriggeredAbility { source_id, ability, .. } => {
                 assert_eq!(*source_id, trigger_creature);
                 assert_eq!(
                     crate::types::ability::effect_variant_name(&ability.effect),
@@ -1974,6 +2006,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2013,6 +2046,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2076,6 +2110,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2497,6 +2532,7 @@ pub mod tests {
             valid_source: None,
             description: None,
             constraint: None,
+            condition: None,
         };
 
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
@@ -2674,6 +2710,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2765,6 +2802,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2847,6 +2885,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2898,6 +2937,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
@@ -2955,6 +2995,7 @@ pub mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 

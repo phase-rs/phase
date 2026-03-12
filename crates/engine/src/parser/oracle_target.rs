@@ -130,13 +130,32 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         properties.push(FilterProp::NonType { value: neg });
     }
 
-    // Check for "or" combinator: "artifact or enchantment"
+    // Check for "or" combinator: "artifact or enchantment", "creature or artifact you control"
     let rest_lower = lower[pos..].trim_start();
     let rest_offset = lower[pos..].len() - rest_lower.len();
     if rest_lower.starts_with("or ") {
         let or_text = &text[pos + rest_offset + 3..];
         let (other_filter, final_rest) = parse_type_phrase(or_text);
-        let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+        let mut left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+
+        // Distribute shared controller suffix from right branch to left:
+        // "creature or artifact you control" → both get "you control"
+        if let TargetFilter::Typed {
+            controller: Some(ref ctrl),
+            ..
+        } = other_filter
+        {
+            if let TargetFilter::Typed {
+                controller: ref mut left_ctrl,
+                ..
+            } = left
+            {
+                if left_ctrl.is_none() {
+                    *left_ctrl = Some(ctrl.clone());
+                }
+            }
+        }
+
         return (
             TargetFilter::Or {
                 filters: vec![left, other_filter],
@@ -358,6 +377,36 @@ mod tests {
                 properties: vec![],
             }
         );
+    }
+
+    #[test]
+    fn or_type_distributes_controller() {
+        // "creature or artifact you control" → both branches get You controller
+        let (f, _) = parse_target("target creature or artifact you control");
+        match f {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Creature),
+                        subtype: None,
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Artifact),
+                        subtype: None,
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }
+                );
+            }
+            _ => panic!("Expected Or filter, got {:?}", f),
+        }
     }
 
     #[test]

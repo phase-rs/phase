@@ -2,7 +2,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityKind, FilterProp, TargetFilter, TriggerConstraint, TriggerDefinition,
+    AbilityKind, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
@@ -28,10 +29,13 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         .trim()
         .to_string();
 
+    // Extract intervening-if condition from effect text
+    let (effect_without_if, if_condition) = extract_if_condition(&effect_clean);
+
     // Parse the effect
-    let execute = if !effect_clean.is_empty() {
+    let execute = if !effect_without_if.is_empty() {
         Some(Box::new(parse_effect_chain(
-            &effect_clean,
+            &effect_without_if,
             AbilityKind::Spell,
         )))
     } else {
@@ -42,6 +46,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let (_, mut def) = parse_trigger_condition(&condition_text);
     def.execute = execute;
     def.optional = optional;
+    def.condition = if_condition;
 
     // Check for constraint phrases in the full text
     def.constraint = parse_trigger_constraint(&lower);
@@ -65,8 +70,81 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     None
 }
 
+/// Extract an "if you've gained N or more life this turn" condition from effect text.
+/// Returns (cleaned effect text, optional condition).
+fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
+    let lower = text.to_lowercase();
+
+    // Patterns: "if you've gained N or more life this turn" / "if you gained N or more life this turn"
+    // Also: "if you've gained life this turn" (minimum = 1, no number)
+    let if_patterns = [
+        "if you've gained ",
+        "if you gained ",
+        "if you've gained life this turn",
+        "if you gained life this turn",
+    ];
+
+    for pattern in &if_patterns {
+        if let Some(pos) = lower.find(pattern) {
+            let after = &lower[pos + pattern.len()..];
+
+            // "if you've gained life this turn" (no number → minimum 1)
+            if pattern.ends_with("life this turn") {
+                let cleaned = text[..pos].trim_end().to_string();
+                return (
+                    cleaned,
+                    Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 }),
+                );
+            }
+
+            // Try to parse "N or more life this turn"
+            if let Some(minimum) = parse_life_threshold(after) {
+                // Strip the entire "if..." clause from the effect text
+                let cleaned = text[..pos].trim_end().to_string();
+                return (
+                    cleaned,
+                    Some(TriggerCondition::LifeGainedThisTurn { minimum }),
+                );
+            }
+
+            // "life this turn" without a number → minimum 1
+            if after.starts_with("life this turn") {
+                let cleaned = text[..pos].trim_end().to_string();
+                return (
+                    cleaned,
+                    Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 }),
+                );
+            }
+        }
+    }
+
+    (text.to_string(), None)
+}
+
+/// Parse "N or more life this turn" → N, or "life this turn" → 1
+fn parse_life_threshold(text: &str) -> Option<u32> {
+    let text = text.trim_start();
+    // "3 or more life this turn"
+    if let Some(space) = text.find(' ') {
+        if let Ok(n) = text[..space].parse::<u32>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
 fn normalize_self_refs(text: &str, card_name: &str) -> String {
-    text.replace(card_name, "~")
+    let mut result = text.replace(card_name, "~");
+
+    // Legendary short name: "Haliya, Guided by Light" → also match "Haliya"
+    if let Some(comma_pos) = card_name.find(", ") {
+        let short_name = &card_name[..comma_pos];
+        if short_name.len() >= 3 {
+            result = result.replace(short_name, "~");
+        }
+    }
+
+    result
         .replace("this creature", "~")
         .replace("this enchantment", "~")
         .replace("this artifact", "~")
@@ -105,6 +183,7 @@ fn make_base() -> TriggerDefinition {
         valid_source: None,
         description: None,
         constraint: None,
+        condition: None,
     }
 }
 
@@ -150,7 +229,26 @@ fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) 
 
 /// Parse a trigger subject from the beginning of the condition text (after when/whenever).
 /// Returns (TargetFilter for valid_card, remaining text after subject).
+///
+/// Handles compound subjects joined by "or":
+///   "~ or another creature or artifact you control enters"
+///   → Or { SelfRef, Typed{Creature, You, [Another]}, Typed{Artifact, You, [Another]} }
+///   with remaining text "enters"
 fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
+    let (first, rest) = parse_single_subject(text);
+
+    // Check for "or " combinator to build compound subjects
+    let rest_trimmed = rest.trim_start();
+    if let Some(after_or) = rest_trimmed.strip_prefix("or ") {
+        let (second, final_rest) = parse_trigger_subject(after_or);
+        return (merge_or_filters(first, second), final_rest);
+    }
+
+    (first, rest)
+}
+
+/// Parse a single (non-compound) trigger subject.
+fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     // Self-reference: "~"
     if let Some(rest) = text.strip_prefix("~ ") {
         return (TargetFilter::SelfRef, rest);
@@ -179,8 +277,21 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
     (TargetFilter::Any, text)
 }
 
-/// Add FilterProp::Another to a TargetFilter. If it's already Typed, append to properties.
-/// Otherwise, wrap in a Typed filter with just Another.
+/// Merge two filters into an Or, flattening nested Or branches.
+fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
+    let mut filters = Vec::new();
+    match a {
+        TargetFilter::Or { filters: af } => filters.extend(af),
+        other => filters.push(other),
+    }
+    match b {
+        TargetFilter::Or { filters: bf } => filters.extend(bf),
+        other => filters.push(other),
+    }
+    TargetFilter::Or { filters }
+}
+
+/// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed {
@@ -197,6 +308,9 @@ fn add_another_prop(filter: TargetFilter) -> TargetFilter {
                 properties,
             }
         }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(add_another_prop).collect(),
+        },
         _ => TargetFilter::Typed {
             card_type: None,
             subtype: None,
@@ -507,6 +621,130 @@ mod tests {
         assert_eq!(
             def.constraint,
             Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        );
+    }
+
+    // --- Compound subject tests ---
+
+    #[test]
+    fn trigger_self_or_another_creature_or_artifact_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let def = parse_trigger_line(
+            "Whenever Haliya or another creature or artifact you control enters, you gain 1 life.",
+            "Haliya, Guided by Light",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(filters[0], TargetFilter::SelfRef);
+                // Both branches should have Another + You controller
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Creature),
+                        subtype: None,
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::Another],
+                    }
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Artifact),
+                        subtype: None,
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::Another],
+                    }
+                );
+            }
+            other => panic!("Expected Or filter with 3 branches, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn normalize_legendary_short_name() {
+        let result = normalize_self_refs(
+            "Whenever Haliya or another creature enters",
+            "Haliya, Guided by Light",
+        );
+        assert_eq!(result, "Whenever ~ or another creature enters");
+    }
+
+    #[test]
+    fn trigger_self_or_another_creature_enters() {
+        let def = parse_trigger_line(
+            "Whenever Some Card or another creature enters, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(filters[0], TargetFilter::SelfRef);
+                match &filters[1] {
+                    TargetFilter::Typed { properties, .. } => {
+                        assert!(properties.contains(&FilterProp::Another));
+                    }
+                    other => panic!("Expected Typed with Another, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+    }
+
+    // --- Intervening-if condition tests ---
+
+    #[test]
+    fn trigger_haliya_end_step_with_life_condition() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, draw a card if you've gained 3 or more life this turn.",
+            "Haliya, Guided by Light",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::LifeGainedThisTurn { minimum: 3 })
+        );
+        // Effect should be just "draw a card" with condition stripped
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn trigger_if_gained_life_no_number() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, create a Blood token if you gained life this turn.",
+            "Some Card",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 })
+        );
+    }
+
+    #[test]
+    fn trigger_if_gained_5_or_more_life() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if you gained 5 or more life this turn, create a 4/4 white Angel creature token with flying.",
+            "Resplendent Angel",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::LifeGainedThisTurn { minimum: 5 })
+        );
+    }
+
+    #[test]
+    fn extract_if_strips_condition_from_effect() {
+        let (cleaned, cond) = extract_if_condition(
+            "draw a card if you've gained 3 or more life this turn.",
+        );
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::LifeGainedThisTurn { minimum: 3 })
         );
     }
 }

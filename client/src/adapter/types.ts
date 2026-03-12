@@ -340,6 +340,7 @@ export interface GameState {
   format_config?: FormatConfig;
   eliminated_players?: PlayerId[];
   commander_damage?: CommanderDamageEntry[];
+  exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────

@@ -20,6 +20,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         None => return,
     };
 
+    // Intervening-if: recheck condition at resolution time for triggered abilities
+    if let StackEntryKind::TriggeredAbility {
+        condition: Some(ref condition),
+        ..
+    } = entry.kind
+    {
+        if !super::triggers::check_trigger_condition(state, condition, entry.controller) {
+            events.push(GameEvent::StackResolved {
+                object_id: entry.id,
+            });
+            return;
+        }
+    }
+
     // Extract the resolved ability from the stack entry
     let (ability, is_spell) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (ability.clone(), true),

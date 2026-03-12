@@ -24,6 +24,7 @@ const COUNTER_COLORS: Record<string, string> = {
 };
 
 const ATTACHMENT_OFFSET_PX = 15;
+const EXILE_GHOST_OFFSET_PX = 20;
 
 export function PermanentCard({ objectId }: PermanentCardProps) {
   const playerId = usePlayerId();
@@ -59,6 +60,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     ) ?? null;
   });
   const isActivatable = activatableAction !== null;
+
+  const exileLinks = useGameStore((s) =>
+    s.gameState?.exile_links?.filter((l) => l.source_id === objectId) ?? [],
+  );
 
   // Check if this specific permanent was tapped in the most recent undoable action
   // by comparing its tapped state against the previous snapshot
@@ -168,6 +173,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
           obj.attachments.length > 0
             ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
             : undefined,
+        // Reserve space below for exile ghost cards
+        marginBottom:
+          exileLinks.length > 0
+            ? `${exileLinks.length * EXILE_GHOST_OFFSET_PX}px`
+            : undefined,
       }}
       animate={{
         rotate: isAttacking || obj.tapped ? tapAngle : 0,
@@ -191,6 +201,15 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         >
           <PermanentCard objectId={attachId} />
         </div>
+      ))}
+
+      {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
+      {exileLinks.map((link, i) => (
+        <ExileGhostCard
+          key={link.exiled_id}
+          objectId={link.exiled_id}
+          offset={(i + 1) * EXILE_GHOST_OFFSET_PX}
+        />
       ))}
 
       {/* Main card — art crop or full card based on preference */}
@@ -235,6 +254,40 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         </>
       )}
     </motion.div>
+  );
+}
+
+interface ExileGhostCardProps {
+  objectId: number;
+  offset: number;
+}
+
+function ExileGhostCard({ objectId, offset }: ExileGhostCardProps) {
+  const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+
+  if (!obj) return null;
+
+  const isLand = obj.card_types.core_types.includes("Land");
+  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
+  const useArtCrop = battlefieldCardDisplay === "art_crop";
+
+  return (
+    <div
+      className="absolute left-0 z-0 cursor-default opacity-70"
+      style={{ bottom: `-${offset}px` }}
+      onMouseEnter={() => inspectObject(objectId)}
+      onMouseLeave={() => inspectObject(null)}
+    >
+      {/* Purple exile tint */}
+      <div className="absolute inset-0 z-10 rounded-lg bg-purple-600/30 pointer-events-none" />
+      {useArtCrop ? (
+        <ArtCropCard objectId={objectId} />
+      ) : (
+        <CardImage cardName={obj.name} size="small" colors={displayColors} isToken={obj.card_id === 0} />
+      )}
+    </div>
   );
 }
 

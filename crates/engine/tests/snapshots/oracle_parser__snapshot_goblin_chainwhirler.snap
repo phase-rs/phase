@@ -45,7 +45,8 @@ expression: result
       "valid_target": null,
       "valid_source": null,
       "description": null,
-      "constraint": null
+      "constraint": null,
+      "condition": null
     }
   ],
   "statics": [],

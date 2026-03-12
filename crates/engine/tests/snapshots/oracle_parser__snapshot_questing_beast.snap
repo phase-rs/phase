@@ -45,7 +45,8 @@ expression: result
         "type": "SelfRef"
       },
       "description": null,
-      "constraint": null
+      "constraint": null,
+      "condition": null
     }
   ],
   "statics": [

@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ResolvedAbility, TargetRef};
+use super::ability::{ResolvedAbility, TargetRef, TriggerCondition};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
@@ -143,6 +143,8 @@ pub enum StackEntryKind {
     TriggeredAbility {
         source_id: ObjectId,
         ability: ResolvedAbility,
+        #[serde(default)]
+        condition: Option<TriggerCondition>,
     },
 }
 
@@ -612,6 +614,7 @@ mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             },
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
@@ -655,6 +658,7 @@ mod tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             },
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },

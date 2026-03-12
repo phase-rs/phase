@@ -70,6 +70,7 @@ pub fn resolve_gain(
                     .find(|p| p.id == player_id)
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life += gain_amount as i32;
+                player.life_gained_this_turn += gain_amount;
 
                 events.push(GameEvent::LifeChanged {
                     player_id,

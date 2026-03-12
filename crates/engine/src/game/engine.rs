@@ -442,6 +442,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
                     source_id: trigger.source_id,
                     ability,
+                    condition: trigger.trigger_def.condition.clone(),
                 },
             };
             super::stack::push_to_stack(state, entry, &mut events);
@@ -2629,6 +2630,7 @@ mod trigger_target_tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             },
             ability,
             timestamp: 1,
@@ -2698,6 +2700,7 @@ mod trigger_target_tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             },
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::ChangeZone {
@@ -2966,6 +2969,7 @@ mod phase_trigger_regression_tests {
                 valid_source: None,
                 description: None,
                 constraint: None,
+                condition: None,
             });
         }
 
