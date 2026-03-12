@@ -1,0 +1,458 @@
+import { useEffect, useMemo, useState } from "react";
+
+import type { GameFormat, MatchType } from "../../adapter/types";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../../constants/storage";
+import { COMMANDER_PRECONS } from "../../data/commanderPrecons";
+import { STARTER_DECKS } from "../../data/starterDecks";
+import { useCardImage } from "../../hooks/useCardImage";
+import type { ParsedDeck } from "../../services/deckParser";
+import {
+  evaluateDeckCompatibilityBatch,
+  type DeckCompatibilityResult,
+} from "../../services/deckCompatibility";
+import { ImportDeckModal } from "./ImportDeckModal";
+import { menuButtonClass } from "./buttonStyles";
+
+const DIFFICULTIES = [
+  { id: "VeryEasy", label: "Very Easy" },
+  { id: "Easy", label: "Easy" },
+  { id: "Medium", label: "Medium" },
+  { id: "Hard", label: "Hard" },
+  { id: "VeryHard", label: "Very Hard" },
+] as const;
+
+const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+
+const COLOR_DOT_CLASS: Record<string, string> = {
+  W: "bg-amber-200",
+  U: "bg-blue-400",
+  B: "bg-gray-600",
+  R: "bg-red-500",
+  G: "bg-green-500",
+};
+
+const PRECON_PREFIX = "[Pre-built] ";
+const PRECON_NAMES = new Set(COMMANDER_PRECONS.map((p) => PRECON_PREFIX + p.name));
+
+type DeckFilter = "all" | "standard" | "commander" | "bo3";
+
+function seedCommanderPrecons(): void {
+  for (const precon of COMMANDER_PRECONS) {
+    const key = STORAGE_KEY_PREFIX + PRECON_PREFIX + precon.name;
+    if (localStorage.getItem(key)) continue;
+    const deck: ParsedDeck = {
+      main: precon.cards,
+      sideboard: [],
+      commander: [precon.commander],
+    };
+    localStorage.setItem(key, JSON.stringify(deck));
+  }
+}
+
+function loadDeck(deckName: string): ParsedDeck | null {
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ParsedDeck;
+  } catch {
+    return null;
+  }
+}
+
+function getDeckColorIdentity(deckName: string): string[] {
+  const starter = STARTER_DECKS.find((s) => s.name === deckName);
+  if (starter) return starter.colorIdentity;
+
+  const preconName = deckName.startsWith(PRECON_PREFIX)
+    ? deckName.slice(PRECON_PREFIX.length)
+    : deckName;
+  const precon = COMMANDER_PRECONS.find((p) => p.name === preconName);
+  return precon?.colorIdentity ?? [];
+}
+
+function getDeckCardCount(deckName: string): number {
+  const deck = loadDeck(deckName);
+  if (!deck) return 0;
+
+  const mainCount = deck.main.reduce((sum, entry) => sum + entry.count, 0);
+  const commanders = deck.commander ?? [];
+  const representedInMain = commanders.filter((name) =>
+    deck.main.some((entry) => entry.name.toLowerCase() === name.toLowerCase()),
+  ).length;
+  return mainCount + (commanders.length - representedInMain);
+}
+
+function getRepresentativeCard(deckName: string): string | null {
+  const deck = loadDeck(deckName);
+  if (!deck) return null;
+  if (deck.commander && deck.commander.length > 0) {
+    return deck.commander[0];
+  }
+  const entry = deck.main.find((item) => !BASIC_LANDS.has(item.name));
+  return entry?.name ?? null;
+}
+
+function DeckArtTile({ cardName }: { cardName: string | null }) {
+  const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
+
+  if (!cardName || isLoading || !src) {
+    return <div className="absolute inset-0 animate-pulse bg-gray-800" />;
+  }
+
+  return <img src={src} alt="" className="absolute inset-0 h-full w-full object-cover" />;
+}
+
+function StatusBadge({ label, active }: { label: string; active: boolean }) {
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+        active ? "bg-emerald-500/80 text-black" : "bg-gray-700/80 text-gray-200"
+      }`}
+    >
+      {label}
+    </span>
+  );
+}
+
+interface MyDecksProps {
+  mode: "manage" | "select";
+  selectedFormat?: GameFormat;
+  selectedMatchType?: MatchType;
+  activeDeckName?: string | null;
+  onSelectDeck?: (deckName: string) => void;
+  onConfirmSelection?: () => void;
+  confirmLabel?: string;
+  showDifficultySelector?: boolean;
+  difficulty?: string;
+  onDifficultyChange?: (difficulty: string) => void;
+  onCreateDeck?: () => void;
+  onEditDeck?: (deckName: string) => void;
+}
+
+export function MyDecks({
+  mode,
+  selectedFormat,
+  selectedMatchType,
+  activeDeckName = null,
+  onSelectDeck,
+  onConfirmSelection,
+  confirmLabel = "Continue",
+  showDifficultySelector = false,
+  difficulty = "Medium",
+  onDifficultyChange,
+  onCreateDeck,
+  onEditDeck,
+}: MyDecksProps) {
+  const [deckNames, setDeckNames] = useState<string[]>([]);
+  const [showImport, setShowImport] = useState(false);
+  const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
+  const [isEvaluating, setIsEvaluating] = useState(false);
+  const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+
+  const contextualFilter = useMemo<DeckFilter | null>(() => {
+    if (selectedFormat === "Standard") return "standard";
+    if (selectedFormat === "Commander") return "commander";
+    return null;
+  }, [selectedFormat]);
+  const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
+
+  useEffect(() => {
+    setActiveFilter(contextualFilter ?? "all");
+  }, [contextualFilter]);
+
+  useEffect(() => {
+    if (selectedFormat === "Commander") {
+      seedCommanderPrecons();
+    }
+    setDeckNames(listSavedDeckNames());
+  }, [selectedFormat]);
+
+  useEffect(() => {
+    if (mode !== "select") return;
+    if (!onSelectDeck) return;
+    if (activeDeckName != null) return;
+    const stored = localStorage.getItem(ACTIVE_DECK_KEY);
+    if (!stored || !deckNames.includes(stored)) return;
+    onSelectDeck(stored);
+  }, [mode, activeDeckName, deckNames, onSelectDeck]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function evaluateCompat(): Promise<void> {
+      const loadedDecks = deckNames
+        .map((name) => {
+          const deck = loadDeck(name);
+          return deck ? { name, deck } : null;
+        })
+        .filter((entry): entry is { name: string; deck: ParsedDeck } => entry !== null);
+
+      if (loadedDecks.length === 0) {
+        if (!cancelled) {
+          setCompatibilities({});
+          setCompatibilityError(null);
+          setIsEvaluating(false);
+        }
+        return;
+      }
+
+      try {
+        setIsEvaluating(true);
+        const results = await evaluateDeckCompatibilityBatch(loadedDecks, {
+          selectedFormat,
+          selectedMatchType,
+        });
+        if (!cancelled) {
+          setCompatibilities(results);
+          setCompatibilityError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setCompatibilityError(error instanceof Error ? error.message : String(error));
+          setCompatibilities({});
+        }
+      } finally {
+        if (!cancelled) {
+          setIsEvaluating(false);
+        }
+      }
+    }
+
+    evaluateCompat();
+    return () => {
+      cancelled = true;
+    };
+  }, [deckNames, selectedFormat, selectedMatchType]);
+
+  const filteredDeckNames = useMemo(() => {
+    return deckNames.filter((deckName) => {
+      const compatibility = compatibilities[deckName];
+      if (!compatibility) return true;
+
+      const selectedFormatCompatible = compatibility.selected_format_compatible;
+      if (contextualFilter && activeFilter === contextualFilter && selectedFormatCompatible != null) {
+        return selectedFormatCompatible;
+      }
+
+      switch (activeFilter) {
+        case "standard":
+          return compatibility.standard.compatible;
+        case "commander":
+          return compatibility.commander.compatible;
+        case "bo3":
+          return compatibility.bo3_ready;
+        default:
+          return true;
+      }
+    });
+  }, [deckNames, compatibilities, activeFilter, contextualFilter]);
+
+  const noDeckSelected = mode === "select"
+    ? !activeDeckName || !filteredDeckNames.includes(activeDeckName)
+    : false;
+
+  const handleTileClick = (deckName: string) => {
+    if (mode === "manage") {
+      onEditDeck?.(deckName);
+      return;
+    }
+    onSelectDeck?.(deckName);
+  };
+
+  const handleImported = (name: string, names: string[]) => {
+    setDeckNames(names);
+    if (mode === "select") {
+      onSelectDeck?.(name);
+    }
+  };
+
+  return (
+    <div className="flex w-full max-w-5xl flex-col items-center gap-6 px-4">
+      <div className="flex w-full items-center justify-between gap-3">
+        <h2 className="text-2xl font-bold tracking-tight">
+          {mode === "manage" ? "My Decks" : "Select Deck"}
+        </h2>
+        {mode === "manage" && (
+          <button
+            onClick={onCreateDeck}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            Create New
+          </button>
+        )}
+      </div>
+
+      {mode === "select" && showDifficultySelector && onDifficultyChange && (
+        <div className="flex overflow-hidden rounded-lg border border-gray-700">
+          {DIFFICULTIES.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onDifficultyChange(item.id)}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                difficulty === item.id
+                  ? "bg-indigo-600 text-white"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex w-full flex-wrap items-center gap-2">
+        <button
+          onClick={() => setActiveFilter("all")}
+          className={`rounded px-2 py-1 text-xs font-medium ${
+            activeFilter === "all"
+              ? "bg-indigo-600 text-white"
+              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+          }`}
+        >
+          All
+        </button>
+        <button
+          onClick={() => setActiveFilter("standard")}
+          className={`rounded px-2 py-1 text-xs font-medium ${
+            activeFilter === "standard"
+              ? "bg-indigo-600 text-white"
+              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+          }`}
+        >
+          Standard
+        </button>
+        <button
+          onClick={() => setActiveFilter("commander")}
+          className={`rounded px-2 py-1 text-xs font-medium ${
+            activeFilter === "commander"
+              ? "bg-indigo-600 text-white"
+              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+          }`}
+        >
+          Commander
+        </button>
+        <button
+          onClick={() => setActiveFilter("bo3")}
+          className={`rounded px-2 py-1 text-xs font-medium ${
+            activeFilter === "bo3"
+              ? "bg-indigo-600 text-white"
+              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+          }`}
+        >
+          BO3
+        </button>
+        {contextualFilter && activeFilter === contextualFilter && (
+          <button
+            onClick={() => setActiveFilter("all")}
+            className="rounded border border-indigo-500/50 bg-indigo-500/10 px-2 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20"
+          >
+            Show all decks
+          </button>
+        )}
+        {isEvaluating && (
+          <span className="text-xs text-gray-500">Evaluating compatibility…</span>
+        )}
+      </div>
+
+      {compatibilityError && (
+        <div className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          Compatibility check unavailable: {compatibilityError}
+        </div>
+      )}
+
+      <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        {filteredDeckNames.map((deckName) => {
+          const isActive = deckName === activeDeckName;
+          const colors = getDeckColorIdentity(deckName);
+          const count = getDeckCardCount(deckName);
+          const representativeCard = getRepresentativeCard(deckName);
+          const isPrecon = PRECON_NAMES.has(deckName);
+          const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
+          const compatibility = compatibilities[deckName];
+
+          return (
+            <button
+              key={deckName}
+              onClick={() => handleTileClick(deckName)}
+              className={`group relative flex aspect-[4/3] flex-col justify-end overflow-hidden rounded-xl text-left transition ${
+                isActive
+                  ? "ring-2 ring-indigo-500 ring-offset-2 ring-offset-gray-950"
+                  : "ring-1 ring-gray-700 hover:ring-gray-500"
+              }`}
+            >
+              <DeckArtTile cardName={representativeCard} />
+
+              {isPrecon && (
+                <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+                  Pre-built
+                </span>
+              )}
+
+              <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+                <p className="text-sm font-semibold text-white">{displayName}</p>
+                <div className="mt-1 flex items-center gap-2">
+                  <div className="flex gap-1">
+                    {colors.map((color) => (
+                      <span
+                        key={color}
+                        className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
+                      />
+                    ))}
+                    {colors.length === 0 && (
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
+                    )}
+                  </div>
+                  <span className="text-xs text-gray-300">{count} cards</span>
+                </div>
+                {compatibility && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <StatusBadge label="STD" active={compatibility.standard.compatible} />
+                    <StatusBadge label="CMD" active={compatibility.commander.compatible} />
+                    <StatusBadge label="BO3" active={compatibility.bo3_ready} />
+                    {compatibility.unknown_cards.length > 0 && (
+                      <span className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black">
+                        Unknown {compatibility.unknown_cards.length}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </button>
+          );
+        })}
+
+        <button
+          onClick={() => setShowImport(true)}
+          className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-gray-700 transition hover:bg-white/5 hover:ring-gray-500"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+          >
+            <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+          </svg>
+          <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+            Import Deck
+          </span>
+        </button>
+      </div>
+
+      {mode === "select" && (
+        <button
+          onClick={onConfirmSelection}
+          disabled={noDeckSelected}
+          className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
+        >
+          {confirmLabel}
+        </button>
+      )}
+
+      <ImportDeckModal
+        open={showImport}
+        onClose={() => setShowImport(false)}
+        onImported={handleImported}
+      />
+    </div>
+  );
+}

@@ -5,8 +5,8 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { HostSetup } from "../components/lobby/HostSetup";
 import { LobbyView } from "../components/lobby/LobbyView";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
-import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MyDecks } from "../components/menu/MyDecks";
 import { ServerOfflineDialog } from "../components/multiplayer/ServerOfflineDialog";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -45,7 +45,6 @@ export function MultiplayerPage() {
   const navigate = useNavigate();
   const [view, setView] = useState<MultiplayerView>("deck-select");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [difficulty, setDifficulty] = useState("Medium");
 
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
   const [hostIsPublic, setHostIsPublic] = useState(true);
@@ -242,13 +241,12 @@ export function MultiplayerPage() {
 
       {view === "deck-select" && (
         <div className="relative z-10 flex w-full justify-center py-8">
-          <DeckGallery
+          <MyDecks
+            mode="select"
             onSelectDeck={handleSelectDeck}
             activeDeckName={activeDeckName}
-            mode="online"
-            difficulty={difficulty}
-            onDifficultyChange={setDifficulty}
-            onStartGame={() => setView("lobby")}
+            onConfirmSelection={() => setView("lobby")}
+            confirmLabel="Continue"
           />
         </div>
       )}

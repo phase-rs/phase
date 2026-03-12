@@ -25,7 +25,7 @@ pub fn resolve(
 
     for mana_type in mana_types {
         let unit = ManaUnit {
-            color: mana_type.clone(),
+            color: mana_type,
             source_id: ability.source_id,
             snow: false,
             restrictions: Vec::new(),

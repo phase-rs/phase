@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck } from "../services/deckParser";
@@ -62,13 +62,15 @@ export function PlayPage() {
       <ScreenChrome onBack={() => navigate("/")} />
 
       <div className="relative z-10 flex w-full justify-center py-8">
-        <DeckGallery
+        <MyDecks
+          mode="select"
           onSelectDeck={handleSelectDeck}
           activeDeckName={activeDeckName}
-          mode="ai"
+          onConfirmSelection={handleStartGame}
+          confirmLabel="Start Game"
+          showDifficultySelector
           difficulty={difficulty}
           onDifficultyChange={setDifficulty}
-          onStartGame={handleStartGame}
         />
       </div>
     </div>

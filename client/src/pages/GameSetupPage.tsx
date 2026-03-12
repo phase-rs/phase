@@ -6,10 +6,10 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { HostSetup } from "../components/lobby/HostSetup";
 import { LobbyView } from "../components/lobby/LobbyView";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
-import { DeckGallery } from "../components/menu/DeckGallery";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { GamePresets } from "../components/menu/GamePresets";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MyDecks } from "../components/menu/MyDecks";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -407,14 +407,17 @@ export function GameSetupPage() {
         )}
 
         {step === "deck-select" && (
-          <DeckGallery
+          <MyDecks
+            mode="select"
             onSelectDeck={handleSelectDeck}
             activeDeckName={activeDeckName}
-            mode="ai"
+            onConfirmSelection={handleDeckConfirm}
+            confirmLabel="Continue"
+            selectedFormat={selectedFormat ?? undefined}
+            selectedMatchType={matchType}
+            showDifficultySelector
             difficulty={difficulty}
             onDifficultyChange={setDifficulty}
-            onStartGame={handleDeckConfirm}
-            format={selectedFormat ?? undefined}
           />
         )}
 

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
@@ -32,6 +32,8 @@ interface DeckBuilderProps {
   onCardHover?: (cardName: string | null) => void;
   format: DeckFormat;
   onFormatChange: (format: DeckFormat) => void;
+  initialDeckName?: string | null;
+  backPath?: string;
 }
 
 const BASIC_LANDS = new Set([
@@ -42,7 +44,13 @@ const BASIC_LANDS = new Set([
   "Forest",
 ]);
 
-export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilderProps) {
+export function DeckBuilder({
+  onCardHover,
+  format,
+  onFormatChange,
+  initialDeckName = null,
+  backPath = "/",
+}: DeckBuilderProps) {
   const navigate = useNavigate();
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
@@ -137,7 +145,7 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
     setSavedDecks(listSavedDecks());
   };
 
-  const handleLoad = (name: string) => {
+  const handleLoad = useCallback((name: string) => {
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
     if (data) {
       const parsed = JSON.parse(data);
@@ -146,7 +154,12 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
       if (parsed.format) onFormatChange(parsed.format);
       setDeckName(name);
     }
-  };
+  }, [onFormatChange]);
+
+  useEffect(() => {
+    if (!initialDeckName) return;
+    handleLoad(initialDeckName);
+  }, [initialDeckName, handleLoad]);
 
   const handleSetCommander = useCallback(
     (cardName: string) => {
@@ -217,8 +230,8 @@ export function DeckBuilder({ onCardHover, format, onFormatChange }: DeckBuilder
     <div className="flex h-screen flex-col bg-gray-950">
       {/* Top bar */}
       <div className="flex items-center justify-between border-b border-gray-800 px-4 py-2">
-        <button
-          onClick={() => navigate("/")}
+          <button
+          onClick={() => navigate(backPath)}
           className="text-sm text-gray-400 hover:text-white"
         >
           &larr; Menu

@@ -7,9 +7,8 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     let lower = text.to_lowercase();
 
     // Self-reference: "~" (normalized from card name / "this creature" etc.)
-    if text.starts_with('~') {
-        let rest = &text[1..].trim_start();
-        return (TargetFilter::SelfRef, rest);
+    if let Some(rest) = text.strip_prefix('~') {
+        return (TargetFilter::SelfRef, rest.trim_start());
     }
 
     // "any target"

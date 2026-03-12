@@ -4,6 +4,7 @@ pub mod combat_damage;
 pub mod commander;
 pub mod coverage;
 pub mod day_night;
+pub mod deck_validation;
 pub mod deck_loading;
 pub mod derived;
 pub mod devotion;
@@ -37,6 +38,10 @@ pub mod zones;
 pub use deck_loading::{
     create_commander_from_card_face, load_deck_into_state, resolve_deck_list, DeckEntry, DeckList,
     DeckPayload,
+};
+pub use deck_validation::{
+    evaluate_deck_compatibility, CompatibilityCheck, DeckCompatibilityRequest,
+    DeckCompatibilityResult,
 };
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
 pub use game_object::{BackFaceData, CounterType, GameObject};

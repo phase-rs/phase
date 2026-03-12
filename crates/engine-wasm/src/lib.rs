@@ -8,7 +8,10 @@ use wasm_bindgen::prelude::*;
 
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
-use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList};
+use engine::game::{
+    evaluate_deck_compatibility, load_deck_into_state, resolve_deck_list, start_game,
+    DeckCompatibilityRequest, DeckList,
+};
 use engine::types::format::FormatConfig;
 use engine::types::match_config::MatchConfig;
 use engine::types::{
@@ -48,6 +51,26 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
         *cell.borrow_mut() = Some(db);
     });
     Ok(count)
+}
+
+/// Evaluate deck compatibility and format legality using the loaded card database.
+/// Returns strict Standard/Commander checks, BO3 readiness, and selected-format compatibility.
+#[wasm_bindgen]
+pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        let result = evaluate_deck_compatibility(db, &request);
+        serde_wasm_bindgen::to_value(&result)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    })
 }
 
 /// Initialize a new game.

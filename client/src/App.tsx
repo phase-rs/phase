@@ -9,6 +9,7 @@ import { MultiplayerPage } from "./pages/MultiplayerPage";
 import { GamePage } from "./pages/GamePage";
 import { GameSetupPage } from "./pages/GameSetupPage";
 import { DeckBuilderPage } from "./pages/DeckBuilderPage";
+import { MyDecksPage } from "./pages/MyDecksPage";
 
 export function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -51,6 +52,7 @@ export function App() {
           <Route path="/setup" element={<GameSetupPage />} />
           <Route path="/play" element={<PlayPage />} />
           <Route path="/multiplayer" element={<MultiplayerPage />} />
+          <Route path="/my-decks" element={<MyDecksPage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
           <Route path="/game/:id" element={<GamePage />} />
         </Routes>

@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
 
+use serde::Serialize;
+
+use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -13,6 +16,14 @@ use engine::types::card::{CardFace, CardLayout};
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+#[derive(Debug, Clone, Serialize)]
+struct CardExportEntry {
+    #[serde(flatten)]
+    face: CardFace,
+    #[serde(default)]
+    legalities: HashMap<String, String>,
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -54,7 +65,7 @@ fn main() {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
                 eprintln!("Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats]");
-                eprintln!("  Parses Oracle text from MTGJSON and outputs HashMap<String, CardFace> as JSON");
+                eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 process::exit(1);
             }
         },
@@ -73,7 +84,7 @@ fn main() {
         }
     };
 
-    let mut face_index: HashMap<String, CardFace> = HashMap::new();
+    let mut face_index: HashMap<String, CardExportEntry> = HashMap::new();
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
 
@@ -89,6 +100,15 @@ fn main() {
         if faces.len() >= 2 {
             let face_a = build_oracle_face(&faces[0], oracle_id.clone());
             let face_b = build_oracle_face(&faces[1], oracle_id);
+            let mut legalities_by_face = HashMap::new();
+            legalities_by_face.insert(
+                face_a.name.to_lowercase(),
+                legalities_to_export_map(&normalize_legalities(&faces[0].legalities)),
+            );
+            legalities_by_face.insert(
+                face_b.name.to_lowercase(),
+                legalities_to_export_map(&normalize_legalities(&faces[1].legalities)),
+            );
             let layout = match layout_kind {
                 LayoutKind::Split => CardLayout::Split(face_a, face_b),
                 LayoutKind::Flip => CardLayout::Flip(face_a, face_b),
@@ -109,16 +129,26 @@ fn main() {
             }
 
             for face in layout_faces(&layout) {
-                face_index.insert(face.name.to_lowercase(), face.clone());
+                let key = face.name.to_lowercase();
+                let legalities = legalities_by_face.remove(&key).unwrap_or_default();
+                face_index.insert(
+                    key,
+                    CardExportEntry {
+                        face: face.clone(),
+                        legalities,
+                    },
+                );
             }
         } else {
             let face = build_oracle_face(&faces[0], oracle_id);
+            let key = face.name.to_lowercase();
+            let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
             if stats && face_has_unimplemented(&face) {
                 cards_with_unimplemented += 1;
             }
 
-            face_index.insert(face.name.to_lowercase(), face);
+            face_index.insert(key, CardExportEntry { face, legalities });
         }
     }
 

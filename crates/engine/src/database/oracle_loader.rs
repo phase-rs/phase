@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::database::card_db::CardDatabase;
+use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
@@ -245,6 +246,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
 
     let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
+    let mut legalities = HashMap::new();
     let errors: Vec<(PathBuf, String)> = Vec::new();
 
     for faces in atomic.data.values() {
@@ -257,6 +259,15 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         if faces.len() >= 2 {
             let face_a = build_oracle_face(&faces[0], oracle_id.clone());
             let face_b = build_oracle_face(&faces[1], oracle_id);
+            let mut legalities_by_name = HashMap::new();
+            let legalities_a = normalize_legalities(&faces[0].legalities);
+            if !legalities_a.is_empty() {
+                legalities_by_name.insert(face_a.name.to_lowercase(), legalities_a);
+            }
+            let legalities_b = normalize_legalities(&faces[1].legalities);
+            if !legalities_b.is_empty() {
+                legalities_by_name.insert(face_b.name.to_lowercase(), legalities_b);
+            }
             let layout = match layout_kind {
                 LayoutKind::Split => CardLayout::Split(face_a, face_b),
                 LayoutKind::Flip => CardLayout::Flip(face_a, face_b),
@@ -267,7 +278,11 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
                 LayoutKind::Single => CardLayout::Single(face_a),
             };
             for face in layout_faces(&layout) {
-                face_index.insert(face.name.to_lowercase(), face.clone());
+                let key = face.name.to_lowercase();
+                face_index.insert(key.clone(), face.clone());
+                if let Some(card_legalities) = legalities_by_name.get(&key).cloned() {
+                    legalities.insert(key, card_legalities);
+                }
             }
             let rules = CardRules {
                 layout: layout.clone(),
@@ -278,19 +293,25 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
             cards.insert(primary_name, rules);
         } else {
             let face = build_oracle_face(&faces[0], oracle_id);
+            let key = face.name.to_lowercase();
+            let card_legalities = normalize_legalities(&faces[0].legalities);
             let rules = CardRules {
                 layout: CardLayout::Single(face.clone()),
                 meld_with: None,
                 partner_with: None,
             };
-            cards.insert(face.name.to_lowercase(), rules);
-            face_index.insert(face.name.to_lowercase(), face);
+            cards.insert(key.clone(), rules);
+            face_index.insert(key.clone(), face);
+            if !card_legalities.is_empty() {
+                legalities.insert(key, card_legalities);
+            }
         }
     }
 
     Ok(CardDatabase {
         cards,
         face_index,
+        legalities,
         errors,
     })
 }

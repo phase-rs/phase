@@ -409,7 +409,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     let (without_where_x, where_x_expression) = strip_trailing_where_x(clause);
     let clause = without_where_x
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '"');
+        .trim_end_matches(['.', '"']);
 
     if let Some(produced) = parse_mana_production_clause(clause) {
         return Some(Effect::Mana { produced });
@@ -419,7 +419,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
         let rest = rest
             .trim()
-            .trim_end_matches(|c: char| c == '.' || c == '"')
+            .trim_end_matches(['.', '"'])
             .trim();
         let rest_lower = rest.to_lowercase();
 
@@ -528,7 +528,7 @@ fn try_parse_activate_only_condition(text: &str) -> Option<Effect> {
             "forest" => "Forest",
             _ => return None,
         };
-        if !subtypes.iter().any(|s| *s == subtype) {
+        if !subtypes.contains(&subtype) {
             subtypes.push(subtype);
         }
     }
@@ -612,7 +612,7 @@ fn apply_where_x_count_expression(
 fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
     let mut rest = text
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '"')
+        .trim_end_matches(['.', '"'])
         .trim();
     if rest.is_empty() {
         return None;
@@ -1168,9 +1168,7 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
-    let Some(pos) = lower.find("deals ").or_else(|| lower.find("deal ")) else {
-        return None;
-    };
+    let pos = lower.find("deals ").or_else(|| lower.find("deal "))?;
     let verb_len = if lower[pos..].starts_with("deals ") {
         6
     } else {

@@ -297,7 +297,7 @@ pub fn spell_has_legal_targets(
                 None
             }
         });
-        return enchant_filter.map_or(false, |filter| {
+        return enchant_filter.is_some_and(|filter| {
             !targeting::find_legal_targets_typed(state, &filter, player, obj.id).is_empty()
         });
     }

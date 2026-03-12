@@ -421,7 +421,7 @@ fn compute_available_mana_for_cost(
                     .iter()
                     .enumerate()
                     .find_map(|(i, options)| {
-                        if !used[i] && options.contains(&candidate) {
+                        if !used[i] && options.contains(candidate) {
                             Some(i)
                         } else {
                             None

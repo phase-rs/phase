@@ -475,7 +475,7 @@ fn is_capitalized_words(s: &str) -> bool {
     !trimmed.is_empty()
         && trimmed
             .split_whitespace()
-            .all(|w| w.chars().next().map_or(false, |c| c.is_uppercase()))
+            .all(|w| w.chars().next().is_some_and(|c| c.is_uppercase()))
 }
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.

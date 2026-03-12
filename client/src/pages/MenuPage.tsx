@@ -108,10 +108,10 @@ export function MenuPage() {
           </button>
 
           <button
-            onClick={() => navigate("/deck-builder")}
+            onClick={() => navigate("/my-decks")}
             className={menuButtonClass({ tone: "neutral", size: "lg" })}
           >
-            Deck Builder
+            My Decks
           </button>
         </div>
 

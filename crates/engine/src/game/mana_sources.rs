@@ -196,9 +196,7 @@ fn parse_basic_land_subtype_activation_text(text: &str) -> Option<Vec<String>> {
             .trim_start_matches("a ")
             .trim_start_matches("an ")
             .trim();
-        let Some(subtype) = canonical_basic_land_subtype(part) else {
-            return None;
-        };
+        let subtype = canonical_basic_land_subtype(part)?;
         let subtype = subtype.to_string();
         if !subtypes.contains(&subtype) {
             subtypes.push(subtype);
