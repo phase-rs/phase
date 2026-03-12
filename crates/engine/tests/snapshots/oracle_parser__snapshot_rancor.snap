@@ -14,7 +14,7 @@ expression: result
         "effect": {
           "type": "Bounce",
           "target": {
-            "type": "Any"
+            "type": "SelfRef"
           },
           "destination": null
         },

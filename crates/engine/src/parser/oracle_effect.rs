@@ -1311,7 +1311,12 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
         .unwrap_or(after_type);
 
     let target = if let Some(target_text) = after_counter_word.strip_prefix("on ") {
-        if target_text.starts_with("this ") || target_text == "it" || target_text.starts_with("it ") || target_text.starts_with("itself") {
+        if target_text.starts_with("this ")
+            || target_text.starts_with("~")
+            || target_text == "it"
+            || target_text.starts_with("it ")
+            || target_text.starts_with("itself")
+        {
             TargetFilter::SelfRef
         } else {
             parse_target(target_text).0

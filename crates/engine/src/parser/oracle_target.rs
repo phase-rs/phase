@@ -6,6 +6,12 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
+    // Self-reference: "~" (normalized from card name / "this creature" etc.)
+    if text.starts_with('~') {
+        let rest = &text[1..].trim_start();
+        return (TargetFilter::SelfRef, rest);
+    }
+
     // "any target"
     if lower.starts_with("any target") {
         return (TargetFilter::Any, &text[10..]);
@@ -352,5 +358,19 @@ mod tests {
                 properties: vec![],
             }
         );
+    }
+
+    #[test]
+    fn tilde_is_self_ref() {
+        let (f, rest) = parse_target("~");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn tilde_with_trailing_text() {
+        let (f, rest) = parse_target("~ to its owner's hand");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert!(rest.contains("to its owner"));
     }
 }
