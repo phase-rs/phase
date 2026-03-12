@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, GainLifePlayer, LifeAmount, ResolvedAbility,
+    EffectKind, Effect, EffectError, GainLifePlayer, LifeAmount, ResolvedAbility,
     TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -44,7 +44,7 @@ pub fn resolve_gain(
 
     if final_amount <= 0 {
         events.push(GameEvent::EffectResolved {
-            api_type: effect_variant_name(&ability.effect).to_string(),
+            kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -94,7 +94,7 @@ pub fn resolve_gain(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
@@ -219,7 +219,7 @@ pub fn resolve_lose(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

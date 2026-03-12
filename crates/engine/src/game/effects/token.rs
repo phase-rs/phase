@@ -4,7 +4,7 @@ use std::str::FromStr;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    effect_variant_name, CountValue, Effect, EffectError, PtValue, ResolvedAbility,
+    EffectKind, CountValue, Effect, EffectError, PtValue, ResolvedAbility,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -404,7 +404,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
@@ -682,7 +682,7 @@ mod tests {
         let (_, events) = resolve_token("w_1_1_soldier");
 
         assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Token")
+            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Token, .. })
         ));
     }
 

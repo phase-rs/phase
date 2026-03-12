@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TriggerCondition, TriggerDefinition,
+    AbilityDefinition, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerCondition,
+    TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -1423,8 +1424,7 @@ fn match_attached(
     state: &GameState,
 ) -> bool {
     match event {
-        GameEvent::EffectResolved { api_type, .. }
-            if api_type == "Attach" || api_type == "AttachAll" =>
+        GameEvent::EffectResolved { kind: EffectKind::Attach | EffectKind::AttachAll, .. } =>
         {
             state
                 .objects
@@ -1476,10 +1476,7 @@ fn match_shuffled(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved { api_type, .. } if api_type == "Shuffle"
-    )
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::Shuffle, .. })
 }
 
 /// Revealed: fires when a card is revealed.
@@ -1489,7 +1486,7 @@ fn match_revealed(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "Reveal")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::Reveal, .. })
 }
 
 /// TapsForMana: fires when source taps and produces mana.
@@ -1517,7 +1514,7 @@ fn match_changes_controller(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "GainControl")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainControl, .. })
 }
 
 /// Transformed: fires when an object transforms.
@@ -1527,7 +1524,7 @@ fn match_transformed(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "Transform")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::Transform, .. })
 }
 
 /// Fight: fires when creatures fight.
@@ -1537,7 +1534,7 @@ fn match_fight(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "Fight")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::Fight, .. })
 }
 
 /// Always/Immediate: matches any event.
@@ -1557,7 +1554,7 @@ fn match_explored(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "Explore")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::Explore, .. })
 }
 
 /// TurnFaceUp: fires when a face-down creature is turned face up.
@@ -1567,7 +1564,7 @@ fn match_turn_face_up(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "TurnFaceUp")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::TurnFaceUp, .. })
 }
 
 /// DayTimeChanges: fires when day/night changes.
@@ -1577,7 +1574,7 @@ fn match_day_time_changes(
     _source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::EffectResolved { api_type, .. } if api_type == "DayTimeChange")
+    matches!(event, GameEvent::EffectResolved { kind: EffectKind::DayTimeChange, .. })
 }
 
 /// Unimplemented: matches nothing. Placeholder for trigger modes not yet supported.
@@ -2589,7 +2586,7 @@ pub mod tests {
     fn shuffled_matches_shuffled_event() {
         let state = setup();
         let event = GameEvent::EffectResolved {
-            api_type: "Shuffle".to_string(),
+            kind: EffectKind::Shuffle,
             source_id: ObjectId(1),
         };
         let trigger = make_trigger(TriggerMode::Shuffled);

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ability::TargetRef;
+use super::ability::{EffectKind, TargetRef};
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
 use super::phase::Phase;
@@ -111,7 +111,7 @@ pub enum GameEvent {
         player_id: PlayerId,
     },
     EffectResolved {
-        api_type: String,
+        kind: EffectKind,
         source_id: ObjectId,
     },
     AttackersDeclared {
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn effect_resolved_event_roundtrips() {
         let event = GameEvent::EffectResolved {
-            api_type: "DealDamage".to_string(),
+            kind: EffectKind::DealDamage,
             source_id: ObjectId(5),
         };
         let serialized = serde_json::to_string(&event).unwrap();

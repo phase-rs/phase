@@ -1,6 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
+use crate::types::ability::EffectKind;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -277,7 +278,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             let p = *player;
             effects::attach::attach_to(state, eq_id, target_id);
             events.push(GameEvent::EffectResolved {
-                api_type: "Equip".to_string(),
+                kind: EffectKind::Equip,
                 source_id: eq_id,
             });
             WaitingFor::Priority { player: p }
@@ -814,7 +815,7 @@ fn handle_equip_activation(
         let target_id = valid_targets[0];
         effects::attach::attach_to(state, equipment_id, target_id);
         events.push(GameEvent::EffectResolved {
-            api_type: "Equip".to_string(),
+            kind: EffectKind::Equip,
             source_id: equipment_id,
         });
         state.priority_passes.clear();

@@ -27,6 +27,7 @@ pub mod proliferate;
 pub mod pump;
 pub mod sacrifice;
 pub mod scry;
+pub mod shuffle;
 pub mod surveil;
 pub mod tap_untap;
 pub mod token;
@@ -76,6 +77,7 @@ pub fn resolve_effect(
         Effect::Cleanup { .. } => cleanup::resolve(state, ability, events),
         Effect::Mana { .. } => mana::resolve(state, ability, events),
         Effect::Discard { .. } => discard::resolve(state, ability, events),
+        Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -127,6 +129,7 @@ pub fn is_known_effect(api_type: &str) -> bool {
             | "Cleanup"
             | "Mana"
             | "Discard"
+            | "Shuffle"
     )
 }
 
@@ -191,7 +194,7 @@ mod tests {
     use crate::types::zones::Zone;
 
     #[test]
-    fn is_known_effect_covers_38_types() {
+    fn is_known_effect_covers_39_types() {
         let expected = [
             "DealDamage",
             "Draw",
@@ -231,11 +234,12 @@ mod tests {
             "Cleanup",
             "Mana",
             "Discard",
+            "Shuffle",
         ];
         for name in &expected {
             assert!(is_known_effect(name), "missing: {}", name);
         }
-        assert_eq!(expected.len(), 38);
+        assert_eq!(expected.len(), 39);
     }
 
     #[test]

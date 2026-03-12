@@ -1,4 +1,4 @@
-use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{EffectKind, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -38,7 +38,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
@@ -74,7 +74,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(events.iter().any(
-            |e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Cleanup")
+            |e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::Cleanup, .. })
         ));
     }
 

@@ -1,6 +1,6 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
-use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{EffectKind, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::statics::StaticMode;
@@ -56,7 +56,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

@@ -686,6 +686,10 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    Shuffle {
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -737,6 +741,10 @@ fn default_target_filter_none() -> TargetFilter {
     TargetFilter::None
 }
 
+fn default_target_filter_controller() -> TargetFilter {
+    TargetFilter::Controller
+}
+
 /// Returns the human-readable variant name for an Effect.
 /// Production API for GameEvent::EffectResolved api_type strings and logging.
 pub fn effect_variant_name(effect: &Effect) -> &str {
@@ -779,7 +787,115 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Cleanup { .. } => "Cleanup",
         Effect::Mana { .. } => "Mana",
         Effect::Discard { .. } => "Discard",
+        Effect::Shuffle { .. } => "Shuffle",
         Effect::Unimplemented { name, .. } => name,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Effect kind — typed discriminant for GameEvent::EffectResolved
+// ---------------------------------------------------------------------------
+
+/// Typed tag carried by `GameEvent::EffectResolved`.
+/// Replaces the former `api_type: String` field with a compile-time-checked enum.
+/// Variants mirror `Effect` variants 1:1, plus a few engine-level emits (Equip)
+/// and trigger-condition placeholders (Reveal, Transform, TurnFaceUp, DayTimeChange).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum EffectKind {
+    DealDamage,
+    Draw,
+    Pump,
+    Destroy,
+    Counter,
+    Token,
+    GainLife,
+    LoseLife,
+    Tap,
+    Untap,
+    AddCounter,
+    RemoveCounter,
+    Sacrifice,
+    DiscardCard,
+    Mill,
+    Scry,
+    PumpAll,
+    DamageAll,
+    DestroyAll,
+    ChangeZone,
+    ChangeZoneAll,
+    Dig,
+    GainControl,
+    Attach,
+    AttachAll,
+    Surveil,
+    Fight,
+    Bounce,
+    Explore,
+    Proliferate,
+    CopySpell,
+    ChooseCard,
+    PutCounter,
+    MultiplyCounter,
+    Animate,
+    GenericEffect,
+    Cleanup,
+    Mana,
+    Discard,
+    Shuffle,
+    Unimplemented,
+    /// Engine-level equip action (not via an Effect handler).
+    Equip,
+    /// Trigger-condition placeholders — emitters not yet implemented.
+    Reveal,
+    Transform,
+    TurnFaceUp,
+    DayTimeChange,
+}
+
+impl From<&Effect> for EffectKind {
+    fn from(effect: &Effect) -> Self {
+        match effect {
+            Effect::DealDamage { .. } => EffectKind::DealDamage,
+            Effect::Draw { .. } => EffectKind::Draw,
+            Effect::Pump { .. } => EffectKind::Pump,
+            Effect::Destroy { .. } => EffectKind::Destroy,
+            Effect::Counter { .. } => EffectKind::Counter,
+            Effect::Token { .. } => EffectKind::Token,
+            Effect::GainLife { .. } => EffectKind::GainLife,
+            Effect::LoseLife { .. } => EffectKind::LoseLife,
+            Effect::Tap { .. } => EffectKind::Tap,
+            Effect::Untap { .. } => EffectKind::Untap,
+            Effect::AddCounter { .. } => EffectKind::AddCounter,
+            Effect::RemoveCounter { .. } => EffectKind::RemoveCounter,
+            Effect::Sacrifice { .. } => EffectKind::Sacrifice,
+            Effect::DiscardCard { .. } => EffectKind::DiscardCard,
+            Effect::Mill { .. } => EffectKind::Mill,
+            Effect::Scry { .. } => EffectKind::Scry,
+            Effect::PumpAll { .. } => EffectKind::PumpAll,
+            Effect::DamageAll { .. } => EffectKind::DamageAll,
+            Effect::DestroyAll { .. } => EffectKind::DestroyAll,
+            Effect::ChangeZone { .. } => EffectKind::ChangeZone,
+            Effect::ChangeZoneAll { .. } => EffectKind::ChangeZoneAll,
+            Effect::Dig { .. } => EffectKind::Dig,
+            Effect::GainControl { .. } => EffectKind::GainControl,
+            Effect::Attach { .. } => EffectKind::Attach,
+            Effect::Surveil { .. } => EffectKind::Surveil,
+            Effect::Fight { .. } => EffectKind::Fight,
+            Effect::Bounce { .. } => EffectKind::Bounce,
+            Effect::Explore => EffectKind::Explore,
+            Effect::Proliferate => EffectKind::Proliferate,
+            Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::ChooseCard { .. } => EffectKind::ChooseCard,
+            Effect::PutCounter { .. } => EffectKind::PutCounter,
+            Effect::MultiplyCounter { .. } => EffectKind::MultiplyCounter,
+            Effect::Animate { .. } => EffectKind::Animate,
+            Effect::GenericEffect { .. } => EffectKind::GenericEffect,
+            Effect::Cleanup { .. } => EffectKind::Cleanup,
+            Effect::Mana { .. } => EffectKind::Mana,
+            Effect::Discard { .. } => EffectKind::Discard,
+            Effect::Shuffle { .. } => EffectKind::Shuffle,
+            Effect::Unimplemented { .. } => EffectKind::Unimplemented,
+        }
     }
 }
 

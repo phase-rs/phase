@@ -70,7 +70,7 @@ export function formatEvent(event: GameEvent): string {
     case "PermanentSacrificed":
       return `Player ${event.data.player_id + 1} sacrificed ${event.data.object_id}`;
     case "EffectResolved":
-      return `Effect ${event.data.api_type} resolved`;
+      return `Effect ${event.data.kind} resolved`;
     case "AttackersDeclared":
       return `${event.data.attacker_ids.length} attacker(s) declared`;
     case "BlockersDeclared":

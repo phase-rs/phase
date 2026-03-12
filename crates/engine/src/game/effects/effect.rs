@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, StaticDefinition, TargetFilter,
+    EffectKind, Effect, EffectError, ResolvedAbility, StaticDefinition, TargetFilter,
     TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -28,7 +28,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

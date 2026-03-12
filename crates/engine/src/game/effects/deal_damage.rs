@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    effect_variant_name, DamageAmount, Effect, EffectError, ResolvedAbility, TargetFilter,
+    EffectKind, DamageAmount, Effect, EffectError, ResolvedAbility, TargetFilter,
     TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -106,7 +106,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
@@ -159,7 +159,7 @@ pub fn resolve_all(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

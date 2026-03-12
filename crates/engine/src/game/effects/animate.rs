@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
+    EffectKind, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -52,7 +52,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

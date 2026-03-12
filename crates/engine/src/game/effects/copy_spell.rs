@@ -1,4 +1,4 @@
-use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
+use crate::types::ability::{EffectKind, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -34,7 +34,7 @@ pub fn resolve(
     events.push(GameEvent::StackPushed { object_id: copy_id });
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 

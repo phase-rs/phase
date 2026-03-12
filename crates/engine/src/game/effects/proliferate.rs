@@ -1,5 +1,5 @@
 use crate::game::game_object::CounterType;
-use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
+use crate::types::ability::{EffectKind, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -66,7 +66,7 @@ pub fn resolve(
     // Note: poison counter proliferation on players is deferred (poison counters not yet tracked)
 
     events.push(GameEvent::EffectResolved {
-        api_type: effect_variant_name(&ability.effect).to_string(),
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
