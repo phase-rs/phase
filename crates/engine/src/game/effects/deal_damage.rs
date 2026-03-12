@@ -77,12 +77,9 @@ pub fn resolve(
                             }
                         }
                         TargetRef::Player(player_id) => {
-                            let player = state
-                                .players
-                                .iter_mut()
-                                .find(|p| p.id == *player_id)
-                                .ok_or(EffectError::PlayerNotFound)?;
-                            player.life -= amount as i32;
+                            super::life::apply_damage_life_loss(
+                                state, *player_id, amount, events,
+                            );
                         }
                     }
                     events.push(GameEvent::DamageDealt {

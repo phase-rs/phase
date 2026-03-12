@@ -101,6 +101,57 @@ pub fn resolve_gain(
     Ok(())
 }
 
+/// Apply life loss from damage, running through the replacement pipeline.
+/// Returns the actual amount of life lost (may differ due to replacements like doubling).
+pub fn apply_damage_life_loss(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    if amount == 0 {
+        return 0;
+    }
+    let proposed = ProposedEvent::LifeLoss {
+        player_id,
+        amount,
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::LifeLoss {
+                player_id: pid,
+                amount: loss_amount,
+                ..
+            } = event
+            {
+                if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
+                    player.life -= loss_amount as i32;
+                }
+                events.push(GameEvent::LifeChanged {
+                    player_id: pid,
+                    amount: -(loss_amount as i32),
+                });
+                loss_amount
+            } else {
+                0
+            }
+        }
+        ReplacementResult::Prevented => 0,
+        ReplacementResult::NeedsChoice(_) => {
+            // Multiple replacement choices for life loss from damage; apply unmodified for now
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                player.life -= amount as i32;
+            }
+            events.push(GameEvent::LifeChanged {
+                player_id,
+                amount: -(amount as i32),
+            });
+            amount
+        }
+    }
+}
+
 /// Lose life for the target player (or controller if no target).
 pub fn resolve_lose(
     state: &mut GameState,

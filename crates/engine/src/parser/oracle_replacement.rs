@@ -80,6 +80,16 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         });
     }
 
+    // --- "If [someone] would lose life, they lose twice that much life instead" ---
+    if lower.contains("would lose life") {
+        return Some(ReplacementDefinition {
+            event: ReplacementEvent::LoseLife,
+            execute: None,
+            valid_card: None,
+            description: Some(text.to_string()),
+        });
+    }
+
     None
 }
 
@@ -125,6 +135,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
+    }
+
+    #[test]
+    fn replacement_lose_life_doubled() {
+        let def = parse_replacement_line(
+            "If an opponent would lose life during your turn, they lose twice that much life instead.",
+            "Bloodletter of Aclazotz",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::LoseLife);
+        assert!(def.description.is_some());
     }
 
     #[test]

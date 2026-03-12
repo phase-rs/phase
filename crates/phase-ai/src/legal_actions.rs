@@ -199,6 +199,118 @@ impl AvailableMana {
             ManaType::Colorless => self.colorless,
         }
     }
+
+    fn spend_color(&mut self, color: ManaType) -> bool {
+        let slot = match color {
+            ManaType::White => &mut self.white,
+            ManaType::Blue => &mut self.blue,
+            ManaType::Black => &mut self.black,
+            ManaType::Red => &mut self.red,
+            ManaType::Green => &mut self.green,
+            ManaType::Colorless => &mut self.colorless,
+        };
+        if *slot > 0 {
+            *slot -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Try to spend mana for a shard, handling hybrid/phyrexian variants correctly.
+    fn spend_shard(&mut self, shard: &ManaCostShard) -> bool {
+        match shard {
+            // Single color
+            ManaCostShard::White | ManaCostShard::PhyrexianWhite => self.spend_color(ManaType::White),
+            ManaCostShard::Blue | ManaCostShard::PhyrexianBlue => self.spend_color(ManaType::Blue),
+            ManaCostShard::Black | ManaCostShard::PhyrexianBlack => self.spend_color(ManaType::Black),
+            ManaCostShard::Red | ManaCostShard::PhyrexianRed => self.spend_color(ManaType::Red),
+            ManaCostShard::Green | ManaCostShard::PhyrexianGreen => self.spend_color(ManaType::Green),
+            ManaCostShard::Colorless => self.spend_color(ManaType::Colorless),
+            // Hybrid: either color works
+            ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue => {
+                self.spend_color(ManaType::White) || self.spend_color(ManaType::Blue)
+            }
+            ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => {
+                self.spend_color(ManaType::White) || self.spend_color(ManaType::Black)
+            }
+            ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack => {
+                self.spend_color(ManaType::Blue) || self.spend_color(ManaType::Black)
+            }
+            ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => {
+                self.spend_color(ManaType::Blue) || self.spend_color(ManaType::Red)
+            }
+            ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed => {
+                self.spend_color(ManaType::Black) || self.spend_color(ManaType::Red)
+            }
+            ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => {
+                self.spend_color(ManaType::Black) || self.spend_color(ManaType::Green)
+            }
+            ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite => {
+                self.spend_color(ManaType::Red) || self.spend_color(ManaType::White)
+            }
+            ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => {
+                self.spend_color(ManaType::Red) || self.spend_color(ManaType::Green)
+            }
+            ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite => {
+                self.spend_color(ManaType::Green) || self.spend_color(ManaType::White)
+            }
+            ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => {
+                self.spend_color(ManaType::Green) || self.spend_color(ManaType::Blue)
+            }
+            // Two-generic hybrid: 1 colored or 2 generic
+            ManaCostShard::TwoWhite => {
+                self.spend_color(ManaType::White) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+            }
+            ManaCostShard::TwoBlue => {
+                self.spend_color(ManaType::Blue) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+            }
+            ManaCostShard::TwoBlack => {
+                self.spend_color(ManaType::Black) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+            }
+            ManaCostShard::TwoRed => {
+                self.spend_color(ManaType::Red) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+            }
+            ManaCostShard::TwoGreen => {
+                self.spend_color(ManaType::Green) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+            }
+            // Colorless hybrid: colorless or colored
+            ManaCostShard::ColorlessWhite => {
+                self.spend_color(ManaType::Colorless) || self.spend_color(ManaType::White)
+            }
+            ManaCostShard::ColorlessBlue => {
+                self.spend_color(ManaType::Colorless) || self.spend_color(ManaType::Blue)
+            }
+            ManaCostShard::ColorlessBlack => {
+                self.spend_color(ManaType::Colorless) || self.spend_color(ManaType::Black)
+            }
+            ManaCostShard::ColorlessRed => {
+                self.spend_color(ManaType::Colorless) || self.spend_color(ManaType::Red)
+            }
+            ManaCostShard::ColorlessGreen => {
+                self.spend_color(ManaType::Colorless) || self.spend_color(ManaType::Green)
+            }
+            // X and Snow are always satisfiable (X=0, Snow=any)
+            ManaCostShard::X | ManaCostShard::Snow => true,
+        }
+    }
+
+    fn spend_any(&mut self) {
+        // Spend the cheapest color first (prefer colorless, then whatever is available)
+        for slot in [
+            &mut self.colorless,
+            &mut self.white,
+            &mut self.blue,
+            &mut self.black,
+            &mut self.red,
+            &mut self.green,
+        ] {
+            if *slot > 0 {
+                *slot -= 1;
+                return;
+            }
+        }
+    }
 }
 
 fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana {
@@ -248,7 +360,6 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
     match cost {
         ManaCost::NoCost => false,
         ManaCost::Cost { shards, generic } => {
-            // Track how much of each color we consume for colored shards
             let mut remaining = AvailableMana {
                 white: available.white,
                 blue: available.blue,
@@ -259,17 +370,7 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
             };
 
             for shard in shards {
-                let color = shard_to_mana_type(shard);
-                if remaining.count(color) > 0 {
-                    match color {
-                        ManaType::White => remaining.white -= 1,
-                        ManaType::Blue => remaining.blue -= 1,
-                        ManaType::Black => remaining.black -= 1,
-                        ManaType::Red => remaining.red -= 1,
-                        ManaType::Green => remaining.green -= 1,
-                        ManaType::Colorless => remaining.colorless -= 1,
-                    }
-                } else {
+                if !remaining.spend_shard(shard) {
                     return false;
                 }
             }
@@ -280,50 +381,6 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
     }
 }
 
-/// Map a mana cost shard to the ManaType it requires.
-/// Hybrid/phyrexian shards return the first option for simplicity —
-/// this is a conservative approximation for UI highlighting.
-fn shard_to_mana_type(shard: &ManaCostShard) -> ManaType {
-    match shard {
-        ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => {
-            ManaType::White
-        }
-        ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => {
-            ManaType::Blue
-        }
-        ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => {
-            ManaType::Black
-        }
-        ManaCostShard::Red | ManaCostShard::PhyrexianRed | ManaCostShard::TwoRed => ManaType::Red,
-        ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => {
-            ManaType::Green
-        }
-        ManaCostShard::Colorless => ManaType::Colorless,
-        // Hybrid: use first color (conservative — may miss some castable spells)
-        ManaCostShard::WhiteBlue
-        | ManaCostShard::PhyrexianWhiteBlue
-        | ManaCostShard::ColorlessWhite => ManaType::White,
-        ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => ManaType::White,
-        ManaCostShard::BlueBlack
-        | ManaCostShard::PhyrexianBlueBlack
-        | ManaCostShard::ColorlessBlue => ManaType::Blue,
-        ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => ManaType::Blue,
-        ManaCostShard::BlackRed
-        | ManaCostShard::PhyrexianBlackRed
-        | ManaCostShard::ColorlessBlack => ManaType::Black,
-        ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => ManaType::Black,
-        ManaCostShard::RedWhite
-        | ManaCostShard::PhyrexianRedWhite
-        | ManaCostShard::ColorlessRed => ManaType::Red,
-        ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => ManaType::Red,
-        ManaCostShard::GreenWhite
-        | ManaCostShard::PhyrexianGreenWhite
-        | ManaCostShard::ColorlessGreen => ManaType::Green,
-        ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => ManaType::Green,
-        // X costs and Snow cost nothing for affordability check
-        ManaCostShard::X | ManaCostShard::Snow => ManaType::Colorless,
-    }
-}
 
 fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<GameAction> {
     let p = &state.players[player.0 as usize];

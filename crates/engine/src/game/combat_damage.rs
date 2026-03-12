@@ -439,15 +439,9 @@ fn apply_combat_damage(
                                     player.poison_counters += amount;
                                 }
                             } else {
-                                if let Some(player) =
-                                    state.players.iter_mut().find(|p| p.id == *player_id)
-                                {
-                                    player.life -= amount as i32;
-                                }
-                                events.push(GameEvent::LifeChanged {
-                                    player_id: *player_id,
-                                    amount: -(amount as i32),
-                                });
+                                crate::game::effects::life::apply_damage_life_loss(
+                                    state, *player_id, amount, events,
+                                );
                             }
                             events.push(GameEvent::DamageDealt {
                                 source_id: *source_id,

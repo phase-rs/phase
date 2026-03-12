@@ -396,6 +396,49 @@ fn life_reduced_applier(
     }
 }
 
+// --- 6b. LoseLife (oracle-parsed: e.g. Bloodletter of Aclazotz) ---
+
+fn lose_life_matcher(
+    event: &ProposedEvent,
+    _params: &HashMap<String, String>,
+    source: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let ProposedEvent::LifeLoss { player_id, .. } = event {
+        // Match when opponent loses life during source controller's turn
+        if let Some(obj) = state.objects.get(&source) {
+            *player_id != obj.controller && state.active_player == obj.controller
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+fn lose_life_applier(
+    event: ProposedEvent,
+    _params: &HashMap<String, String>,
+    _source: ObjectId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    if let ProposedEvent::LifeLoss {
+        player_id,
+        amount,
+        applied,
+    } = event
+    {
+        ApplyResult::Modified(ProposedEvent::LifeLoss {
+            player_id,
+            amount: amount * 2,
+            applied,
+        })
+    } else {
+        ApplyResult::Modified(event)
+    }
+}
+
 // --- 7. AddCounter ---
 
 fn add_counter_matcher(
@@ -1085,6 +1128,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
     registry.insert(
+        ReplacementEvent::LoseLife,
+        ReplacementHandlerEntry {
+            matcher: lose_life_matcher,
+            applier: lose_life_applier,
+        },
+    );
+    registry.insert(
         ReplacementEvent::Other("AddCounter".into()),
         ReplacementHandlerEntry {
             matcher: add_counter_matcher,
@@ -1683,12 +1733,12 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_all_35_types() {
+    fn test_registry_has_all_36_types() {
         let registry = build_replacement_registry();
         assert_eq!(
             registry.len(),
-            35,
-            "registry should have exactly 35 entries"
+            36,
+            "registry should have exactly 36 entries"
         );
 
         // Verify all expected keys
@@ -1700,6 +1750,7 @@ mod tests {
             ReplacementEvent::Other("DrawCards".into()),
             ReplacementEvent::GainLife,
             ReplacementEvent::Other("LifeReduced".into()),
+            ReplacementEvent::LoseLife,
             ReplacementEvent::Other("AddCounter".into()),
             ReplacementEvent::Other("RemoveCounter".into()),
             ReplacementEvent::Other("Tap".into()),
