@@ -161,7 +161,7 @@ pub fn handle_cast_spell(
         }
     }
 
-    // 4. Build ResolvedAbility from typed fields -- no params/svars
+    // 4. Build ResolvedAbility from typed fields
     let obj = state.objects.get(&object_id).unwrap();
     let casting_from_command_zone = obj.zone == Zone::Command;
     let mut mana_cost = obj.mana_cost.clone();

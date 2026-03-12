@@ -23,9 +23,21 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // --- "~ enters the battlefield tapped" ---
     if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
+        let tap_effect = Box::new(AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        });
         return Some(ReplacementDefinition {
             event: ReplacementEvent::Moved,
-            execute: None,
+            execute: Some(tap_effect),
             mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(text.to_string()),
@@ -213,6 +225,12 @@ mod tests {
                 .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
     }
 
     #[test]
@@ -298,5 +316,12 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        // execute must be Some(Tap) so the mandatory pipeline can apply it
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
     }
 }

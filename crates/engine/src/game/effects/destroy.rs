@@ -47,13 +47,12 @@ pub fn resolve(
                         } => {
                             // Destruction resolved -- now create a ZoneChange proposal
                             // so Moved replacements can intercept the actual zone transfer
-                            let zone_proposed = ProposedEvent::ZoneChange {
+                            let zone_proposed = ProposedEvent::zone_change(
                                 object_id,
-                                from: Zone::Battlefield,
-                                to: Zone::Graveyard,
-                                cause: source,
-                                applied: HashSet::new(),
-                            };
+                                Zone::Battlefield,
+                                Zone::Graveyard,
+                                source,
+                            );
                             match replacement::replace_event(state, zone_proposed, events) {
                                 ReplacementResult::Execute(zone_event) => {
                                     if let ProposedEvent::ZoneChange {

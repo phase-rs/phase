@@ -158,6 +158,7 @@ fn moved_applier(
         from,
         to,
         cause,
+        enter_tapped,
         applied,
     } = event
     {
@@ -169,6 +170,7 @@ fn moved_applier(
                     from,
                     to: z,
                     cause,
+                    enter_tapped,
                     applied,
                 });
             }
@@ -179,6 +181,7 @@ fn moved_applier(
             from,
             to,
             cause,
+            enter_tapped,
             applied,
         })
     } else {
@@ -286,6 +289,7 @@ fn destroy_applier(
                 from: Zone::Battlefield,
                 to: Zone::Exile,
                 cause: source,
+                enter_tapped: false,
                 applied,
             });
         }
@@ -718,6 +722,7 @@ fn counter_applier(
                 from,
                 to: Zone::Exile,
                 cause,
+                enter_tapped: false,
                 applied,
             });
         }
@@ -726,6 +731,7 @@ fn counter_applier(
             from,
             to: Zone::Graveyard,
             cause,
+            enter_tapped: false,
             applied,
         })
     } else {
@@ -793,6 +799,7 @@ fn attached_applier(
                     from,
                     to: z,
                     cause,
+                    enter_tapped: false,
                     applied,
                 });
             }
@@ -802,6 +809,7 @@ fn attached_applier(
             from,
             to: Zone::Battlefield,
             cause,
+            enter_tapped: false,
             applied,
         })
     } else {
@@ -935,6 +943,7 @@ fn mill_applier(
                     from,
                     to: z,
                     cause,
+                    enter_tapped: false,
                     applied,
                 });
             }
@@ -944,6 +953,7 @@ fn mill_applier(
             from,
             to: Zone::Graveyard,
             cause,
+            enter_tapped: false,
             applied,
         })
     } else {
@@ -1390,28 +1400,53 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
-    if let Some(obj) = state.objects.get(&rid.source) {
-        if let Some(repl_def) = obj.replacement_definitions.get(rid.index) {
-            let event_key = repl_def.event.clone();
-            let params = HashMap::new();
-            if let Some(handler) = registry.get(&event_key) {
-                let event_type = event_key.to_string();
-                match (handler.applier)(proposed, &params, rid.source, state, events) {
-                    ApplyResult::Modified(new_event) => {
-                        events.push(GameEvent::ReplacementApplied {
-                            source_id: rid.source,
-                            event_type,
-                        });
-                        return Ok(new_event);
+    // Extract replacement metadata before mutably borrowing state for the applier.
+    let (event_key, enters_tapped) = match state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    {
+        Some(repl_def) => {
+            let tapped = repl_def.execute.as_ref().is_some_and(|exec| {
+                matches!(
+                    exec.effect,
+                    crate::types::ability::Effect::Tap {
+                        target: crate::types::ability::TargetFilter::SelfRef,
                     }
-                    ApplyResult::Prevented => {
-                        events.push(GameEvent::ReplacementApplied {
-                            source_id: rid.source,
-                            event_type,
-                        });
-                        return Err(ApplyResult::Prevented);
+                )
+            });
+            (repl_def.event.clone(), tapped)
+        }
+        None => return Ok(proposed),
+    };
+
+    let params = HashMap::new();
+    if let Some(handler) = registry.get(&event_key) {
+        let event_type = event_key.to_string();
+        match (handler.applier)(proposed, &params, rid.source, state, events) {
+            ApplyResult::Modified(mut new_event) => {
+                // If the replacement carries a Tap execute (ETB tapped), mark the zone change.
+                if enters_tapped {
+                    if let ProposedEvent::ZoneChange {
+                        ref mut enter_tapped,
+                        ..
+                    } = new_event
+                    {
+                        *enter_tapped = true;
                     }
                 }
+                events.push(GameEvent::ReplacementApplied {
+                    source_id: rid.source,
+                    event_type,
+                });
+                return Ok(new_event);
+            }
+            ApplyResult::Prevented => {
+                events.push(GameEvent::ReplacementApplied {
+                    source_id: rid.source,
+                    event_type,
+                });
+                return Err(ApplyResult::Prevented);
             }
         }
     }
@@ -1604,13 +1639,8 @@ mod tests {
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
         let mut events = Vec::new();
 
-        let proposed = ProposedEvent::ZoneChange {
-            object_id: ObjectId(10),
-            from: Zone::Battlefield,
-            to: Zone::Graveyard,
-            cause: None,
-            applied: HashSet::new(),
-        };
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         let result = replace_event(&mut state, proposed, &mut events);
 
@@ -1639,13 +1669,8 @@ mod tests {
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
         let mut events = Vec::new();
 
-        let proposed = ProposedEvent::ZoneChange {
-            object_id: ObjectId(10),
-            from: Zone::Battlefield,
-            to: Zone::Graveyard,
-            cause: None,
-            applied: HashSet::new(),
-        };
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         // Two replacements on same object -> NeedsChoice (different ReplacementIds)
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1701,9 +1726,9 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            enter_tapped: false,
             applied: HashSet::new(),
         };
-
         let result = replace_event(&mut state, proposed, &mut events);
         match result {
             ReplacementResult::NeedsChoice(player) => {
@@ -1722,13 +1747,8 @@ mod tests {
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
         let mut events = Vec::new();
 
-        let proposed = ProposedEvent::ZoneChange {
-            object_id: ObjectId(10),
-            from: Zone::Battlefield,
-            to: Zone::Graveyard,
-            cause: None,
-            applied: HashSet::new(),
-        };
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         // First call should return NeedsChoice
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1755,13 +1775,8 @@ mod tests {
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
         let mut events = Vec::new();
 
-        let proposed = ProposedEvent::ZoneChange {
-            object_id: ObjectId(10),
-            from: Zone::Battlefield,
-            to: Zone::Graveyard,
-            cause: None,
-            applied: HashSet::new(),
-        };
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         // Should complete without hanging (once-per-event prevents re-application)
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1805,6 +1820,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            enter_tapped: false,
             applied: HashSet::new(),
         };
 

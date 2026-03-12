@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
@@ -27,13 +25,8 @@ pub fn resolve(
                 .map(|o| o.zone)
                 .unwrap_or(Zone::Battlefield);
 
-            let proposed = ProposedEvent::ZoneChange {
-                object_id: *obj_id,
-                from: from_zone,
-                to: dest_zone,
-                cause: Some(ability.source_id),
-                applied: HashSet::new(),
-            };
+            let proposed =
+                ProposedEvent::zone_change(*obj_id, from_zone, dest_zone, Some(ability.source_id));
 
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {

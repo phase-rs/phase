@@ -243,13 +243,14 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         object_id,
                         to,
                         from,
+                        enter_tapped,
                         ..
                     } = event
                     {
                         zones::move_to_zone(state, object_id, to, &mut events);
                         if to == Zone::Battlefield {
                             if let Some(obj) = state.objects.get_mut(&object_id) {
-                                obj.tapped = false;
+                                obj.tapped = enter_tapped;
                                 obj.entered_battlefield_turn = Some(state.turn_number);
                             }
                         }
@@ -731,23 +732,21 @@ fn handle_play_land(
         .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
 
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
-    let proposed = crate::types::proposed_event::ProposedEvent::ZoneChange {
-        object_id,
-        from: Zone::Hand,
-        to: Zone::Battlefield,
-        cause: None,
-        applied: std::collections::HashSet::new(),
-    };
+    let proposed =
+        crate::types::proposed_event::ProposedEvent::zone_change(object_id, Zone::Hand, Zone::Battlefield, None);
 
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                object_id, to, ..
+                object_id,
+                to,
+                enter_tapped,
+                ..
             } = event
             {
                 zones::move_to_zone(state, object_id, to, events);
                 if let Some(obj) = state.objects.get_mut(&object_id) {
-                    obj.tapped = false;
+                    obj.tapped = enter_tapped;
                     obj.entered_battlefield_turn = Some(state.turn_number);
                 }
             }
@@ -2851,6 +2850,36 @@ mod tests {
                 Some(creature)
             );
         }
+    }
+
+    #[test]
+    fn land_with_etb_tapped_replacement_enters_tapped() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state, CardId(1), PlayerId(0),
+            "Selesnya Guildgate".to_string(), Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.replacement_definitions.push(ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::Tap { target: TargetFilter::SelfRef },
+                cost: None, sub_ability: None, duration: None,
+                description: None, target_prompt: None, sorcery_speed: false,
+            })),
+            mode: ReplacementMode::Mandatory,
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
+        });
+
+        let _result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(state.objects[&obj_id].tapped, "ETB-tapped land must enter tapped");
     }
 }
 

@@ -20,6 +20,8 @@ pub enum ProposedEvent {
         from: Zone,
         to: Zone,
         cause: Option<ObjectId>,
+        /// Whether this permanent enters the battlefield tapped (set by ETB-tapped replacements).
+        enter_tapped: bool,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -87,6 +89,23 @@ pub enum ProposedEvent {
 }
 
 impl ProposedEvent {
+    /// Construct a `ZoneChange` with default `enter_tapped: false` and empty `applied` set.
+    pub fn zone_change(
+        object_id: ObjectId,
+        from: Zone,
+        to: Zone,
+        cause: Option<ObjectId>,
+    ) -> Self {
+        Self::ZoneChange {
+            object_id,
+            from,
+            to,
+            cause,
+            enter_tapped: false,
+            applied: HashSet::new(),
+        }
+    }
+
     pub fn applied_set(&self) -> &HashSet<ReplacementId> {
         match self {
             ProposedEvent::ZoneChange { applied, .. }
@@ -191,13 +210,7 @@ mod tests {
     fn proposed_event_has_13_variants() {
         // Verify all 13 variants compile
         let events: Vec<ProposedEvent> = vec![
-            ProposedEvent::ZoneChange {
-                object_id: ObjectId(1),
-                from: Zone::Battlefield,
-                to: Zone::Graveyard,
-                cause: None,
-                applied: HashSet::new(),
-            },
+            ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
                 source_id: ObjectId(1),
                 target: TargetRef::Player(PlayerId(0)),
