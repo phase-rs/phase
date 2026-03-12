@@ -303,6 +303,12 @@ pub enum FilterProp {
     Another,
     /// Matches objects with a specific color (for "white creature", "red spell", etc.).
     HasColor { color: String },
+    /// Matches objects with power <= N (for "creature with power 2 or less").
+    PowerLE { value: i32 },
+    /// Matches objects with power >= N (for "creature with power 3 or greater").
+    PowerGE { value: i32 },
+    /// Matches multicolored objects (2+ colors).
+    Multicolored,
     Other { value: String },
 }
 
@@ -352,6 +358,7 @@ pub enum StaticCondition {
         var: String,
         compare: String,
     },
+    DuringYourTurn,
     None,
 }
 

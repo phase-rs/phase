@@ -122,6 +122,11 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                             }
                         }
                     }
+                    StaticCondition::DuringYourTurn => {
+                        if state.active_player != obj.controller {
+                            continue;
+                        }
+                    }
                     StaticCondition::None => {}
                 }
             }

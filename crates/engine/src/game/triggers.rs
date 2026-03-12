@@ -733,6 +733,21 @@ fn target_filter_matches_object(
                             }
                         }
                     }
+                    FilterProp::PowerLE { value } => {
+                        if obj.power.unwrap_or(0) > *value {
+                            return false;
+                        }
+                    }
+                    FilterProp::PowerGE { value } => {
+                        if obj.power.unwrap_or(0) < *value {
+                            return false;
+                        }
+                    }
+                    FilterProp::Multicolored => {
+                        if obj.color.len() <= 1 {
+                            return false;
+                        }
+                    }
                     _ => {
                         // Other filter props: pass through for now
                     }

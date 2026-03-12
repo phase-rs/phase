@@ -2,7 +2,7 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityKind, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
+    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition,
 };
 use crate::types::phase::Phase;
@@ -448,6 +448,40 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
+    // "an opponent casts a [quality] spell" / "a player casts a spell from a graveyard"
+    if let Some(casts_pos) = lower.find(" casts a") {
+        let who = &lower[..casts_pos];
+        let mut def = make_base();
+        def.mode = TriggerMode::SpellCast;
+
+        // Determine the caster filter
+        if who.contains("opponent") {
+            def.valid_target = Some(TargetFilter::Typed {
+                card_type: None,
+                subtype: None,
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            });
+        }
+
+        // Parse the spell quality (e.g., "multicolored spell")
+        let after_casts = &lower[casts_pos + " casts a".len()..].trim_start();
+        let after_article = after_casts
+            .strip_prefix("n ") // "an" → strip the trailing "n "
+            .unwrap_or(after_casts)
+            .trim_start();
+        if after_article.starts_with("multicolored") {
+            def.valid_card = Some(TargetFilter::Typed {
+                card_type: None,
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::Multicolored],
+            });
+        }
+
+        return Some((TriggerMode::SpellCast, def));
+    }
+
     if lower.contains("you draw a card") {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
@@ -887,6 +921,33 @@ mod tests {
                 properties: vec![FilterProp::HasColor {
                     color: "White".to_string()
                 }],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_opponent_casts_multicolored_spell() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a multicolored spell, you gain 1 life.",
+            "Soldier of the Pantheon",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed {
+                card_type: None,
+                subtype: None,
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            })
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: None,
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::Multicolored],
             })
         );
     }

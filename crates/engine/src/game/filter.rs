@@ -216,6 +216,9 @@ fn matches_filter_prop(
                 None => true, // Unknown color — permissive
             }
         }
+        FilterProp::PowerLE { value } => obj.power.unwrap_or(0) <= *value,
+        FilterProp::PowerGE { value } => obj.power.unwrap_or(0) >= *value,
+        FilterProp::Multicolored => obj.color.len() > 1,
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }

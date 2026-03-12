@@ -30,6 +30,18 @@ pub fn resolve(
     };
 
     for target in &ability.targets {
+        // Protection: prevent damage from sources with matching quality
+        if let TargetRef::Object(target_obj_id) = target {
+            if let (Some(target_obj), Some(source_obj)) = (
+                state.objects.get(target_obj_id),
+                state.objects.get(&ability.source_id),
+            ) {
+                if crate::game::keywords::protection_prevents_from(target_obj, source_obj) {
+                    continue;
+                }
+            }
+        }
+
         let proposed = ProposedEvent::Damage {
             source_id: ability.source_id,
             target: target.clone(),

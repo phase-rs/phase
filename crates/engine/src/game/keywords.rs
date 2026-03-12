@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::game::game_object::GameObject;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
 /// for simple keywords (ignoring associated data for parameterized variants).
@@ -39,6 +39,31 @@ pub fn has_shroud(obj: &GameObject) -> bool {
 /// Convenience: check for Indestructible.
 pub fn has_indestructible(obj: &GameObject) -> bool {
     obj.keywords.contains(&Keyword::Indestructible)
+}
+
+/// Check whether `target` has protection from `source`.
+/// Returns true if any protection keyword on the target matches the source.
+pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> bool {
+    for kw in &target.keywords {
+        if let Keyword::Protection(ref pt) = kw {
+            match pt {
+                ProtectionTarget::Color(color) => {
+                    if source.color.contains(color) {
+                        return true;
+                    }
+                }
+                ProtectionTarget::Multicolored => {
+                    if source.color.len() > 1 {
+                        return true;
+                    }
+                }
+                ProtectionTarget::CardType(_) | ProtectionTarget::Quality(_) => {
+                    // Not yet implemented for damage prevention
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Batch parse keyword strings into typed Keyword values.

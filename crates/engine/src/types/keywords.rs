@@ -13,6 +13,7 @@ pub enum ProtectionTarget {
     Color(ManaColor),
     CardType(String),
     Quality(String),
+    Multicolored,
 }
 
 /// All MTG keywords as typed enum variants.
@@ -470,6 +471,7 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "black" => ProtectionTarget::Color(ManaColor::Black),
         "red" => ProtectionTarget::Color(ManaColor::Red),
         "green" => ProtectionTarget::Color(ManaColor::Green),
+        "multicolored" => ProtectionTarget::Multicolored,
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(s.to_string()),
         _ => ProtectionTarget::CardType(s.to_string()),
     }
@@ -810,6 +812,10 @@ mod tests {
         assert_eq!(
             Keyword::from_str("Protection:Artifacts").unwrap(),
             Keyword::Protection(ProtectionTarget::CardType("Artifacts".to_string()))
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:multicolored").unwrap(),
+            Keyword::Protection(ProtectionTarget::Multicolored)
         );
     }
 

@@ -187,16 +187,27 @@ pub fn validate_blockers(
             ));
         }
 
-        // Protection: creature with protection from a color can't be blocked by
-        // creatures of that color
+        // Protection: creature with protection from a quality can't be blocked by
+        // creatures matching that quality
         for kw in &attacker.keywords {
-            if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
-                if blocker.color.contains(color) {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from {:?})",
-                        blocker_id, attacker_id, color
-                    ));
+            match kw {
+                Keyword::Protection(ProtectionTarget::Color(color)) => {
+                    if blocker.color.contains(color) {
+                        return Err(format!(
+                            "{:?} cannot block {:?} (protection from {:?})",
+                            blocker_id, attacker_id, color
+                        ));
+                    }
                 }
+                Keyword::Protection(ProtectionTarget::Multicolored) => {
+                    if blocker.color.len() > 1 {
+                        return Err(format!(
+                            "{:?} cannot block {:?} (protection from multicolored)",
+                            blocker_id, attacker_id
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
 

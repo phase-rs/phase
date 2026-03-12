@@ -179,6 +179,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     });
     pos += ctrl_len;
 
+    // Check "with power N or less/greater" suffix
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     let filter = TargetFilter::Typed {
         card_type,
         subtype,
@@ -266,6 +272,28 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
         }
     }
     None
+}
+
+/// Parse "with power N or less" / "with power N or greater" suffix.
+/// Returns (FilterProp, bytes consumed from the original text).
+fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("with power ")?;
+    let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if num_end == 0 {
+        return None;
+    }
+    let value: i32 = rest[..num_end].parse().ok()?;
+    let after_num = rest[num_end..].trim_start();
+
+    let (prop, after) = if let Some(a) = after_num.strip_prefix("or less") {
+        (FilterProp::PowerLE { value }, a)
+    } else if let Some(a) = after_num.strip_prefix("or greater") {
+        (FilterProp::PowerGE { value }, a)
+    } else {
+        return None;
+    };
+    Some((prop, text.len() - after.len()))
 }
 
 fn typed(
@@ -481,6 +509,36 @@ mod tests {
                 properties: vec![FilterProp::HasColor {
                     color: "Red".to_string()
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn creature_you_control_with_power_2_or_less() {
+        let (f, rest) = parse_type_phrase("creature you control with power 2 or less enter");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::PowerLE { value: 2 }],
+            }
+        );
+        // Remaining text should be the event verb
+        assert!(rest.trim_start().starts_with("enter"), "rest = {:?}", rest);
+    }
+
+    #[test]
+    fn creature_with_power_3_or_greater() {
+        let (f, _) = parse_type_phrase("creature with power 3 or greater");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::PowerGE { value: 3 }],
             }
         );
     }

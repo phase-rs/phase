@@ -132,6 +132,51 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         });
     }
 
+    // --- "During your turn, ~ has [keyword]" ---
+    if let Some(rest) = lower.strip_prefix("during your turn, ") {
+        let original_rest = &text["during your turn, ".len()..];
+        // Expect "~ has {keyword}" or "this creature has {keyword}"
+        if let Some(has_pos) = rest.find(" has ") {
+            let keyword_text = rest[has_pos + 5..].trim().trim_end_matches('.');
+            let mut modifications = Vec::new();
+            for kw_part in keyword_text.split(" and ") {
+                let kw_part = kw_part.trim().trim_end_matches('.');
+                if let Some(kw) = map_keyword(kw_part) {
+                    modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+                }
+            }
+            if !modifications.is_empty() {
+                return Some(StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: Some(TargetFilter::SelfRef),
+                    modifications,
+                    condition: Some(StaticCondition::DuringYourTurn),
+                    affected_zone: None,
+                    effect_zone: None,
+                    characteristic_defining: false,
+                    description: Some(text.to_string()),
+                });
+            }
+        }
+        // Fallback: "during your turn, ~ gets +N/+M"
+        if let Some(gets_pos) = rest.find(" gets ") {
+            let mods_text = &original_rest[gets_pos + 6..];
+            let modifications = parse_continuous_modifications(mods_text);
+            if !modifications.is_empty() {
+                return Some(StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: Some(TargetFilter::SelfRef),
+                    modifications,
+                    condition: Some(StaticCondition::DuringYourTurn),
+                    affected_zone: None,
+                    effect_zone: None,
+                    characteristic_defining: false,
+                    description: Some(text.to_string()),
+                });
+            }
+        }
+    }
+
     // --- "~ has [keyword] as long as ..." (must be before generic self-ref "has") ---
     if let Some(has_pos) = lower.find(" has ") {
         if let Some(cond_pos) = lower.find(" as long as ") {
@@ -849,6 +894,20 @@ mod tests {
             .modifications
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Vigilance,
+            }));
+    }
+
+    #[test]
+    fn during_your_turn_has_lifelink() {
+        let def =
+            parse_static_line("During your turn, this creature has lifelink.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink,
             }));
     }
 }

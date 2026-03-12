@@ -242,12 +242,22 @@ fn can_target(
     }
     // Protection: can't be targeted by sources with the protected quality
     for kw in &obj.keywords {
-        if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
-            if let Some(source_obj) = state.objects.get(&source_id) {
-                if source_obj.color.contains(color) {
-                    return false;
+        match kw {
+            Keyword::Protection(ProtectionTarget::Color(color)) => {
+                if let Some(source_obj) = state.objects.get(&source_id) {
+                    if source_obj.color.contains(color) {
+                        return false;
+                    }
                 }
             }
+            Keyword::Protection(ProtectionTarget::Multicolored) => {
+                if let Some(source_obj) = state.objects.get(&source_id) {
+                    if source_obj.color.len() > 1 {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     // Ward: targeting is legal, cost enforcement deferred to mana payment UI
