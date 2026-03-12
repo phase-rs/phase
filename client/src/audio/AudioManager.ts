@@ -102,7 +102,7 @@ class AudioManager {
     if (!this.ctx || !this.musicGain) return;
 
     const prefs = usePreferencesStore.getState();
-    if (prefs.musicMuted && prefs.masterMuted) return;
+    if (prefs.musicMuted || prefs.masterMuted) return;
 
     this.trackOrder = shuffle([...MUSIC_TRACKS]);
     this.trackIndex = 0;
@@ -210,7 +210,9 @@ class AudioManager {
       this.crossfadeTo(this.nextTrackIndex());
     });
 
-    audio.play();
+    audio.play().catch(() => {
+      usePreferencesStore.getState().setMasterMuted(true);
+    });
   }
 
   private crossfadeTo(nextIndex: number, duration = 2.5): void {
@@ -218,7 +220,8 @@ class AudioManager {
 
     const now = this.ctx.currentTime;
     const prefs = usePreferencesStore.getState();
-    const targetVolume = prefs.musicMuted ? 0 : prefs.musicVolume / 100;
+    const targetVolume =
+      prefs.masterMuted || prefs.musicMuted ? 0 : prefs.musicVolume / 100;
 
     // Fade out current
     this.musicGain.gain.cancelScheduledValues(now);
