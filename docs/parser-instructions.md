@@ -188,6 +188,71 @@ never `Fixed(0)` as a sentinel value.
 
 ---
 
+## Self-Reference Normalization (`~`)
+
+Before any condition or effect text is parsed, `normalize_self_refs` replaces the card's own name
+and phrases like "this creature", "this enchantment", "this artifact" with `~` (tilde). This
+normalization happens in the trigger parser (`oracle_trigger.rs`) but the effect parser also
+receives `~`-normalized text when parsing trigger effects.
+
+**Rule:** Any parser function that checks for self-references must recognize `~` alongside explicit
+phrases like "this creature" or "it". `parse_target` in `oracle_target.rs` handles `~` → `SelfRef`
+at the root level, so any effect that delegates to `parse_target` automatically gets this behavior.
+
+```
+"put a +1/+1 counter on Ajani's Pridemate"
+  → normalize_self_refs → "put a +1/+1 counter on ~"
+  → try_parse_put_counter → PutCounter { target: SelfRef }  ✅
+```
+
+---
+
+## Trigger Parser — Subject + Event Decomposition
+
+`oracle_trigger.rs` parses trigger conditions into `TriggerDefinition` structs. The parser uses a
+**subject + event decomposition** pattern:
+
+```
+parse_trigger_line(text, card_name)
+  └── normalize_self_refs()              # card name / "this creature" → ~
+  └── split_trigger()                    # split "condition, effect" at first ", "
+  └── parse_trigger_condition(condition) # decompose into subject + event
+        ├── try_parse_phase_trigger()     # "At the beginning of..."
+        ├── try_parse_player_trigger()    # "you gain life", "you cast a spell"
+        └── parse_trigger_subject()       # "~", "another creature you control", "a creature"
+            └── try_parse_event()         # "enters", "dies", "attacks", "deals damage"
+                └── try_parse_counter_trigger()  # "counter is put on ~"
+  └── parse_trigger_constraint()         # "triggers only once each turn"
+```
+
+### Adding a new trigger event
+
+1. Add a pattern in `try_parse_event()` matching the event verb (e.g. `"leaves the battlefield"`).
+2. Set the appropriate `TriggerMode`, `origin`/`destination` zones, and wire the subject into
+   `valid_card` or `valid_source`.
+3. Add parser tests in the `tests` module.
+
+### Adding a new trigger subject
+
+1. Add a pattern in `parse_trigger_subject()` (e.g. `"each creature"`, `"a nontoken creature"`).
+2. Use `parse_type_phrase()` from `oracle_target.rs` for type/controller/property parsing.
+3. Compose with `FilterProp::Another` for exclusion patterns ("another creature").
+
+### Trigger constraints
+
+`TriggerConstraint` models rate-limiting on triggers:
+
+| Oracle text | Variant |
+|------------|---------|
+| "This ability triggers only once each turn." | `OncePerTurn` |
+| "This ability triggers only once." | `OncePerGame` |
+| "only during your turn" | `OnlyDuringYourTurn` |
+
+Parsed from the full trigger text in `parse_trigger_constraint()`. The runtime enforces constraints
+in `process_triggers()` using `(ObjectId, trigger_index)` tracking sets on `GameState`.
+
+---
+
 ## Common Pitfalls
 
 | Pitfall | Correct approach |
@@ -198,3 +263,5 @@ never `Fixed(0)` as a sentinel value.
 | Boolean flags on effect types | Use an enum variant |
 | `parse_number("equal to its power")` → `unwrap_or(1)` | Detect the "equal to" pattern first |
 | Hardcoding `amount: 1` as default when text is unparseable | Prefer `Unimplemented` so the gap is visible in coverage reports |
+| Not recognizing `~` as self-reference in effect parsers | Always check for `~` alongside "this creature", "it", etc. — `parse_target` handles this |
+| Monolithic condition parsing | Use subject+event decomposition — add subjects and events independently |
