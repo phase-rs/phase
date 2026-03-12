@@ -6,10 +6,36 @@ const FRAME_COLORS: Record<string, string> = {
   Green: "#00733E",
 };
 
+const LAND_SUBTYPE_COLORS: Record<string, string> = {
+  Plains: "White",
+  Island: "Blue",
+  Swamp: "Black",
+  Mountain: "Red",
+  Forest: "Green",
+};
+
+export function getCardDisplayColors(
+  color: string[],
+  isLand: boolean,
+  subtypes: string[],
+): string[] {
+  if (isLand && color.length === 0) {
+    return subtypes.flatMap((s) => (LAND_SUBTYPE_COLORS[s] ? [LAND_SUBTYPE_COLORS[s]] : []));
+  }
+  return color;
+}
+
 export function getFrameColor(colors: string[]): string {
   if (colors.length === 0) return "#8E8E8E";
   if (colors.length >= 2) return "#C9B037";
   return FRAME_COLORS[colors[0]] ?? "#8E8E8E";
+}
+
+export function getFrameGradient(colors: string[]): string {
+  if (colors.length === 0) return "#8E8E8E";
+  if (colors.length === 1) return FRAME_COLORS[colors[0]] ?? "#8E8E8E";
+  const hexes = colors.map((c) => FRAME_COLORS[c] ?? "#8E8E8E");
+  return `linear-gradient(to right, ${hexes.join(", ")})`;
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -34,6 +60,18 @@ export function getBevelBorderStyle(
   colors: string[],
   borderWidth = 3,
 ): React.CSSProperties {
+  if (colors.length >= 2) {
+    const first = FRAME_COLORS[colors[0]] ?? "#8E8E8E";
+    const last = FRAME_COLORS[colors[colors.length - 1]] ?? "#8E8E8E";
+    return {
+      borderWidth,
+      borderStyle: "solid",
+      borderTopColor: blend(first, "#ffffff", 0.3),
+      borderLeftColor: blend(first, "#ffffff", 0.4),
+      borderBottomColor: blend(last, "#000000", 0.3),
+      borderRightColor: blend(last, "#000000", 0.4),
+    };
+  }
   const base = getFrameColor(colors);
   return {
     borderWidth,

@@ -11,6 +11,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
+import { getCardDisplayColors } from "../card/cardFrame.ts";
 
 interface PermanentCardProps {
   objectId: number;
@@ -77,6 +78,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   if (!obj) return null;
 
+  const isLand = obj.card_types.core_types.includes("Land");
+  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
@@ -196,7 +199,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       ) : (
         <>
           <div className="relative z-10">
-            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={obj.color} isToken={obj.card_id === 0} />
+            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} />
           </div>
 
           {/* P/T box for creatures */}

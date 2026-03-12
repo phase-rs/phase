@@ -3,7 +3,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
-import { getFrameColor } from "./cardFrame.ts";
+import { getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
   objectId: number;
@@ -32,7 +32,9 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
   if (!obj) return null;
 
   const hasDfc = obj.back_face != null;
-  const frameColor = getFrameColor(obj.color);
+  const isLand = obj.card_types.core_types.includes("Land");
+  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
+  const frameGradient = getFrameGradient(displayColors);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);
   const devotionValue = obj.devotion ?? null;
@@ -81,7 +83,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         {/* 2. MAIN COLORED FRAME */}
         <div
           className="w-full h-full rounded-[3px] flex flex-col relative overflow-hidden shadow-[inset_0_1px_1px_rgba(255,255,255,0.3)]"
-          style={{ backgroundColor: frameColor }}
+          style={{ background: frameGradient }}
         >
           {/* Header Light Reflection Overlay */}
           <div className="absolute inset-x-0 top-0 h-[20px] bg-gradient-to-b from-white/40 to-transparent pointer-events-none z-10" />
