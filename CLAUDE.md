@@ -48,6 +48,7 @@ cargo test-all                      # cargo test --all
 cargo clippy-strict                 # clippy -D warnings
 cargo export-cards -- data/         # Run card-data-export binary
 cargo serve                         # Run phase-server (release)
+cargo coverage                      # Card support coverage report (reads data/card-data.json)
 ```
 
 ### WASM Build
@@ -78,7 +79,7 @@ pnpm tauri:build                    # Tauri desktop build
 
 ### Coverage Report
 ```bash
-cargo run --bin coverage-report -- data/        # Card support coverage (JSON report)
+cargo coverage                                  # Card support coverage (JSON report, alias)
 cargo run --bin coverage-report -- data/ --ci   # CI mode: exits 1 if gaps found
 ```
 

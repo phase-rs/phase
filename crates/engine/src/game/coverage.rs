@@ -83,39 +83,33 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let mut cards = Vec::new();
     let mut freq: HashMap<String, usize> = HashMap::new();
 
-    for (_key, card_rules) in card_db.iter() {
-        let faces = layout_faces(&card_rules.layout);
-        for face in &faces {
-            // Check if card is in a Standard set via set code in name suffix or metadata.
-            // Since our card data doesn't have set codes, we analyze ALL cards
-            // and report coverage. The set_code field is left empty for file-based cards.
-            let mut missing = Vec::new();
+    for (_key, face) in card_db.face_iter() {
+        let mut missing = Vec::new();
 
-            // Check abilities (SP$, AB$, DB$ lines)
-            check_abilities(&face.abilities, &mut missing);
+        // Check abilities (SP$, AB$, DB$ lines)
+        check_abilities(&face.abilities, &mut missing);
 
-            // Check triggers
-            check_triggers(&face.triggers, &trigger_registry, &mut missing);
+        // Check triggers
+        check_triggers(&face.triggers, &trigger_registry, &mut missing);
 
-            // Check keywords
-            check_keywords(&face.keywords, &mut missing);
+        // Check keywords
+        check_keywords(&face.keywords, &mut missing);
 
-            // Check static abilities
-            check_statics(&face.static_abilities, &static_registry, &mut missing);
+        // Check static abilities
+        check_statics(&face.static_abilities, &static_registry, &mut missing);
 
-            let supported = missing.is_empty();
+        let supported = missing.is_empty();
 
-            for m in &missing {
-                *freq.entry(m.clone()).or_default() += 1;
-            }
-
-            cards.push(CardCoverageResult {
-                card_name: face.name.clone(),
-                set_code: String::new(),
-                supported,
-                missing_handlers: missing,
-            });
+        for m in &missing {
+            *freq.entry(m.clone()).or_default() += 1;
         }
+
+        cards.push(CardCoverageResult {
+            card_name: face.name.clone(),
+            set_code: String::new(),
+            supported,
+            missing_handlers: missing,
+        });
     }
 
     let total_cards = cards.len();
@@ -198,24 +192,6 @@ pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
     summary.total_cards > 0 && summary.supported_cards == summary.total_cards
 }
 
-fn layout_faces(layout: &crate::types::card::CardLayout) -> Vec<&crate::types::card::CardFace> {
-    use crate::types::card::CardLayout;
-    match layout {
-        CardLayout::Single(face) => vec![face],
-        CardLayout::Split(a, b)
-        | CardLayout::Flip(a, b)
-        | CardLayout::Transform(a, b)
-        | CardLayout::Meld(a, b)
-        | CardLayout::Adventure(a, b)
-        | CardLayout::Modal(a, b)
-        | CardLayout::Omen(a, b) => vec![a, b],
-        CardLayout::Specialize(base, variants) => {
-            let mut faces = vec![base];
-            faces.extend(variants);
-            faces
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
