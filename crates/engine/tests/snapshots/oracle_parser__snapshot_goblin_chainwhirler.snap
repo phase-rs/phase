@@ -50,5 +50,6 @@ expression: result
     }
   ],
   "statics": [],
-  "replacements": []
+  "replacements": [],
+  "extractedKeywords": []
 }

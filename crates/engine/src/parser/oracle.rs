@@ -21,6 +21,9 @@ pub struct ParsedAbilities {
     pub triggers: Vec<TriggerDefinition>,
     pub statics: Vec<StaticDefinition>,
     pub replacements: Vec<ReplacementDefinition>,
+    /// Keywords extracted from Oracle text keyword-only lines (e.g. "Protection from multicolored").
+    /// Merged with MTGJSON keywords in the loader to form the complete keyword set.
+    pub extracted_keywords: Vec<Keyword>,
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -28,10 +31,14 @@ pub struct ParsedAbilities {
 /// Splits on newlines, strips reminder text, then classifies each line
 /// according to a priority table (keywords, enchant, equip, activated,
 /// triggered, static, replacement, spell effect, modal, loyalty, etc.).
+///
+/// `mtgjson_keyword_names` are the raw lowercased keyword names from MTGJSON
+/// (e.g. `["flying", "protection"]`). Used to identify keyword-only lines
+/// and to avoid re-extracting keywords MTGJSON already provides.
 pub fn parse_oracle_text(
     oracle_text: &str,
     card_name: &str,
-    keywords: &[Keyword],
+    mtgjson_keyword_names: &[String],
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
@@ -44,6 +51,7 @@ pub fn parse_oracle_text(
         triggers: Vec::new(),
         statics: Vec::new(),
         replacements: Vec::new(),
+        extracted_keywords: Vec::new(),
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
@@ -63,8 +71,9 @@ pub fn parse_oracle_text(
             continue;
         }
 
-        // Priority 1: keyword-only line
-        if is_keyword_only_line(&line, keywords) {
+        // Priority 1: keyword-only line — extract any keywords for the union set
+        if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+            result.extracted_keywords.extend(extracted);
             i += 1;
             continue;
         }
@@ -237,48 +246,103 @@ pub fn parse_oracle_text(
     result
 }
 
-/// Check if a line consists entirely of known keywords (comma-separated).
-/// If at least one part matches a provided keyword, and the remaining parts
-/// look like keyword-like text (e.g., "protection from X"), skip the whole line.
-fn is_keyword_only_line(line: &str, keywords: &[Keyword]) -> bool {
-    if keywords.is_empty() {
-        return false;
+/// Try to extract keywords from a keyword-only line (comma-separated).
+/// Returns `Some(keywords)` if the entire line consists of recognizable keywords
+/// AND at least one part matches an MTGJSON keyword name (preventing false positives
+/// from standalone ability lines like "Equip {1}").
+///
+/// Returns only keywords not already covered by MTGJSON names — these are typically
+/// parameterized keywords where MTGJSON lists the name (e.g. "Protection") but
+/// Oracle text has the full form (e.g. "Protection from multicolored").
+fn extract_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> Option<Vec<Keyword>> {
+    if mtgjson_keyword_names.is_empty() {
+        return None;
     }
 
     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
     if parts.is_empty() {
-        return false;
+        return None;
     }
 
-    // Build a set of lowercase keyword names from the provided keywords slice
-    let keyword_names: Vec<String> = keywords.iter().map(keyword_display_name).collect();
+    let mut any_mtgjson_match = false;
+    let mut new_keywords = Vec::new();
 
-    // Check that every part is either a known keyword or a keyword-like phrase
-    let mut any_matched = false;
     for part in &parts {
         let lower = part.to_lowercase();
-        if keyword_names.iter().any(|name| name == &lower) {
-            any_matched = true;
-            continue;
+
+        // Check if this part matches or extends an MTGJSON keyword name.
+        // Exact match: "flying" == "flying"
+        // Prefix match: "protection from multicolored" starts with "protection"
+        let mtgjson_match = mtgjson_keyword_names.iter().any(|name| {
+            lower == *name || lower.starts_with(&format!("{name} "))
+        });
+
+        if mtgjson_match {
+            any_mtgjson_match = true;
+
+            // Exact name match means MTGJSON already has the parsed keyword — skip
+            if mtgjson_keyword_names.contains(&lower) {
+                continue;
+            }
+
+            // Prefix match: Oracle text has more detail (e.g. "protection from red").
+            // Extract the full parameterized keyword.
+            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                new_keywords.push(kw);
+                continue;
+            }
         }
-        // "protection from ..." is a keyword phrase — always treat as keyword-like
-        if lower.starts_with("protection from") {
-            continue;
+
+        // Not an MTGJSON match — try parsing as any keyword (for keyword-only line validation)
+        if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if !matches!(kw, Keyword::Unknown(_)) {
+                continue;
+            }
         }
-        // Try parsing as a keyword via FromStr to catch common keywords not in the slice
-        let parsed: Keyword = lower.parse().unwrap();
-        if !matches!(parsed, Keyword::Unknown(_)) {
-            continue;
-        }
-        // Unknown part — not a keyword line
-        return false;
+
+        // Unrecognized part — not a keyword line
+        return None;
     }
 
-    any_matched
+    if any_mtgjson_match {
+        Some(new_keywords)
+    } else {
+        None
+    }
+}
+
+/// Parse a keyword from Oracle text format (natural language) into a `Keyword`.
+///
+/// Oracle text uses space-separated format: "protection from red", "ward {2}",
+/// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
+/// handling the "from" preposition used by protection keywords.
+fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
+    // First try direct parse (handles simple keywords like "flying")
+    let direct: Keyword = text.parse().unwrap();
+    if !matches!(direct, Keyword::Unknown(_)) {
+        return Some(direct);
+    }
+
+    // For parameterized keywords, find the first space to split name from parameter.
+    // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
+    // Oracle format: "ward {2}" → name="ward", rest="{2}"
+    let space_idx = text.find(' ')?;
+    let name = &text[..space_idx];
+    let rest = text[space_idx + 1..].trim();
+
+    // Strip "from" preposition (used by protection keywords)
+    let param = rest.strip_prefix("from ").unwrap_or(rest);
+
+    let colon_form = format!("{name}:{param}");
+    let parsed: Keyword = colon_form.parse().unwrap();
+    if matches!(parsed, Keyword::Unknown(_)) {
+        return None;
+    }
+    Some(parsed)
 }
 
 /// Get a lowercase display name for a keyword variant.
-fn keyword_display_name(keyword: &Keyword) -> String {
+pub fn keyword_display_name(keyword: &Keyword) -> String {
     match keyword {
         Keyword::Flying => "flying".to_string(),
         Keyword::FirstStrike => "first strike".to_string(),
@@ -788,9 +852,24 @@ mod tests {
         types: &[&str],
         subtypes: &[&str],
     ) -> ParsedAbilities {
+        let keyword_names: Vec<String> = kw.iter().map(keyword_display_name).collect();
         let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
         let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-        parse_oracle_text(text, name, kw, &types, &subtypes)
+        parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+
+    /// Parse with raw MTGJSON keyword names (for testing keyword extraction).
+    fn parse_with_keyword_names(
+        text: &str,
+        name: &str,
+        keyword_names: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let keyword_names: Vec<String> = keyword_names.iter().map(|s| s.to_string()).collect();
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
     #[test]
@@ -961,5 +1040,71 @@ mod tests {
         let r = parse("{T}: Add {W}.", "Mox Pearl", &[], &["Artifact"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+    }
+
+    #[test]
+    fn extracts_protection_keyword_from_oracle_text() {
+        use crate::types::keywords::ProtectionTarget;
+        // Soldier of the Pantheon: MTGJSON lists "Protection" as keyword name,
+        // Oracle text has the full "Protection from multicolored"
+        let r = parse_with_keyword_names(
+            "Protection from multicolored",
+            "Soldier of the Pantheon",
+            &["protection"], // MTGJSON keyword name (lowercased)
+            &["Creature"],
+            &["Human", "Soldier"],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        assert!(matches!(
+            &r.extracted_keywords[0],
+            Keyword::Protection(ProtectionTarget::Multicolored)
+        ));
+    }
+
+    #[test]
+    fn skips_keywords_already_in_mtgjson() {
+        // "Flying" is in MTGJSON — exact name match, should not be re-extracted
+        let r = parse_with_keyword_names(
+            "Flying",
+            "Serra Angel",
+            &["flying", "vigilance"],
+            &["Creature"],
+            &["Angel"],
+        );
+        assert!(r.extracted_keywords.is_empty());
+    }
+
+    #[test]
+    fn extracts_new_keywords_from_mixed_line() {
+        use crate::types::keywords::ProtectionTarget;
+        // "flying" exact-matches MTGJSON (skipped), "protection from red" prefix-matches (extracted)
+        let r = parse_with_keyword_names(
+            "Flying, protection from red",
+            "Test Card",
+            &["flying", "protection"],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        assert!(matches!(
+            &r.extracted_keywords[0],
+            Keyword::Protection(ProtectionTarget::Color(crate::types::mana::ManaColor::Red))
+        ));
+    }
+
+    #[test]
+    fn no_extraction_without_mtgjson_keywords() {
+        // Without MTGJSON keywords, keyword-only lines are not detected
+        // (prevents false positives like "Equip {1}" being eaten)
+        let r = parse_with_keyword_names(
+            "Equip {1}",
+            "Bonesplitter",
+            &[],
+            &["Artifact"],
+            &["Equipment"],
+        );
+        assert!(r.extracted_keywords.is_empty());
+        // Line should fall through to equip ability parsing
+        assert_eq!(r.abilities.len(), 1);
     }
 }

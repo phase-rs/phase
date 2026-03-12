@@ -143,7 +143,13 @@ fn main() {
 
 fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFace {
     let card_type = build_card_type(mtgjson);
-    let keywords: Vec<Keyword> = mtgjson
+    let mtgjson_keyword_names: Vec<String> = mtgjson
+        .keywords
+        .as_ref()
+        .map(|kws| kws.iter().map(|s| s.to_ascii_lowercase()).collect())
+        .unwrap_or_default();
+
+    let mut keywords: Vec<Keyword> = mtgjson
         .keywords
         .as_ref()
         .map(|kws| {
@@ -160,7 +166,10 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    let parsed = parse_oracle_text(oracle_text, face_name, &keywords, &types, &subtypes);
+    let parsed = parse_oracle_text(oracle_text, face_name, &mtgjson_keyword_names, &types, &subtypes);
+
+    // Merge keywords extracted from Oracle text with MTGJSON keywords
+    keywords.extend(parsed.extracted_keywords);
 
     let mana_cost = mtgjson
         .mana_cost

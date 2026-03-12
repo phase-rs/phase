@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
-assertion_line: 103
 expression: result
 ---
 {
@@ -28,5 +27,6 @@ expression: result
   ],
   "triggers": [],
   "statics": [],
-  "replacements": []
+  "replacements": [],
+  "extractedKeywords": []
 }

@@ -72,5 +72,6 @@ expression: result
       "valid_card": null,
       "description": "Combat damage that would be dealt by creatures you control can't be prevented."
     }
-  ]
+  ],
+  "extractedKeywords": []
 }

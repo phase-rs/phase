@@ -64,5 +64,6 @@ expression: result
       "description": null
     }
   ],
-  "replacements": []
+  "replacements": [],
+  "extractedKeywords": []
 }

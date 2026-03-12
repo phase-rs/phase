@@ -1,4 +1,4 @@
-use engine::parser::oracle::parse_oracle_text;
+use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::keywords::Keyword;
 
 fn parse(
@@ -8,9 +8,10 @@ fn parse(
     types: &[&str],
     subtypes: &[&str],
 ) -> engine::parser::oracle::ParsedAbilities {
+    let keyword_names: Vec<String> = keywords.iter().map(keyword_display_name).collect();
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    parse_oracle_text(oracle_text, card_name, keywords, &types, &subtypes)
+    parse_oracle_text(oracle_text, card_name, &keyword_names, &types, &subtypes)
 }
 
 #[test]

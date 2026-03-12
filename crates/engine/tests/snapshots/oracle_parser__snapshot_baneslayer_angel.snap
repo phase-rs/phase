@@ -6,5 +6,6 @@ expression: result
   "abilities": [],
   "triggers": [],
   "statics": [],
-  "replacements": []
+  "replacements": [],
+  "extractedKeywords": []
 }

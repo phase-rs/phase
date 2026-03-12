@@ -26,5 +26,6 @@ expression: result
   ],
   "triggers": [],
   "statics": [],
-  "replacements": []
+  "replacements": [],
+  "extractedKeywords": []
 }
